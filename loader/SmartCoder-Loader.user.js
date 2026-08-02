@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.1.3
+// @version      1.1.4
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
 // @match        *://*.eclinicalweb.com/*
 // @updateURL    https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
-// @downloadURL  https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -18,7 +17,7 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.1.3: userscript started.");
+  console.info("eCW SmartCoder Loader v1.1.4: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
