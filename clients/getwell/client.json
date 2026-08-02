@@ -1,6 +1,8 @@
 {
   "id": "getwell",
   "name": "Getwell",
+  "siteId": "nygwmcapp",
+  "hostnames": ["nygwmcapp.eclinicalweb.com"],
   "version": "3.8",
   "entry": "smartcoder.js",
   "enabled": true

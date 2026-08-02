@@ -98,6 +98,10 @@
       }
       ids.add(client.id);
       if (typeof client.name !== "string" || !client.name.trim()) throw new Error("A client has no name.");
+      if (!/^[a-z0-9-]+$/.test(client.siteId || "")) throw new Error(`${client.id} has an invalid site ID.`);
+      if (!Array.isArray(client.hostnames) || !client.hostnames.length || client.hostnames.some(hostname => !/^[a-z0-9.-]+$/i.test(hostname))) {
+        throw new Error(`${client.id} has an invalid hostname list.`);
+      }
       if (typeof client.version !== "string" || !client.version.trim()) throw new Error(`${client.id} has no version.`);
       if (typeof client.file !== "string" || client.file !== `clients/${client.id}/smartcoder.js`) {
         throw new Error(`${client.id} has an invalid script location.`);
@@ -179,6 +183,13 @@
     return readStorage(STORAGE.selectedClient) || "";
   }
 
+  function clientForCurrentHostname() {
+    const hostname = location.hostname.toLowerCase();
+    return registry && registry.clients.find(client =>
+      client.hostnames.some(value => value.toLowerCase() === hostname)
+    );
+  }
+
   function setStatus(message, level = "normal") {
     statusMessage = message;
     statusLevel = level;
@@ -207,7 +218,7 @@
 
     const selected = selectedClientId();
     const options = registry.clients.map(client =>
-      `<option value="${client.id}"${client.id === selected ? " selected" : ""}>${escapeHtml(client.name)} — v${escapeHtml(client.version)}</option>`
+      `<option value="${client.id}"${client.id === selected ? " selected" : ""}>${escapeHtml(client.name)} (${escapeHtml(client.siteId)}) — v${escapeHtml(client.version)}</option>`
     ).join("");
     const color = statusLevel === "error" ? "#b91c1c" : statusLevel === "warning" ? "#a16207" : "#64748b";
     const shortUserId = createUserId().split("-").slice(-1)[0].slice(-8);
@@ -276,7 +287,13 @@
       setStatus("Using saved client list. Reload or press Check updates to refresh.");
     }
 
-    const selected = selectedClientId();
+    let selected = selectedClientId();
+    const detectedClient = clientForCurrentHostname();
+    if (!selected && detectedClient) {
+      selected = detectedClient.id;
+      writeStorage(STORAGE.selectedClient, selected);
+      setStatus(`Automatically selected ${detectedClient.name} for ${detectedClient.siteId}.`);
+    }
     if (!selected) {
       setStatus("Select a client once; the choice will be remembered.", "warning");
       return;

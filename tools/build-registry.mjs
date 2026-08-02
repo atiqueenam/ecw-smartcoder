@@ -11,6 +11,8 @@ const registryFile = path.join(registryDirectory, "clients.json");
 const directoryEntries = await readdir(clientsDirectory, { withFileTypes: true });
 const clients = [];
 const seenIds = new Set();
+const seenSiteIds = new Set();
+const seenHostnames = new Set();
 
 for (const directoryEntry of directoryEntries) {
   if (!directoryEntry.isDirectory()) continue;
@@ -32,6 +34,22 @@ for (const directoryEntry of directoryEntries) {
   if (typeof config.name !== "string" || !config.name.trim()) {
     throw new Error(`${config.id}: name is required.`);
   }
+  if (!/^[a-z0-9-]+$/.test(config.siteId || "")) {
+    throw new Error(`${config.id}: siteId must contain lowercase letters, numbers, or hyphens only.`);
+  }
+  if (seenSiteIds.has(config.siteId)) throw new Error(`Duplicate siteId: ${config.siteId}`);
+  seenSiteIds.add(config.siteId);
+  if (!Array.isArray(config.hostnames) || !config.hostnames.length) {
+    throw new Error(`${config.id}: at least one hostname is required.`);
+  }
+  const hostnames = config.hostnames.map(hostname => String(hostname).trim().toLowerCase());
+  for (const hostname of hostnames) {
+    if (!/^[a-z0-9.-]+$/.test(hostname) || !hostname.includes(".")) {
+      throw new Error(`${config.id}: invalid hostname "${hostname}".`);
+    }
+    if (seenHostnames.has(hostname)) throw new Error(`Duplicate hostname: ${hostname}`);
+    seenHostnames.add(hostname);
+  }
   if (typeof config.version !== "string" || !config.version.trim()) {
     throw new Error(`${config.id}: version must be a non-empty string.`);
   }
@@ -48,6 +66,8 @@ for (const directoryEntry of directoryEntries) {
   clients.push({
     id: config.id,
     name: config.name.trim(),
+    siteId: config.siteId,
+    hostnames,
     version: config.version.trim(),
     file: `clients/${config.id}/${config.entry}`,
     sha256

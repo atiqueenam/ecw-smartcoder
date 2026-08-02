@@ -1,6 +1,8 @@
 {
   "id": "hasan-sheikh",
   "name": "Hasan Sheikh",
+  "siteId": "nyshpyapp",
+  "hostnames": ["nyshpyapp.eclinicalweb.com"],
   "version": "1.23",
   "entry": "smartcoder.js",
   "enabled": true

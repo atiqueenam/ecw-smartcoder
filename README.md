@@ -19,6 +19,12 @@ Tampermonkey will show an installation page. Install only this common loader and
 - The **Check updates / Refresh clients** button provides an explicit and reliable update check.
 - A changed script downloads only when its version or SHA-256 checksum changes.
 - Every browser profile receives a random local user ID. The ID is not sent to GitHub.
+- On first use, the loader automatically selects a client when the current eCW hostname matches that client's metadata. The dropdown remains available for manual changes.
+
+Current automatic site mappings:
+
+- `nyshpyapp.eclinicalweb.com` → Hasan Sheikh
+- `nygwmcapp.eclinicalweb.com` → Getwell
 
 Browsers do not expose a dependable difference between `F5` and `Ctrl+Shift+R` to page JavaScript, so either kind of reload checks for updates. The button is the clearest method.
 
@@ -32,6 +38,8 @@ Browsers do not expose a dependable difference between `F5` and `Ctrl+Shift+R` t
 {
   "id": "new-clinic",
   "name": "New Clinic",
+  "siteId": "newclinicapp",
+  "hostnames": ["newclinicapp.eclinicalweb.com"],
   "version": "1.0",
   "entry": "smartcoder.js",
   "enabled": true
