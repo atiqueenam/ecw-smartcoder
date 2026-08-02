@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.1.4
+// @version      1.2.6
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.1.4: userscript started.");
+  console.info("eCW SmartCoder Loader v1.2.6: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
@@ -29,7 +29,7 @@
   };
   const SESSION_FORCE_REFRESH = "ecw_smartcoder_force_refresh";
   const HEADER_STYLE_ID = "ecwSmartCoderLoaderHeaderStyle";
-  const CLIENT_SELECT_ID = "ecwSmartCoderClientSelect";
+  const CLIENT_PICKER_ID = "ecwSmartCoderClientPicker";
   const RELOAD_BUTTON_ID = "ecsHotReload";
 
   let registry = null;
@@ -83,12 +83,23 @@
     try { sessionStorage.setItem(SESSION_FORCE_REFRESH, "1"); } catch (_) {}
   }
 
-  // Wait for the authenticated eCW shell. The loader does not download or
-  // execute SmartCoder while a password/login form is displayed, preserving
-  // normal Google Password Manager autofill and save-password behavior.
+  function visiblePasswordFieldExists() {
+    return Array.from(document.querySelectorAll('input[type="password"]')).some(input => {
+      const style = getComputedStyle(input);
+      const rect = input.getBoundingClientRect();
+      return !input.disabled &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity || "1") > 0 &&
+        rect.width > 0 && rect.height > 0 &&
+        rect.bottom > 0 && rect.right > 0 &&
+        rect.top < window.innerHeight && rect.left < window.innerWidth;
+    });
+  }
+
   function authenticatedAppIsReady() {
     if (document.readyState === "loading" || !document.body) return false;
-    if (document.querySelector('input[type="password"]')) return false;
+    if (visiblePasswordFieldExists()) return false;
     return true;
   }
 
@@ -213,9 +224,6 @@
 
   function executeScript(client, code) {
     const sourceUrl = clientScriptUrl(client).replace(/\s/g, "%20");
-    // Supplying unsafeWindow as the script's window keeps the original
-    // client scripts connected to eCW page functions while downloads remain
-    // in Tampermonkey's permission-controlled request context.
     const run = new Function("window", `${code}\n//# sourceURL=${sourceUrl}`);
     run.call(unsafeWindow, unsafeWindow);
   }
@@ -231,34 +239,95 @@
     );
   }
 
+  // Minimal flat style — no blur/glass, small footprint so most of the
+  // header stays free for dragging the panel.
   function ensureHeaderStyle() {
-    if (document.getElementById(HEADER_STYLE_ID)) return;
+    const existing = document.getElementById(HEADER_STYLE_ID);
+    if (existing) existing.remove();
     const style = document.createElement("style");
     style.id = HEADER_STYLE_ID;
     style.textContent = `
-      #${CLIENT_SELECT_ID} {
-        box-sizing: border-box !important;
-        width: 132px !important;
-        height: 22px !important;
-        min-height: 22px !important;
-        margin: 0 !important;
-        padding: 0 20px 0 7px !important;
-        border: 1px solid rgba(255,255,255,.5) !important;
-        border-radius: 6px !important;
-        outline: none !important;
-        background: rgba(255,255,255,.16) !important;
-        color: #fff !important;
-        font: 700 11px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif !important;
-        cursor: pointer !important;
+      #${CLIENT_PICKER_ID}, #${CLIENT_PICKER_ID} * { box-sizing:border-box; }
+      #${CLIENT_PICKER_ID} { position:relative; width:88px; height:20px; flex:0 0 88px; }
+
+      #ecwSmartCoderClientButton {
+        width:88px; height:20px; margin:0; padding:0 6px;
+        display:flex; align-items:center; justify-content:space-between; gap:4px;
+        border:1px solid rgba(255,255,255,.45); border-radius:5px;
+        outline:none; cursor:pointer;
+        background:rgba(255,255,255,.16);
+        color:#fff;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+        font-size:10.5px; font-weight:600; line-height:14px;
+        transition:background .12s ease, border-color .12s ease;
       }
-      #${CLIENT_SELECT_ID}:hover, #${CLIENT_SELECT_ID}:focus {
-        background: rgba(255,255,255,.25) !important;
-        border-color: rgba(255,255,255,.8) !important;
+      #ecwSmartCoderClientButton:hover, #ecwSmartCoderClientButton:focus-visible {
+        border-color:rgba(255,255,255,.7);
+        background:rgba(255,255,255,.26);
       }
-      #${CLIENT_SELECT_ID} option { background:#fff !important; color:#0f172a !important; }
-      #${RELOAD_BUTTON_ID} svg { width:12px; height:12px; display:block; fill:none; stroke:currentColor; stroke-width:2.2; }
+      #ecwSmartCoderClientButton .ecw-sc-label {
+        min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+      }
+      #ecwSmartCoderClientButton .ecw-sc-chevron {
+        width:9px; height:9px; flex:0 0 9px; fill:none; stroke:currentColor;
+        stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; opacity:.85;
+        transition:transform .14s ease;
+      }
+      #${CLIENT_PICKER_ID}.open .ecw-sc-chevron { transform:rotate(180deg); }
+
+      #ecwSmartCoderClientMenu {
+        position:absolute; top:23px; left:0; z-index:2147483647;
+        width:132px; padding:3px; overflow:hidden;
+        border:1px solid #dbe5e9; border-radius:7px; background:#fff;
+        box-shadow:0 8px 20px rgba(15,23,42,.20), 0 2px 5px rgba(15,23,42,.08);
+      }
+      #ecwSmartCoderClientMenu[hidden] { display:none !important; }
+      #ecwSmartCoderClientMenu button {
+        width:100%; height:24px; margin:0 0 1px; padding:0 7px;
+        display:flex; align-items:center; gap:5px;
+        border:0; border-radius:4px; background:transparent; color:#1e293b;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+        font-size:11px; font-weight:600; line-height:14px; text-align:left; cursor:pointer;
+      }
+      #ecwSmartCoderClientMenu button:last-child { margin-bottom:0; }
+      #ecwSmartCoderClientMenu button:hover, #ecwSmartCoderClientMenu button:focus-visible {
+        outline:none; background:#f0fdfa; color:#0f766e;
+      }
+      #ecwSmartCoderClientMenu button.selected { background:#0f766e; color:#fff; }
+      #ecwSmartCoderClientMenu .ecw-sc-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      #ecwSmartCoderClientMenu .ecw-sc-check {
+        width:11px; height:11px; flex:0 0 11px; fill:none; stroke:currentColor;
+        stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round;
+        visibility:hidden;
+      }
+      #ecwSmartCoderClientMenu button.selected .ecw-sc-check { visibility:visible; }
+
+      #${RELOAD_BUTTON_ID} {
+        width:20px !important; height:20px !important; padding:0 !important;
+        display:inline-flex !important; align-items:center !important; justify-content:center !important;
+        border:1px solid rgba(255,255,255,.45) !important; border-radius:50% !important;
+        background:rgba(255,255,255,.16) !important; color:#fff !important; cursor:pointer !important;
+        transition:background .12s ease, border-color .12s ease !important;
+      }
+      #${RELOAD_BUTTON_ID}:hover {
+        border-color:rgba(255,255,255,.7) !important;
+        background:rgba(255,255,255,.26) !important;
+      }
+      #${RELOAD_BUTTON_ID} svg {
+        width:13px; height:13px; display:block; fill:none; stroke:currentColor;
+        stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round;
+        shape-rendering:geometricPrecision;
+      }
       #${RELOAD_BUTTON_ID}.loading svg { animation:ecwLoaderSpin .7s linear infinite; }
       @keyframes ecwLoaderSpin { to { transform:rotate(360deg); } }
+
+      /* Bigger, easier target for the close/minimize (×) button now that
+         it sits right next to the reload button — reduces mis-clicks. */
+      #ecsClose {
+        width:24px !important; height:24px !important;
+        font-size:16px !important; line-height:24px !important;
+        display:inline-flex !important; align-items:center !important; justify-content:center !important;
+      }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -266,7 +335,7 @@
   function installHeaderControls() {
     const header = document.getElementById("ecsHeader");
     if (!header || !registry) return false;
-    if (document.getElementById(CLIENT_SELECT_ID)) return true;
+    if (document.getElementById(CLIENT_PICKER_ID)) return true;
 
     const title = Array.from(header.children).find(element =>
       element.tagName === "SPAN" && element.id !== "ecsHeaderBtns"
@@ -276,33 +345,76 @@
 
     ensureHeaderStyle();
     const selected = selectedClientId();
-    const select = document.createElement("select");
-    select.id = CLIENT_SELECT_ID;
-    select.title = "Select SmartCoder client";
-    select.setAttribute("aria-label", "SmartCoder client");
+    const selectedClient = registry.clients.find(client => client.id === selected) || registry.clients[0];
+
+    const picker = document.createElement("div");
+    picker.id = CLIENT_PICKER_ID;
+
+    const trigger = document.createElement("button");
+    trigger.id = "ecwSmartCoderClientButton";
+    trigger.type = "button";
+    trigger.title = "Select SmartCoder client";
+    trigger.setAttribute("aria-label", "SmartCoder client");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.innerHTML = `<span class="ecw-sc-label"></span><svg class="ecw-sc-chevron" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"></path></svg>`;
+    trigger.querySelector(".ecw-sc-label").textContent = selectedClient ? selectedClient.name : "Select";
+
+    const menu = document.createElement("div");
+    menu.id = "ecwSmartCoderClientMenu";
+    menu.hidden = true;
+    menu.setAttribute("role", "menu");
     for (const client of registry.clients) {
-      const option = document.createElement("option");
-      option.value = client.id;
-      option.textContent = client.name;
-      option.selected = client.id === selected;
-      select.appendChild(option);
+      const option = document.createElement("button");
+      option.type = "button";
+      option.dataset.clientId = client.id;
+      option.setAttribute("role", "menuitem");
+      if (client.id === selected) option.classList.add("selected");
+      option.innerHTML = `
+        <svg class="ecw-sc-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg>
+        <span class="ecw-sc-name"></span>
+      `;
+      option.querySelector(".ecw-sc-name").textContent = client.name;
+      option.addEventListener("mousedown", event => event.stopPropagation());
+      // Selecting a client reloads the page immediately, so there's no
+      // separate "reload" control needed anywhere in this header.
+      option.addEventListener("click", event => {
+        event.stopPropagation();
+        writeStorage(STORAGE.selectedClient, client.id);
+        markForcedRefresh();
+        location.reload();
+      });
+      menu.appendChild(option);
     }
-    select.addEventListener("mousedown", event => event.stopPropagation());
-    select.addEventListener("click", event => event.stopPropagation());
-    select.addEventListener("change", event => {
+    trigger.addEventListener("mousedown", event => event.stopPropagation());
+    trigger.addEventListener("click", event => {
       event.stopPropagation();
-      writeStorage(STORAGE.selectedClient, event.target.value);
-      markForcedRefresh();
-      location.reload();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      picker.classList.toggle("open", open);
+      trigger.setAttribute("aria-expanded", String(open));
     });
-    title.replaceWith(select);
+    picker.addEventListener("mousedown", event => event.stopPropagation());
+    picker.append(trigger, menu);
+    title.replaceWith(picker);
+    document.addEventListener("click", event => {
+      if (picker.contains(event.target)) return;
+      menu.hidden = true;
+      picker.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      menu.hidden = true;
+      picker.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+    });
 
     const reload = document.createElement("span");
     reload.id = RELOAD_BUTTON_ID;
     reload.title = "Check updates and reload";
     reload.setAttribute("role", "button");
     reload.setAttribute("aria-label", "Check SmartCoder updates and reload");
-    reload.innerHTML = '<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5.3"></path><path d="M20 4v7h-7"></path></svg>';
+    reload.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M19.1 15a8 8 0 1 1-.7-7.8L20 11"></path></svg>';
     reload.addEventListener("mousedown", event => event.stopPropagation());
     reload.addEventListener("click", event => {
       event.stopPropagation();
@@ -316,7 +428,11 @@
 
   function maintainHeaderControls() {
     installHeaderControls();
-    const observer = new MutationObserver(() => installHeaderControls());
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(installHeaderControls, 200);
+    });
     observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("hashchange", installHeaderControls);
   }
