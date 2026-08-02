@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.0.0
+// @version      1.1.0
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,8 +9,10 @@
 // @match        *://*.eclinicalweb.com/*
 // @updateURL    https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
 // @downloadURL  https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
+// @connect      raw.githubusercontent.com
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
@@ -25,13 +27,11 @@
     scriptPrefix: "ecw_smartcoder_script_"
   };
   const SESSION_FORCE_REFRESH = "ecw_smartcoder_force_refresh";
-  const UI_ID = "ecw-smartcoder-loader-ui";
+  const HEADER_STYLE_ID = "ecwSmartCoderLoaderHeaderStyle";
+  const CLIENT_SELECT_ID = "ecwSmartCoderClientSelect";
+  const RELOAD_BUTTON_ID = "ecsHotReload";
 
   let registry = null;
-  let uiHost = null;
-  let statusMessage = "Starting…";
-  let statusLevel = "normal";
-  let busy = false;
 
   function readStorage(key) {
     try { return localStorage.getItem(key); } catch (_) { return null; }
@@ -50,8 +50,9 @@
   function createUserId() {
     const existing = readStorage(STORAGE.userId);
     if (existing) return existing;
-    const id = window.crypto && typeof window.crypto.randomUUID === "function"
-      ? window.crypto.randomUUID()
+    const cryptoObject = window.crypto || unsafeWindow.crypto;
+    const id = cryptoObject && typeof cryptoObject.randomUUID === "function"
+      ? cryptoObject.randomUUID()
       : `sc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     writeStorage(STORAGE.userId, id);
     return id;
@@ -77,14 +78,53 @@
     }
   }
 
-  async function fetchText(url) {
-    const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "follow"
+  function markForcedRefresh() {
+    try { sessionStorage.setItem(SESSION_FORCE_REFRESH, "1"); } catch (_) {}
+  }
+
+  // Wait for the authenticated eCW shell. The loader does not download or
+  // execute SmartCoder while a password/login form is displayed, preserving
+  // normal Google Password Manager autofill and save-password behavior.
+  function authenticatedAppIsReady() {
+    if (document.readyState === "loading" || !document.body) return false;
+    if (document.querySelector('input[type="password"]')) return false;
+    return Boolean(document.querySelector("#topPanelUl1, #userProId, #encDropDownItem"));
+  }
+
+  function waitForAuthenticatedApp() {
+    if (authenticatedAppIsReady()) return Promise.resolve();
+    return new Promise(resolve => {
+      const check = () => {
+        if (!authenticatedAppIsReady()) return;
+        clearInterval(timer);
+        window.removeEventListener("hashchange", check);
+        window.removeEventListener("popstate", check);
+        resolve();
+      };
+      const timer = setInterval(check, 500);
+      window.addEventListener("hashchange", check);
+      window.addEventListener("popstate", check);
+      document.addEventListener("DOMContentLoaded", check, { once: true });
     });
-    if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}.`);
-    return response.text();
+  }
+
+  function downloadText(url) {
+    const requestUrl = `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: requestUrl,
+        timeout: 20000,
+        anonymous: true,
+        headers: { Accept: "text/plain, application/json;q=0.9, */*;q=0.8" },
+        onload(response) {
+          if (response.status >= 200 && response.status < 300) resolve(response.responseText);
+          else reject(new Error(`GitHub returned HTTP ${response.status}.`));
+        },
+        ontimeout() { reject(new Error("GitHub request timed out.")); },
+        onerror() { reject(new Error("Could not connect to GitHub.")); }
+      });
+    });
   }
 
   function validateRegistry(value) {
@@ -103,9 +143,7 @@
         throw new Error(`${client.id} has an invalid hostname list.`);
       }
       if (typeof client.version !== "string" || !client.version.trim()) throw new Error(`${client.id} has no version.`);
-      if (typeof client.file !== "string" || client.file !== `clients/${client.id}/smartcoder.js`) {
-        throw new Error(`${client.id} has an invalid script location.`);
-      }
+      if (client.file !== `clients/${client.id}/smartcoder.js`) throw new Error(`${client.id} has an invalid script location.`);
       if (!/^[a-f0-9]{64}$/i.test(client.sha256 || "")) throw new Error(`${client.id} has an invalid checksum.`);
     }
     return value;
@@ -118,15 +156,15 @@
   }
 
   async function downloadRegistry() {
-    const text = await fetchText(REGISTRY_URL);
-    const value = validateRegistry(JSON.parse(text));
+    const value = validateRegistry(JSON.parse(await downloadText(REGISTRY_URL)));
     writeStorage(STORAGE.registry, JSON.stringify(value));
     return value;
   }
 
   async function sha256(text) {
-    if (!window.crypto || !window.crypto.subtle) throw new Error("This browser cannot verify scripts securely.");
-    const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    const cryptoObject = window.crypto || unsafeWindow.crypto;
+    if (!cryptoObject || !cryptoObject.subtle) throw new Error("This browser cannot verify scripts securely.");
+    const digest = await cryptoObject.subtle.digest("SHA-256", new TextEncoder().encode(text));
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
@@ -149,12 +187,10 @@
 
   async function obtainClientScript(client) {
     const cached = cachedScript(client.id);
-    if (await cachedScriptIsValid(cached, client.sha256)) {
-      return { code: cached.code, source: "local cache", stale: false };
-    }
+    if (await cachedScriptIsValid(cached, client.sha256)) return { code: cached.code, stale: false };
 
     try {
-      const code = await fetchText(clientScriptUrl(client));
+      const code = await downloadText(clientScriptUrl(client));
       const actualHash = await sha256(code);
       if (actualHash !== client.sha256.toLowerCase()) {
         throw new Error(`Security check failed for ${client.name} v${client.version}.`);
@@ -164,10 +200,11 @@
         sha256: client.sha256.toLowerCase(),
         code
       }));
-      return { code, source: "GitHub", stale: false };
+      return { code, stale: false };
     } catch (downloadError) {
       if (cached && await cachedScriptIsValid(cached, cached.sha256)) {
-        return { code: cached.code, source: "older local cache", stale: true, warning: downloadError.message };
+        console.warn("eCW SmartCoder Loader: using older verified cached script.", downloadError);
+        return { code: cached.code, stale: true };
       }
       throw downloadError;
     }
@@ -175,8 +212,11 @@
 
   function executeScript(client, code) {
     const sourceUrl = clientScriptUrl(client).replace(/\s/g, "%20");
-    const run = new Function(`${code}\n//# sourceURL=${sourceUrl}`);
-    run.call(window);
+    // Supplying unsafeWindow as the script's window keeps the original
+    // client scripts connected to eCW page functions while downloads remain
+    // in Tampermonkey's permission-controlled request context.
+    const run = new Function("window", `${code}\n//# sourceURL=${sourceUrl}`);
+    run.call(unsafeWindow, unsafeWindow);
   }
 
   function selectedClientId() {
@@ -190,101 +230,112 @@
     );
   }
 
-  function setStatus(message, level = "normal") {
-    statusMessage = message;
-    statusLevel = level;
-    renderUi();
+  function ensureHeaderStyle() {
+    if (document.getElementById(HEADER_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = HEADER_STYLE_ID;
+    style.textContent = `
+      #${CLIENT_SELECT_ID} {
+        box-sizing: border-box !important;
+        width: 132px !important;
+        height: 22px !important;
+        min-height: 22px !important;
+        margin: 0 !important;
+        padding: 0 20px 0 7px !important;
+        border: 1px solid rgba(255,255,255,.5) !important;
+        border-radius: 6px !important;
+        outline: none !important;
+        background: rgba(255,255,255,.16) !important;
+        color: #fff !important;
+        font: 700 11px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif !important;
+        cursor: pointer !important;
+      }
+      #${CLIENT_SELECT_ID}:hover, #${CLIENT_SELECT_ID}:focus {
+        background: rgba(255,255,255,.25) !important;
+        border-color: rgba(255,255,255,.8) !important;
+      }
+      #${CLIENT_SELECT_ID} option { background:#fff !important; color:#0f172a !important; }
+      #${RELOAD_BUTTON_ID} svg { width:12px; height:12px; display:block; fill:none; stroke:currentColor; stroke-width:2.2; }
+      #${RELOAD_BUTTON_ID}.loading svg { animation:ecwLoaderSpin .7s linear infinite; }
+      @keyframes ecwLoaderSpin { to { transform:rotate(360deg); } }
+    `;
+    (document.head || document.documentElement).appendChild(style);
   }
 
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, character => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;"
-    })[character]);
-  }
+  function installHeaderControls() {
+    const header = document.getElementById("ecsHeader");
+    if (!header || !registry) return false;
+    if (document.getElementById(CLIENT_SELECT_ID)) return true;
 
-  function waitForBody() {
-    if (document.body) return Promise.resolve();
-    return new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
-  }
+    const title = Array.from(header.children).find(element =>
+      element.tagName === "SPAN" && element.id !== "ecsHeaderBtns"
+    );
+    const minimize = document.getElementById("ecsMinimize");
+    if (!title || !minimize) return false;
 
-  function renderUi() {
-    if (!document.body || !registry) return;
-    if (!uiHost || !uiHost.isConnected) {
-      uiHost = document.createElement("div");
-      uiHost.id = UI_ID;
-      document.body.appendChild(uiHost);
-      uiHost.attachShadow({ mode: "open" });
-    }
-
+    ensureHeaderStyle();
     const selected = selectedClientId();
-    const options = registry.clients.map(client =>
-      `<option value="${client.id}"${client.id === selected ? " selected" : ""}>${escapeHtml(client.name)} (${escapeHtml(client.siteId)}) — v${escapeHtml(client.version)}</option>`
-    ).join("");
-    const color = statusLevel === "error" ? "#b91c1c" : statusLevel === "warning" ? "#a16207" : "#64748b";
-    const shortUserId = createUserId().split("-").slice(-1)[0].slice(-8);
-
-    uiHost.shadowRoot.innerHTML = `
-      <style>
-        :host { all:initial; }
-        .card { position:fixed; right:12px; bottom:12px; z-index:2147483647; box-sizing:border-box;
-          width:232px; padding:9px; border:1px solid #cbd5e1; border-radius:10px; background:#fff;
-          box-shadow:0 5px 18px rgba(15,23,42,.2); font:12px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
-        .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }
-        label { color:#0f172a; font-weight:750; }
-        .uid { color:#94a3b8; font-size:9.5px; }
-        select { box-sizing:border-box; width:100%; height:30px; padding:0 7px; border:1px solid #94a3b8;
-          border-radius:6px; background:#fff; color:#0f172a; font:12px "Segoe UI",Arial,sans-serif; }
-        button { width:100%; height:27px; margin-top:6px; border:0; border-radius:6px; background:#2563eb;
-          color:#fff; cursor:pointer; font:600 11px "Segoe UI",Arial,sans-serif; }
-        button:disabled { background:#94a3b8; cursor:wait; }
-        .status { margin-top:5px; color:${color}; font-size:10px; overflow-wrap:anywhere; }
-      </style>
-      <div class="card">
-        <div class="top"><label for="client">eCW SmartCoder client</label><span class="uid">ID ${escapeHtml(shortUserId)}</span></div>
-        <select id="client"${busy ? " disabled" : ""}>
-          <option value="">Choose a client…</option>${options}
-        </select>
-        <button id="refresh" type="button"${busy ? " disabled" : ""}>${busy ? "Checking…" : "Check updates / Refresh clients"}</button>
-        <div class="status">${escapeHtml(statusMessage)}</div>
-      </div>`;
-
-    uiHost.shadowRoot.getElementById("client").addEventListener("change", event => {
+    const select = document.createElement("select");
+    select.id = CLIENT_SELECT_ID;
+    select.title = "Select SmartCoder client";
+    select.setAttribute("aria-label", "SmartCoder client");
+    for (const client of registry.clients) {
+      const option = document.createElement("option");
+      option.value = client.id;
+      option.textContent = client.name;
+      option.selected = client.id === selected;
+      select.appendChild(option);
+    }
+    select.addEventListener("mousedown", event => event.stopPropagation());
+    select.addEventListener("click", event => event.stopPropagation());
+    select.addEventListener("change", event => {
+      event.stopPropagation();
       writeStorage(STORAGE.selectedClient, event.target.value);
-      try { sessionStorage.setItem(SESSION_FORCE_REFRESH, "1"); } catch (_) {}
+      markForcedRefresh();
       location.reload();
-    }, { once: true });
+    });
+    title.replaceWith(select);
 
-    uiHost.shadowRoot.getElementById("refresh").addEventListener("click", () => {
-      try { sessionStorage.setItem(SESSION_FORCE_REFRESH, "1"); } catch (_) {}
+    const reload = document.createElement("span");
+    reload.id = RELOAD_BUTTON_ID;
+    reload.title = "Check updates and reload";
+    reload.setAttribute("role", "button");
+    reload.setAttribute("aria-label", "Check SmartCoder updates and reload");
+    reload.innerHTML = '<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5.3"></path><path d="M20 4v7h-7"></path></svg>';
+    reload.addEventListener("mousedown", event => event.stopPropagation());
+    reload.addEventListener("click", event => {
+      event.stopPropagation();
+      reload.classList.add("loading");
+      markForcedRefresh();
       location.reload();
-    }, { once: true });
+    });
+    minimize.replaceWith(reload);
+    return true;
+  }
+
+  function maintainHeaderControls() {
+    installHeaderControls();
+    const observer = new MutationObserver(() => installHeaderControls());
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("hashchange", installHeaderControls);
   }
 
   async function start() {
+    await waitForAuthenticatedApp();
     createUserId();
+
     const localRegistry = cachedRegistry();
     const shouldRefresh = consumeForcedRefresh() || isBrowserReload() || !localRegistry;
-
     if (shouldRefresh) {
-      busy = true;
-      registry = localRegistry || { schemaVersion: 1, clients: [] };
-      await waitForBody();
-      setStatus("Checking GitHub for client updates…");
       try {
         registry = await downloadRegistry();
-        setStatus("Client list is current.");
       } catch (error) {
         if (!localRegistry) throw error;
         registry = localRegistry;
-        setStatus(`GitHub unavailable; using saved client list. ${error.message}`, "warning");
-      } finally {
-        busy = false;
-        renderUi();
+        console.warn("eCW SmartCoder Loader: GitHub unavailable; using saved registry.", error);
       }
     } else {
       registry = localRegistry;
-      await waitForBody();
-      setStatus("Using saved client list. Reload or press Check updates to refresh.");
     }
 
     let selected = selectedClientId();
@@ -292,35 +343,20 @@
     if (!selected && detectedClient) {
       selected = detectedClient.id;
       writeStorage(STORAGE.selectedClient, selected);
-      setStatus(`Automatically selected ${detectedClient.name} for ${detectedClient.siteId}.`);
     }
-    if (!selected) {
-      setStatus("Select a client once; the choice will be remembered.", "warning");
-      return;
-    }
+    if (!selected) throw new Error(`No SmartCoder client is configured for ${location.hostname}.`);
 
     const client = registry.clients.find(item => item.id === selected);
     if (!client) {
       writeStorage(STORAGE.selectedClient, "");
-      setStatus("The saved client is unavailable. Select a client.", "warning");
-      return;
+      throw new Error("The saved SmartCoder client is no longer available.");
     }
 
-    setStatus(`Loading ${client.name} v${client.version}…`);
     const script = await obtainClientScript(client);
     executeScript(client, script.code);
-    if (script.stale) {
-      setStatus(`${client.name} is running from an older verified cache. ${script.warning}`, "warning");
-    } else {
-      setStatus(`${client.name} v${client.version} active from ${script.source}.`);
-    }
+    maintainHeaderControls();
+    console.info(`eCW SmartCoder Loader: ${client.name} v${client.version} active${script.stale ? " from older cache" : ""}.`);
   }
 
-  start().catch(async error => {
-    await waitForBody();
-    if (!registry) registry = { schemaVersion: 1, clients: [] };
-    busy = false;
-    setStatus(error && error.message ? error.message : String(error), "error");
-    console.error("eCW SmartCoder Loader:", error);
-  });
+  start().catch(error => console.error("eCW SmartCoder Loader:", error));
 })();
