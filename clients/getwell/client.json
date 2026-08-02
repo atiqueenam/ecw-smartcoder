@@ -1,0 +1,7 @@
+{
+  "id": "getwell",
+  "name": "Getwell",
+  "version": "3.8",
+  "entry": "smartcoder.js",
+  "enabled": true
+}
