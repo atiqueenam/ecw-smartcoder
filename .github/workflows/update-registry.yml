@@ -1,0 +1,40 @@
+name: Update client registry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/**"
+      - "tools/build-registry.mjs"
+      - ".github/workflows/update-registry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate clients and create registry
+        run: node tools/build-registry.mjs
+
+      - name: Commit updated registry
+        run: |
+          if git diff --quiet -- registry/clients.json; then
+            echo "Registry is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add registry/clients.json
+          git commit -m "Update generated client registry"
+          git push
