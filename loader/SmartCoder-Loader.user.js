@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.1.1
+// @version      1.1.2
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -17,6 +17,8 @@
 
 (function () {
   "use strict";
+
+  console.info("eCW SmartCoder Loader v1.1.2: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
@@ -88,18 +90,12 @@
   function authenticatedAppIsReady() {
     if (document.readyState === "loading" || !document.body) return false;
     if (document.querySelector('input[type="password"]')) return false;
-    const hasAuthenticatedShellElement = Boolean(
-      document.querySelector("#topPanelUl1, #userProId, #encDropDownItem")
-    );
     const pathname = location.pathname.toLowerCase();
-    const hash = decodeURIComponent(location.hash || "").toLowerCase();
     const isKnownClientHost = [
       "nyshpyapp.eclinicalweb.com",
       "nygwmcapp.eclinicalweb.com"
     ].includes(location.hostname.toLowerCase());
-    const isWebEmrRoute = pathname.includes("/mobiledoc/jsp/webemr/") &&
-      hash.includes("/mobiledoc/jsp/webemr/");
-    return hasAuthenticatedShellElement || (isKnownClientHost && isWebEmrRoute);
+    return isKnownClientHost && pathname.includes("/mobiledoc/jsp/webemr/");
   }
 
   function waitForAuthenticatedApp() {
