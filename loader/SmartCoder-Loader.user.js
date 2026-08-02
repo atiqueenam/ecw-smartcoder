@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.1.0
+// @version      1.1.1
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -88,7 +88,18 @@
   function authenticatedAppIsReady() {
     if (document.readyState === "loading" || !document.body) return false;
     if (document.querySelector('input[type="password"]')) return false;
-    return Boolean(document.querySelector("#topPanelUl1, #userProId, #encDropDownItem"));
+    const hasAuthenticatedShellElement = Boolean(
+      document.querySelector("#topPanelUl1, #userProId, #encDropDownItem")
+    );
+    const pathname = location.pathname.toLowerCase();
+    const hash = decodeURIComponent(location.hash || "").toLowerCase();
+    const isKnownClientHost = [
+      "nyshpyapp.eclinicalweb.com",
+      "nygwmcapp.eclinicalweb.com"
+    ].includes(location.hostname.toLowerCase());
+    const isWebEmrRoute = pathname.includes("/mobiledoc/jsp/webemr/") &&
+      hash.includes("/mobiledoc/jsp/webemr/");
+    return hasAuthenticatedShellElement || (isKnownClientHost && isWebEmrRoute);
   }
 
   function waitForAuthenticatedApp() {
