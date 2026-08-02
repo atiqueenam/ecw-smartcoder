@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.1.2
+// @version      1.1.3
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.1.2: userscript started.");
+  console.info("eCW SmartCoder Loader v1.1.3: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
@@ -90,12 +90,7 @@
   function authenticatedAppIsReady() {
     if (document.readyState === "loading" || !document.body) return false;
     if (document.querySelector('input[type="password"]')) return false;
-    const pathname = location.pathname.toLowerCase();
-    const isKnownClientHost = [
-      "nyshpyapp.eclinicalweb.com",
-      "nygwmcapp.eclinicalweb.com"
-    ].includes(location.hostname.toLowerCase());
-    return isKnownClientHost && pathname.includes("/mobiledoc/jsp/webemr/");
+    return true;
   }
 
   function waitForAuthenticatedApp() {
@@ -329,6 +324,7 @@
 
   async function start() {
     await waitForAuthenticatedApp();
+    console.info("eCW SmartCoder Loader: authenticated page ready.");
     createUserId();
 
     const localRegistry = cachedRegistry();
@@ -344,6 +340,7 @@
     } else {
       registry = localRegistry;
     }
+    console.info(`eCW SmartCoder Loader: registry ready with ${registry.clients.length} clients.`);
 
     let selected = selectedClientId();
     const detectedClient = clientForCurrentHostname();
@@ -358,9 +355,12 @@
       writeStorage(STORAGE.selectedClient, "");
       throw new Error("The saved SmartCoder client is no longer available.");
     }
+    console.info(`eCW SmartCoder Loader: selected ${client.name} for ${location.hostname}.`);
 
     const script = await obtainClientScript(client);
+    console.info(`eCW SmartCoder Loader: ${client.name} script verified.`);
     executeScript(client, script.code);
+    console.info(`eCW SmartCoder Loader: ${client.name} script executed.`);
     maintainHeaderControls();
     console.info(`eCW SmartCoder Loader: ${client.name} v${client.version} active${script.stale ? " from older cache" : ""}.`);
   }
