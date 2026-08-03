@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.2
+// @name         Getwell SmartCoder by ATQ v4.3
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,14 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 4.3 (2026-08-03) - Added EKG-in-CC detection: mentioning EKG/ECG in the
+//   Chief Complaint now proposes 93000 in Analyze. Add-only — 93000 is not
+//   in MANAGED_CODES, so it's never proposed for deletion. Reads both the
+//   plain-text CC block and tracked-change <li section="Chief
+//   Complaint(s):"> elements directly, since the latter don't always show
+//   up in a plain-text scan.
 
 // CHANGELOG
 // 4.2 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
@@ -1459,17 +1467,6 @@
             }
         }
 
-        // ---- EKG in CC → 93000 ----
-        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        const ccText = ccRaw ? ccRaw[1] : '';
-        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
-        const ccDomText = ccDomItems.length
-            ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
-            : '';
-        if (/\bekg\b|\becg\b/i.test(ccText) || /\bekg\b|\becg\b/i.test(ccDomText)) {
-            desired.set('93000', 'EKG mentioned in CC');
-        }
-
         // ---- BP ----
         if (bp) {
             const [sys, dia] = bp.split('/').map(n => parseInt(n));
@@ -1514,6 +1511,22 @@
         // hyphen, or space between "H" and "pylori", any case.
         if (/\bh\.?\s*-?\s*pylori\b|\bhelicobacter\s+pylori\b/i.test(ccText)) {
             desired.set('83014', 'H. pylori mentioned in CC');
+        }
+
+        // ---- Chief Complaint: EKG → 93000 ----
+        // Add-only: 93000 is not in MANAGED_CODES, so it's never proposed
+        // for deletion — this rule only ever adds it. CC entries sometimes
+        // render as tracked-change <li section="Chief Complaint(s):"
+        // content="..."> elements rather than plain visible text, which
+        // don't reliably show up in document.body.innerText, so those
+        // elements are read directly as a second signal alongside the
+        // regex on the plain-text CC block.
+        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
+        const ccDomText = ccDomItems.length
+            ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
+            : '';
+        if (/\bekg\b|\becg\b/i.test(ccText) || /\bekg\b|\becg\b/i.test(ccDomText)) {
+            desired.set('93000', 'EKG mentioned in CC');
         }
 
         // ---- ICD grid: pain or M-code vs. none ----
