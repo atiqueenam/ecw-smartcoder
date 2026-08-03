@@ -1675,6 +1675,13 @@
             });
         }
 
+        // ---- EKG in CC  → 93000 ----
+        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
+        const ccText = ccRaw ? ccRaw[1] : '';
+        if (/\bekg\b|\becg\b/i.test(ccText)) {
+            desired.set('93000', 'EKG mentioned in CC');
+        }
+
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
         // Getwell always keeps a BMI code once BMI is documented — this
         // isn't gated on preventive-visit status. The correct Z68.xx code
