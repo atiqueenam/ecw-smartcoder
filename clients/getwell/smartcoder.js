@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.3
+// @name         Getwell SmartCoder by ATQ v4.4
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.4
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,14 +11,19 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.4 (2026-08-03) - EKG-in-CC detection wasn't firing even with the
+//   tracked-change <li> present. Broadened the DOM selector to be
+//   case-insensitive/substring-tolerant on the section attribute, and
+//   added a fallback that also matches any <li> nested under the
+//   containing <ul class="pn-sections-Chief Complaint(s):">, instead of
+//   requiring an exact attribute-value match. Still add-only (93000 is
+//   not in MANAGED_CODES). Getwell only — Hasan Sheikh untouched.
 // 4.3 (2026-08-03) - Added EKG-in-CC detection: mentioning EKG/ECG in the
 //   Chief Complaint now proposes 93000 in Analyze. Add-only — 93000 is not
 //   in MANAGED_CODES, so it's never proposed for deletion. Reads both the
 //   plain-text CC block and tracked-change <li section="Chief
 //   Complaint(s):"> elements directly, since the latter don't always show
 //   up in a plain-text scan.
-
-// CHANGELOG
 // 4.2 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
 //   now blocked by ANY 9-series CPT code already on the chart except 99000
 //   (blood draw never blocks), not just the Preventive/P-C bundle; still
@@ -1384,6 +1389,22 @@
         return takingLines.some(l => l.length > 8);
     }
 
+    // Some note content (e.g. tracked-change Chief Complaint <li> entries)
+    // can live inside a same-origin note iframe rather than the top
+    // document, where a plain document.querySelectorAll never finds them.
+    // Searches the top document first, then any same-origin iframes.
+    function queryAllFramesForSelector(selector) {
+        const results = [];
+        try { results.push(...document.querySelectorAll(selector)); } catch {}
+        const iframes = document.querySelectorAll('iframe');
+        for (const f of iframes) {
+            try {
+                if (f.contentDocument) results.push(...f.contentDocument.querySelectorAll(selector));
+            } catch {} // cross-origin iframe — can't access, skip
+        }
+        return results;
+    }
+
     function computeAnalysis() {
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
@@ -1517,11 +1538,14 @@
         // Add-only: 93000 is not in MANAGED_CODES, so it's never proposed
         // for deletion — this rule only ever adds it. CC entries sometimes
         // render as tracked-change <li section="Chief Complaint(s):"
-        // content="..."> elements rather than plain visible text, which
-        // don't reliably show up in document.body.innerText, so those
-        // elements are read directly as a second signal alongside the
-        // regex on the plain-text CC block.
-        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
+        // content="..."> elements (inside a <ul class="pn-sections-Chief
+        // Complaint(s):">) rather than plain visible text, which don't
+        // reliably show up in document.body.innerText. Those are read
+        // directly as a second signal, with a case-insensitive/substring
+        // selector so a trailing-colon or casing mismatch can't silently
+        // miss them, plus a fallback on the containing <ul> class.
+        const CC_LI_SELECTOR = '[section="Chief Complaint(s):"], [section*="Chief Complaint" i], ul[class*="Chief Complaint" i] li';
+        const ccDomItems = queryAllFramesForSelector(CC_LI_SELECTOR);
         const ccDomText = ccDomItems.length
             ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
             : '';
