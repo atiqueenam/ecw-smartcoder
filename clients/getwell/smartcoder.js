@@ -3847,7 +3847,10 @@
     const weekendOverrides = {}; // `${patientKey}_${dos}` -> true/false, manual override only
 
     function getWeekendKey() {
-        return `${getCurrentPatientKey()}_${getCurrentDOSStr()}`;
+        const pidKey = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
+            ? (window.__ecwPatientHistory.getCurrentKey() || "")
+            : "";
+        return `${pidKey}_${getCurrentDOSStr()}`;
     }
 
     function isWeekendEnabled() {
