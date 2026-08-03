@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.29
+// @name         Hasan Sheikh SmartCoder v1.30
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.30
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,12 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.30 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
+//   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
+//   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
+//   Obesity is on the chart (Smoking is still allowed alongside 99051).
 
 
 /* ============================================================
@@ -314,7 +320,21 @@
         }
         #ecsHeaderBtns span:hover { background: rgba(255,255,255,0.32); }
         #ecsBody { padding: 11px; color: #1e2937; }
-        .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; }
+        .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; display:flex; align-items:center; justify-content:space-between; }
+        .weekend-toggle { display:flex; align-items:center; gap:5px; cursor:pointer; text-transform:none; }
+        .weekend-toggle .weekend-label { font-size: 9px; font-weight: 800; color:#64748b; }
+        .weekend-toggle input { display:none; }
+        .weekend-toggle .weekend-slider {
+            width: 30px; height: 16px; border-radius: 999px; background: #cbd5e1;
+            position: relative; transition: background .15s ease; flex-shrink:0;
+        }
+        .weekend-toggle .weekend-slider::before {
+            content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+            border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+            transition: transform .15s ease;
+        }
+        .weekend-toggle input:checked + .weekend-slider { background: #2563eb; }
+        .weekend-toggle input:checked + .weekend-slider::before { transform: translateX(14px); }
         .top-info { display: flex; flex-direction: column; gap: 2px; margin-bottom: 9px; font-size: 11px; }
         .link-btn-row { gap: 6px; }
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
@@ -4164,6 +4184,87 @@
 
     // ====================== END IMPORTED MODULE: CLAIM LINK ======================
 
+    // ================= WEEKEND RULE (CPT 99051) =================
+    // 99051 = services provided on a weekend/holiday. Auto-detected from the
+    // current encounter's DOS (Sat/Sun or a listed federal holiday, 2026-2029),
+    // but always user-overridable via the toggle next to CURRENT ENCOUNTER.
+    // Rule: allowed alongside a plain visit or Smoking (SM) counseling;
+    // NEVER allowed alongside Preventive (PV), Preventive Counseling (P/C),
+    // or Obesity (OB) — those bundles auto-clear it.
+    const WEEKEND_HOLIDAYS = new Set([
+        // 2026
+        "01/01/2026", "01/19/2026", "02/16/2026", "05/25/2026", "06/19/2026",
+        "07/03/2026", "09/07/2026", "10/12/2026", "11/11/2026", "11/26/2026", "12/25/2026",
+        // 2027
+        "01/01/2027", "01/18/2027", "02/15/2027", "05/31/2027", "06/18/2027",
+        "07/05/2027", "09/06/2027", "10/11/2027", "11/11/2027", "11/25/2027", "12/24/2027",
+        // 2028 (New Year's Day observed 12/31/2027)
+        "12/31/2027", "01/17/2028", "02/21/2028", "05/29/2028", "06/19/2028",
+        "07/04/2028", "09/04/2028", "10/09/2028", "11/10/2028", "11/23/2028", "12/25/2028",
+        // 2029
+        "01/01/2029", "01/15/2029", "02/19/2029", "05/28/2029", "06/19/2029",
+        "07/04/2029", "09/03/2029", "10/08/2029", "11/12/2029", "11/22/2029", "12/25/2029",
+    ]);
+
+    function getCurrentDOSStr() {
+        return document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+    }
+
+    function isWeekendOrHolidayDOS(dosStr) {
+        const m = String(dosStr || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (!m) return false;
+        if (WEEKEND_HOLIDAYS.has(dosStr)) return true;
+        const day = new Date(+m[3], +m[1] - 1, +m[2]).getDay();
+        return day === 0 || day === 6;
+    }
+
+    const weekendOverrides = {}; // `${patientKey}_${dos}` -> true/false, manual override only
+
+    function getWeekendKey() {
+        return `${getCurrentPatientKey()}_${getCurrentDOSStr()}`;
+    }
+
+    function isWeekendEnabled() {
+        const key = getWeekendKey();
+        return Object.prototype.hasOwnProperty.call(weekendOverrides, key)
+            ? weekendOverrides[key]
+            : isWeekendOrHolidayDOS(getCurrentDOSStr());
+    }
+
+    function setWeekendOverride(val) {
+        weekendOverrides[getWeekendKey()] = val;
+    }
+
+    // Preventive, Preventive Counseling, and Obesity bundles all block 99051.
+    function hasWeekendBlockingCodes() {
+        return !!(
+            ALL_PREVENTIVE_EM_CODES.some(c => getCPTRowByCode(c)) ||
+            MEDICARE_AWV_CODES.some(c => getCPTRowByCode(c)) ||
+            getCPTRowByCode("99401") ||
+            getCPTRowByCode("G0447")
+        );
+    }
+
+    let weekendSyncing = false;
+    async function syncWeekendCode() {
+        if (weekendSyncing) return;
+        weekendSyncing = true;
+        try {
+            const has99051 = !!getCPTRowByCode("99051");
+            if (!isWeekendEnabled()) {
+                if (has99051) await deleteCPTCodesByCode(["99051"]);
+                return;
+            }
+            if (hasWeekendBlockingCodes()) {
+                if (has99051) await deleteCPTCodesByCode(["99051"]);
+            } else if (!has99051) {
+                await addSingleCPT("99051");
+            }
+        } finally {
+            weekendSyncing = false;
+        }
+    }
+
     // Auto Link (AL) button: runs on the billing tab (#billingTbl2/#billingTbl4).
     function runAutoLinkAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
@@ -4235,6 +4336,7 @@
             }
         } finally {
             quickActionRunning = false;
+            await syncWeekendCode();
             renderSnapshotBlock();
         }
     }
@@ -4282,6 +4384,7 @@
             await addSingleCPT("99401");
         } finally {
             quickActionRunning = false;
+            await syncWeekendCode();
             renderSnapshotBlock();
         }
     }
@@ -4302,6 +4405,7 @@
             await addSingleCPT("99406");
         } finally {
             quickActionRunning = false;
+            await syncWeekendCode();
             renderSnapshotBlock();
         }
     }
@@ -4331,6 +4435,7 @@
             await addSingleCPT("G0447");
         } finally {
             quickActionRunning = false;
+            await syncWeekendCode();
             renderSnapshotBlock();
         }
     }
@@ -4630,7 +4735,14 @@
                 <button id="ecsAutoLinkBtn" class="link-btn link-btn-al" title="Auto-link ICD/CPT on the billing tab">🔗 Auto Link</button>
                 <button id="ecsClaimLinkBtn" class="link-btn link-btn-cl" title="Claim Link rules on the Claim tab">📋 Claim Link</button>
             </div>
-            <div class="snapshot-header">CURRENT ENCOUNTER</div>
+            <div class="snapshot-header">
+                CURRENT ENCOUNTER
+                <label class="weekend-toggle" title="Weekend rule (99051)">
+                    <span class="weekend-label">Weekend</span>
+                    <input type="checkbox" id="ecsWeekendToggle" ${isWeekendEnabled() ? 'checked' : ''}>
+                    <span class="weekend-slider"></span>
+                </label>
+            </div>
             ${insurance ? `<div class="ins-line">🏥 ${escapeHtml(insurance)}</div>` : ''}
             <div class="top-info">
                 <span><b>Age:</b> ${age != null ? age + ' y' : '—'}</span>
@@ -4885,6 +4997,12 @@
                 else if (e.target.closest('#ecsObesityBtn')) runObesityAction();
                 else if (e.target.closest('#ecsAutoLinkBtn')) runAutoLinkAction();
                 else if (e.target.closest('#ecsClaimLinkBtn')) runClaimLinkAction();
+            });
+            body.addEventListener('change', (e) => {
+                if (e.target.closest('#ecsWeekendToggle')) {
+                    setWeekendOverride(!!e.target.checked);
+                    syncWeekendCode().then(renderSnapshotBlock);
+                }
             });
         }
     }
