@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.35
+// @name         Hasan Sheikh SmartCoder v1.36
 // @namespace    http://tampermonkey.net/
-// @version      1.35
+// @version      1.36
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.36 (2026-08-03) - Weekend/99051 is now also blocked whenever the
+//   insurance is UHC/United Healthcare/UMR/Oxford (UMR and Oxford are both
+//   UnitedHealthcare-owned brands), regardless of what else is on the
+//   chart. Doesn't touch the existing separate isUHCInsurance() used
+//   elsewhere in this file — this is its own check scoped only to the
+//   weekend rule.
 // 1.35 (2026-08-03) - Fixed 99051 self-blocking: after being added, 99051
 //   itself matched the "any 9-series CPT blocks" check (it starts with 9,
 //   isn't 99000, isn't an office-visit code) — so the recheck pass right
@@ -1512,12 +1518,17 @@
         // 99000 (blood draw) and the regular office-visit E&M codes
         // (OFFICE_VISIT_EM_CODES — every visit has one of these, so they
         // were wrongly blocking 99051 on every chart before this fix);
-        // the Medicare AWV G-codes; G0447 (Obesity); or a televisit (98012
+        // the Medicare AWV G-codes; G0447 (Obesity); a televisit (98012
         // present, or "televisit" in the HPI — same detection this file
         // already uses elsewhere, see the isTelevisitNote note near the
-        // office-visit E&M rule).
+        // office-visit E&M rule); or the insurance being UHC/United
+        // Healthcare/UMR/Oxford (UMR and Oxford are both UnitedHealthcare-
+        // owned brands) — 99051 is never used for that payer family
+        // regardless of what else is on the chart.
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
+        const isUHCFamilyForWeekend = !!insurance &&
+            /(united\s*health\s*care|unitedhealthcare|\buhc\b|\bumr\b|\boxford\b)/i.test(insurance);
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || /televisit/i.test(flags.hpiText);
             const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
@@ -1525,7 +1536,8 @@
             const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodeSet.has(c)) ||
                 rawCPTCodeSet.has('G0447') ||
-                isTelevisitForWeekend;
+                isTelevisitForWeekend ||
+                isUHCFamilyForWeekend;
             if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
         }
 
