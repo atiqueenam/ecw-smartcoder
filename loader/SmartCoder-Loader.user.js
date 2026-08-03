@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         eCW SmartCoder Client Loader
+// @name         eCW SmartCoder by ATQ
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
 // @version      1.2.7
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
