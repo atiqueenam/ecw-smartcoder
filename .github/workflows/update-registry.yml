@@ -2,7 +2,7 @@ name: Update client registry
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "clients/**"
       - "tools/build-registry.mjs"
