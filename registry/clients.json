@@ -9,7 +9,7 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "3.8",
+      "version": "4.1",
       "file": "clients/getwell/smartcoder.js",
       "sha256": "3f2f3d7e316a875033ab12f45084e7b8181188428fe840f827f80a8e82f8e881"
     },

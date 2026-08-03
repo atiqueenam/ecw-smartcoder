@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v3.9
+// @name         Getwell SmartCoder by ATQ v4.1
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      4.1
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,23 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.1 (2026-08-03) - BMI codes are now never blanket-deleted: removed
+//   3008F/G8417/G8418/G8420 from MANAGED_CODES, removed the
+//   hasPreventiveVisit gate on Z68.xx correction, and stopped quick actions
+//   from ever touching BMI Z68 codes (was clearing them on P/C and SM).
+//   BMI codes are only ever added (if missing) or corrected (wrong sibling
+//   swapped for the right one), never removed outright. Note: the existing
+//   United Healthcare rule that strips all G-codes for that payer still
+//   applies to BMI G-codes too — that's a separate payer-specific rule.
+//   Also added age-based Z00.01/Z00.121/Z00.129 detection to Analyze
+//   (Z00.129 is never used) and to the Preventive quick action, so adding
+//   the age-correct code now also removes whichever wrong sibling was
+//   already present.
+// 4.0 (2026-08-03) - Fixed a regression from the "bmi, obesity correction" dev
+//   commit: BMI CPT codes (3008F/G8417/G8418/G8420) had been gated on
+//   hasPreventiveVisit, so Analyze proposed deleting a correct BMI code on
+//   any non-preventive visit. BMI codes are desired whenever BMI is
+//   documented again, regardless of visit type — matches main's original rule.
 // 3.9 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
 //   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
 //   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
@@ -1049,7 +1066,6 @@
     // NOTE: 3014F / 3015F / 3017F (cancer screening) and 99000 (blood draw)
     // are add-only — never proposed for deletion. See below.
     const MANAGED_CODES = new Set([
-        '3008F', 'G8418', 'G8420', 'G8417',
         '3074F', '3075F', '3077F',
         '3078F', '3079F', '3080F',
         'G8752', 'G8753', 'G8754', 'G8755',
@@ -1060,6 +1076,10 @@
         'G8510', 'G8431', 'G9622', '3016F',
         'G9275', 'G9276', '1036F', '1000F',
         'G0136', '99051'
+        // NOTE: 3008F / G8417 / G8418 / G8420 (BMI) are deliberately NOT in
+        // this set — Getwell never blanket-deletes a BMI code. They're
+        // corrected (wrong sibling swapped) or added via dedicated logic
+        // below, never removed just for being "not desired" this run.
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
         // NOTE: 3044F/3051F/3052F/3046F (A1c bands) are also NOT in this
         // set anymore — they get explicit correction-only handling below,
@@ -1232,18 +1252,11 @@
 
     // Mutual exclusivity across PV/P-C/SM/OB. Clear only the other actions'
     // bundles; smoking and obesity diagnosis codes remain independent.
-    async function deleteAllBMIZ68Codes() {
-        let entry;
-        while ((entry = getICDRows().find(r => /^Z68\./i.test(r.code)))) {
-            await new Promise(resolve => deleteOneICDRow(entry.row, entry.code, resolve));
-        }
-    }
-
     async function clearOtherQuickActionBundles(current) {
         if (current !== 'pv') {
             await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
             await deleteCPTCodesByCode(MEDICARE_AWV_CODES);
-            await deleteICDCodesByCode(["Z00.01", "Z00.121"]);
+            await deleteICDCodesByCode(["Z00.01", "Z00.121", "Z00.129"]);
         }
         if (current !== 'pv' && current !== 'pc') {
             await deleteICDCodesByCode(["Z71.3", "Z71.82", "Z71.89"]);
@@ -1251,7 +1264,9 @@
         if (current !== 'pc') await deleteCPTCodesByCode(["99401"]);
         if (current !== 'sm') await deleteCPTCodesByCode(["99406"]);
         if (current !== 'ob') await deleteCPTCodesByCode(["G0447"]);
-        if (current !== 'pv' && current !== 'ob') await deleteAllBMIZ68Codes();
+        // BMI codes (Z68.xx ICD, 3008F/G8417/G8418/G8420 CPT) are never
+        // touched by quick actions — Getwell always keeps a BMI code once
+        // documented; only Analyze's correction logic may swap a wrong one.
     }
 
     // The visible #CPTCode box (eCW's markup can have more than one element
@@ -1421,14 +1436,14 @@
                 if (pedZ68Row) correctZ68Ped = pedZ68Row.code.toUpperCase();
             }
         }
-        if (bmi && hasPreventiveVisit) {
-            desired.set('3008F', 'BMI documented (preventive visit)');
+        if (bmi) {
+            desired.set('3008F', 'BMI documented');
             if (age >= 18) {
                 const bmiNum = parseFloat(bmi);
                 const gCode = bmiNum < 18 ? 'G8418' : (bmiNum < 26 ? 'G8420' : 'G8417');
-                desired.set(gCode, `BMI ${bmi} (preventive visit)`);
+                desired.set(gCode, `BMI ${bmi}`);
             } else if (correctZ68Ped) {
-                desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped} (preventive visit)`);
+                desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped}`);
             }
         }
 
@@ -1626,6 +1641,29 @@
             }
         }
 
+        // ---- BMI CPT G-code (G8417/G8418/G8420): never blanket-deleted
+        // (removed from MANAGED_CODES above). If the wrong sibling from
+        // this family is present, it gets swapped for the correct one;
+        // 3008F itself is just the "BMI documented" flag and is never
+        // touched here. ----
+        const BMI_GCODES = ['G8417', 'G8418', 'G8420'];
+        if (bmi) {
+            let correctBmiGCode = null;
+            if (age >= 18) {
+                const bmiNumForG = parseFloat(bmi);
+                correctBmiGCode = bmiNumForG < 18 ? 'G8418' : (bmiNumForG < 26 ? 'G8420' : 'G8417');
+            } else if (correctZ68Ped) {
+                correctBmiGCode = PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped];
+            }
+            if (correctBmiGCode) {
+                currentRows.forEach(r => {
+                    if (BMI_GCODES.includes(r.code) && r.code !== correctBmiGCode && !toDelete.some(d => d.code === r.code)) {
+                        toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: `Wrong BMI G-code (should be ${correctBmiGCode})` });
+                    }
+                });
+            }
+        }
+
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/
         // G0442) — this payer doesn't use G-codes at all.
@@ -1638,17 +1676,17 @@
         }
 
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
-        // The correct Z68.xx code is added if it's not already on the ICD
-        // list, and any OTHER Z68.xx code (wrong value for the current BMI)
-        // gets proposed for removal — same Analyze/Start Action flow as
-        // everything else, not just the quick-action buttons.
+        // Getwell always keeps a BMI code once BMI is documented — this
+        // isn't gated on preventive-visit status. The correct Z68.xx code
+        // is added if missing, and any OTHER Z68.xx code (wrong value for
+        // the current BMI) gets swapped out — never a blanket deletion.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
         if (correctZ68) {
             const icdEntriesForBMI = getICDRows();
             const currentZ68Entries = icdEntriesForBMI.filter(e => /^Z68\./i.test(e.code));
             const hasCorrectZ68 = currentZ68Entries.some(e => e.code.toUpperCase() === correctZ68.toUpperCase());
-            if (!hasCorrectZ68 && (currentZ68Entries.length > 0 || hasPreventiveVisit)) {
+            if (!hasCorrectZ68) {
                 toAdd.push({ code: correctZ68, reason: `BMI ${age >= 18 ? bmiNum : (bmiPercentile ? bmiPercentile + '%' : correctZ68)} — correct Z68.xx code`, kind: 'icd' });
             }
             currentZ68Entries.forEach(e => {
@@ -1712,7 +1750,27 @@
             });
         }
 
-        // ---- Office Visit E&M code (visit-type driven) ----
+        // ---- Z00.01 vs Z00.121 vs Z00.129 (preventive visit code, age-
+        // based): fix if wrong. Z00.129 is never used — if present it's
+        // always wrong. Only corrects when one of the three is ALREADY on
+        // the chart (added earlier by Preventive) — doesn't introduce a
+        // preventive diagnosis to a chart that never had one. ----
+        const Z00_FAMILY = ['Z00.01', 'Z00.121', 'Z00.129'];
+        const z00Entries = getICDRows().filter(e => Z00_FAMILY.includes(e.code.toUpperCase()));
+        if (z00Entries.length && age != null) {
+            const correctZ00 = age >= 18 ? 'Z00.01' : 'Z00.121';
+            const hasCorrectZ00 = z00Entries.some(e => e.code.toUpperCase() === correctZ00);
+            if (!hasCorrectZ00) {
+                toAdd.push({ code: correctZ00, reason: `Preventive visit code correction based on age ${age}`, kind: 'icd' });
+            }
+            z00Entries.forEach(e => {
+                if (e.code.toUpperCase() !== correctZ00) {
+                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong preventive visit code for age ${age} (should be ${correctZ00})` });
+                }
+            });
+        }
+
+
         // Suggests/corrects the office-visit CPT based on the appointment's
         // visit type + (for "complex" visit types) a chronic-disease count
         // from the ICD list. Shown at the TOP of Proposed Changes (unshift,
@@ -3903,7 +3961,9 @@
             const icdEntries = getICDGridEntriesFast();
 
             const codes = [];
-            codes.push(age >= 18 ? "Z00.01" : "Z00.121");
+            const correctZ00 = age >= 18 ? "Z00.01" : "Z00.121";
+            const wrongZ00 = ["Z00.01", "Z00.121", "Z00.129"].filter(c => c !== correctZ00);
+            codes.push(correctZ00);
             const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
             codes.push("Z71.3");
@@ -3919,8 +3979,9 @@
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
+            // Never deletes BMI Z68.xx here — that's Analyze's job only.
             await clearOtherQuickActionBundles('pv');
-            await deleteICDCodesByCode([z71Opposite]);
+            await deleteICDCodesByCode([z71Opposite, ...wrongZ00]);
             await addICDCodesFast(codes);
 
             if (isVNS) {
