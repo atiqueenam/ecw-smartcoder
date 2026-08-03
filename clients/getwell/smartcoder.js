@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.5
+// @name         Getwell SmartCoder by ATQ v4.6
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.6 (2026-08-03) - Diagnostic fix: Analyze had a try/catch that silently
+//   swallowed any error inside computeAnalysis() and fell back to an empty
+//   "Nothing to add / Nothing to remove" with no indication anything went
+//   wrong — reported as 99051 never being proposed even when it should
+//   qualify. Now logs the error to the browser console and shows an
+//   "Analyze failed: <message>" notice in the panel instead of a blank
+//   Proposed Changes list, so the actual failure is visible and fixable.
 // 4.5 (2026-08-03) - Fixed the Weekend/99051 blocking rule: the "any 9-series
 //   CPT blocks except 99000" check was also catching the regular
 //   office-visit E&M codes (99211-99215/99203, OFFICE_VISIT_EM_CODES),
@@ -4160,7 +4167,8 @@
             try {
                 analysisState = computeAnalysis();
             } catch (err) {
-                analysisState = { toAdd: [], toDelete: [] };
+                console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
+                analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
             }
             analysisRunning = false;
             renderSnapshotBlock();
@@ -4322,6 +4330,15 @@
         }
 
         if (analysisState) {
+            if (analysisState.error) {
+                return `<div class="ecs-analysis">
+                    <div class="ecs-analysis-title">Analyze failed</div>
+                    <div class="ecs-diff-empty" style="color:#dc2626;">${escapeHtml(analysisState.error)}</div>
+                    <div class="ecs-analysis-actions">
+                        <button id="ecsCancelBtn" class="ecs-btn">Close</button>
+                    </div>
+                </div>`;
+            }
             const { toAdd, toDelete } = analysisState;
             const addRows = toAdd.length
                 ? toAdd.map(a => `<div class="ecs-diff-row ecs-diff-add">+ <b>${escapeHtml(a.code)}</b><span>${escapeHtml(a.reason)}</span></div>`).join('')
