@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.34
+// @name         Hasan Sheikh SmartCoder v1.35
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.35 (2026-08-03) - Fixed 99051 self-blocking: after being added, 99051
+//   itself matched the "any 9-series CPT blocks" check (it starts with 9,
+//   isn't 99000, isn't an office-visit code) — so the recheck pass right
+//   after Apply saw 99051 already on the chart and immediately proposed
+//   deleting it. 99051 is now also exempt from that check, same as 99000.
 // 1.34 (2026-08-03) - Fixed the Weekend/99051 blocking rule: the "any 9-series
 //   CPT blocks except 99000" check was also catching the regular
 //   office-visit E&M codes (99211-99215/99203, OFFICE_VISIT_EM_CODES),
@@ -1516,7 +1521,7 @@
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || /televisit/i.test(flags.hpiText);
             const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
-                /^9/.test(c) && c !== '99000' && !OFFICE_VISIT_EM_CODES.includes(c));
+                /^9/.test(c) && c !== '99000' && c !== '99051' && !OFFICE_VISIT_EM_CODES.includes(c));
             const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodeSet.has(c)) ||
                 rawCPTCodeSet.has('G0447') ||

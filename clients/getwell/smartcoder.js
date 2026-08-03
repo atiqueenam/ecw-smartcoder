@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.6
+// @name         Getwell SmartCoder by ATQ v4.7
 // @namespace    http://tampermonkey.net/
-// @version      4.6
+// @version      4.7
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.7 (2026-08-03) - Fixed 99051 self-blocking: after being added, 99051
+//   itself matched the "any 9-series CPT blocks" check (it starts with 9,
+//   isn't 99000, isn't an office-visit code) — so the recheck pass right
+//   after Apply saw 99051 already on the chart and immediately proposed
+//   deleting it. 99051 is now also exempt from that check, same as 99000.
 // 4.6 (2026-08-03) - Diagnostic fix: Analyze had a try/catch that silently
 //   swallowed any error inside computeAnalysis() and fell back to an empty
 //   "Nothing to add / Nothing to remove" with no indication anything went
@@ -1463,7 +1468,7 @@
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = classifyVisitType(getVisitType()) === 'televisit';
             const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
-                /^9/.test(c) && c !== '99000' && !OFFICE_VISIT_EM_CODES.includes(c));
+                /^9/.test(c) && c !== '99000' && c !== '99051' && !OFFICE_VISIT_EM_CODES.includes(c));
             const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
                 rawCPTCodesNow.includes('G0447') ||
