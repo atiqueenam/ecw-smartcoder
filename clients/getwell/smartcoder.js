@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.1
+// @name         Getwell SmartCoder by ATQ v4.2
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      4.2
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.2 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
+//   now blocked by ANY 9-series CPT code already on the chart except 99000
+//   (blood draw never blocks), not just the Preventive/P-C bundle; still
+//   blocked by the Medicare AWV G-codes and G0447 (Obesity); and now also
+//   blocked by a televisit, using Getwell's own visit-type detection
+//   (appointment caption via getVisitType/classifyVisitType).
 // 4.1 (2026-08-03) - BMI codes are now never blanket-deleted: removed
 //   3008F/G8417/G8418/G8420 from MANAGED_CODES, removed the
 //   hasPreventiveVisit gate on Z68.xx correction, and stopped quick actions
@@ -1402,16 +1408,22 @@
         const desired = new Map(); // code -> reason
 
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
-        // toggle is on AND no Preventive / Preventive Counseling / Obesity
-        // code is present on this chart. Smoking (99406) doesn't block it.
+        // toggle is on AND none of the blocking conditions below are met.
+        // Blocked by: any 9-series CPT code already on the chart except
+        // 99000 (blood draw only, never blocks); the Medicare AWV G-codes;
+        // G0447 (Obesity); or a televisit — using Getwell's own visit-type
+        // detection (appointment caption via getVisitType/classifyVisitType,
+        // same as the office-visit E&M rule below uses).
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         if (isWeekendEnabled()) {
-            const weekendBlocked = ALL_PREVENTIVE_EM_CODES.some(c => rawCPTCodesNow.includes(c)) ||
+            const isTelevisitForWeekend = classifyVisitType(getVisitType()) === 'televisit';
+            const has9CodeExceptBloodDraw = rawCPTCodesNow.some(c => /^9/.test(c) && c !== '99000');
+            const weekendBlocked = has9CodeExceptBloodDraw ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
-                rawCPTCodesNow.includes('99401') ||
-                rawCPTCodesNow.includes('G0447');
-            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no preventive/counseling code present');
+                rawCPTCodesNow.includes('G0447') ||
+                isTelevisitForWeekend;
+            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
         }
 
         // ---- BMI: adult raw-BMI mapping; pediatric mapping uses Z68.51-.54. ----
@@ -1673,13 +1685,6 @@
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
                 }
             });
-        }
-
-        // ---- EKG in CC  → 93000 ----
-        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        const ccText = ccRaw ? ccRaw[1] : '';
-        if (/\bekg\b|\becg\b/i.test(ccText)) {
-            desired.set('93000', 'EKG mentioned in CC');
         }
 
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----

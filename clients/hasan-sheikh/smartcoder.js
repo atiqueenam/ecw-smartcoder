@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.31
+// @name         Hasan Sheikh SmartCoder v1.32
 // @namespace    http://tampermonkey.net/
-// @version      1.31
+// @version      1.32
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.32 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
+//   now blocked by ANY 9-series CPT code already on the chart except 99000
+//   (blood draw never blocks), not just the Preventive/P-C bundle; still
+//   blocked by the Medicare AWV G-codes and G0447 (Obesity); and now also
+//   blocked by a televisit, detected the same way this file already does
+//   for the office-visit E&M rule (98012 present, or "televisit" in HPI).
 // 1.31 (2026-08-03) - Removed the televisit-based swap between 1157F/1158F —
 //   Hasan Sheikh has no televisit rule for this code family. Both are now
 //   simply retained if present and age >= 65, deleted otherwise (no swap
@@ -1485,13 +1491,22 @@
         const desired = new Map(); // code -> reason
 
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
-        // toggle is on AND no Preventive / Preventive Counseling / Obesity
-        // code is present on this chart. Smoking (99406) doesn't block it.
+        // toggle is on AND none of the blocking conditions below are met.
+        // Blocked by: any 9-series CPT code already on the chart except
+        // 99000 (blood draw only, never blocks); the Medicare AWV G-codes;
+        // G0447 (Obesity); or a televisit (98012 present, or "televisit"
+        // in the HPI — same detection this file already uses elsewhere,
+        // see the isTelevisitNote note near the office-visit E&M rule).
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         if (isWeekendEnabled()) {
-            const weekendBlocked = hasPreventiveVisit || rawCPTCodeSet.has('99401') || rawCPTCodeSet.has('G0447');
-            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no preventive/counseling code present');
+            const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || /televisit/i.test(flags.hpiText);
+            const has9CodeExceptBloodDraw = rawCPTCodesNow.some(c => /^9/.test(c) && c !== '99000');
+            const weekendBlocked = has9CodeExceptBloodDraw ||
+                MEDICARE_AWV_CODES.some(c => rawCPTCodeSet.has(c)) ||
+                rawCPTCodeSet.has('G0447') ||
+                isTelevisitForWeekend;
+            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
         }
 
         // ---- BMI: CPTs only added when a preventive visit is present.
