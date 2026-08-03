@@ -1038,7 +1038,7 @@
         '1157F', '1158F', '1170F',
         'G8510', 'G8431', 'G9622', '3016F',
         'G9275', 'G9276', '1036F', '1000F',
-        'G0136', 'G9744'
+        'G0136', 'G9744', '99051'
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
 
@@ -1476,6 +1476,16 @@
         const hasPreventiveVisit = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
 
         const desired = new Map(); // code -> reason
+
+        // ---- Weekend rule: CPT 99051 is desired only when the Weekend
+        // toggle is on AND no Preventive / Preventive Counseling / Obesity
+        // code is present on this chart. Smoking (99406) doesn't block it.
+        // Analyze/Apply decides this, not the toggle itself — flipping the
+        // toggle just changes what the next Analyze run will propose. ----
+        if (isWeekendEnabled()) {
+            const weekendBlocked = hasPreventiveVisit || rawCPTCodeSet.has('99401') || rawCPTCodeSet.has('G0447');
+            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no preventive/counseling code present');
+        }
 
         // ---- BMI: CPTs only added when a preventive visit is present.
         // Adults (18+): G8417/G8418/G8420 from raw BMI thresholds.
@@ -4238,36 +4248,6 @@
         weekendOverrides[getWeekendKey()] = val;
     }
 
-    // Preventive, Preventive Counseling, and Obesity bundles all block 99051.
-    function hasWeekendBlockingCodes() {
-        return !!(
-            ALL_PREVENTIVE_EM_CODES.some(c => getCPTRowByCode(c)) ||
-            MEDICARE_AWV_CODES.some(c => getCPTRowByCode(c)) ||
-            getCPTRowByCode("99401") ||
-            getCPTRowByCode("G0447")
-        );
-    }
-
-    let weekendSyncing = false;
-    async function syncWeekendCode() {
-        if (weekendSyncing) return;
-        weekendSyncing = true;
-        try {
-            const has99051 = !!getCPTRowByCode("99051");
-            if (!isWeekendEnabled()) {
-                if (has99051) await deleteCPTCodesByCode(["99051"]);
-                return;
-            }
-            if (hasWeekendBlockingCodes()) {
-                if (has99051) await deleteCPTCodesByCode(["99051"]);
-            } else if (!has99051) {
-                await addSingleCPT("99051");
-            }
-        } finally {
-            weekendSyncing = false;
-        }
-    }
-
     // Auto Link (AL) button: runs on the billing tab (#billingTbl2/#billingTbl4).
     function runAutoLinkAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
@@ -4338,9 +4318,7 @@
                 showQuickNotice("Could not determine new/established status or age — add the preventive E&M code manually.");
             }
         } finally {
-            quickActionRunning = false;
-            await syncWeekendCode();
-            renderSnapshotBlock();
+            quickActionRunning = false;            renderSnapshotBlock();
         }
     }
 
@@ -4386,9 +4364,7 @@
             await addICDCodesFast(codes);
             await addSingleCPT("99401");
         } finally {
-            quickActionRunning = false;
-            await syncWeekendCode();
-            renderSnapshotBlock();
+            quickActionRunning = false;            renderSnapshotBlock();
         }
     }
 
@@ -4407,9 +4383,7 @@
             await addICDCodesFast(["F17.210"]);
             await addSingleCPT("99406");
         } finally {
-            quickActionRunning = false;
-            await syncWeekendCode();
-            renderSnapshotBlock();
+            quickActionRunning = false;            renderSnapshotBlock();
         }
     }
 
@@ -4437,9 +4411,7 @@
             await addICDCodesFast(codes);
             await addSingleCPT("G0447");
         } finally {
-            quickActionRunning = false;
-            await syncWeekendCode();
-            renderSnapshotBlock();
+            quickActionRunning = false;            renderSnapshotBlock();
         }
     }
 
@@ -5004,7 +4976,7 @@
             body.addEventListener('change', (e) => {
                 if (e.target.closest('#ecsWeekendToggle')) {
                     setWeekendOverride(!!e.target.checked);
-                    syncWeekendCode().then(renderSnapshotBlock);
+                    renderSnapshotBlock();
                 }
             });
         }
