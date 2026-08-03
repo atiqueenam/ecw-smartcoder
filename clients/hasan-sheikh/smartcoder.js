@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.36
+// @name         Hasan Sheikh SmartCoder v1.37
 // @namespace    http://tampermonkey.net/
-// @version      1.36
+// @version      1.37
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.37 (2026-08-03) - Added high-level code exclusions for Pap smear
+//   (Q0091/G0101), Advance Care (99497), and TCM/Post-Hospitalization
+//   (99495/99496): (1) any of these now also blocks Weekend/99051, same
+//   as the other blocking conditions; (2) clicking Preventive Counsel,
+//   Smoking, or Obesity while one is present now shows a popup and does
+//   nothing instead of applying — Preventive (PV) is unaffected; (3)
+//   Analyze now proposes deleting any existing counseling code
+//   (99401/99406/G0447) when one of these is present on the chart.
 // 1.36 (2026-08-03) - Weekend/99051 is now also blocked whenever the
 //   insurance is UHC/United Healthcare/UMR/Oxford (UMR and Oxford are both
 //   UnitedHealthcare-owned brands), regardless of what else is on the
@@ -1512,6 +1520,12 @@
 
         const desired = new Map(); // code -> reason
 
+        // Pap smear (Q0091/G0101), Advance Care (99497), TCM/Post-Hosp
+        // (99495/99496) — no counseling code may coexist with these, and
+        // (per the block below) none of the three block Weekend either.
+        const HIGH_LEVEL_BLOCKING_CODES = ['Q0091', 'G0101', '99497', '99495', '99496'];
+        const hasHighLevelCode = HIGH_LEVEL_BLOCKING_CODES.some(c => rawCPTCodesNow.includes(c));
+
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
         // toggle is on AND none of the blocking conditions below are met.
         // Blocked by: any 9-series CPT code already on the chart except
@@ -1521,10 +1535,10 @@
         // the Medicare AWV G-codes; G0447 (Obesity); a televisit (98012
         // present, or "televisit" in the HPI — same detection this file
         // already uses elsewhere, see the isTelevisitNote note near the
-        // office-visit E&M rule); or the insurance being UHC/United
+        // office-visit E&M rule); the insurance being UHC/United
         // Healthcare/UMR/Oxford (UMR and Oxford are both UnitedHealthcare-
-        // owned brands) — 99051 is never used for that payer family
-        // regardless of what else is on the chart.
+        // owned brands); or one of the high-level codes above being
+        // present.
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         const isUHCFamilyForWeekend = !!insurance &&
@@ -1537,7 +1551,8 @@
                 MEDICARE_AWV_CODES.some(c => rawCPTCodeSet.has(c)) ||
                 rawCPTCodeSet.has('G0447') ||
                 isTelevisitForWeekend ||
-                isUHCFamilyForWeekend;
+                isUHCFamilyForWeekend ||
+                hasHighLevelCode;
             if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
         }
 
@@ -1758,6 +1773,22 @@
             currentRows.forEach(r => {
                 if (/^G\d/i.test(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
+                }
+            });
+        }
+
+        // High-level codes (Pap smear Q0091/G0101, Advance Care 99497, TCM/
+        // Post-Hospitalization 99495/99496): no counseling code may coexist
+        // with these. If any is present, any existing counseling code
+        // (99401 Preventive Counseling, 99406 Smoking, G0447 Obesity) gets
+        // proposed for deletion here. Preventive itself is unaffected —
+        // this list intentionally excludes the preventive E&M/AWV codes.
+        const triggeringHighLevelCode = HIGH_LEVEL_BLOCKING_CODES.find(c => rawCPTCodesNow.includes(c));
+        if (triggeringHighLevelCode) {
+            ['99401', '99406', 'G0447'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${triggeringHighLevelCode} present — counseling codes can't coexist with it` });
                 }
             });
         }
@@ -2226,6 +2257,17 @@
             el.style.opacity = '0';
             setTimeout(() => el.remove(), 400);
         }, 5000);
+    }
+
+    // Pap smear (Q0091/G0101), Advance Care (99497), TCM/Post-Hosp (99495/
+    // 99496): no counseling quick action (P/C, Smoking, Obesity) may run
+    // while any of these is present. Preventive (PV) is unaffected.
+    function getHighLevelBlockingCode() {
+        const codes = ['Q0091', 'G0101', '99497', '99495', '99496'];
+        for (const code of codes) {
+            if (getCPTRowByCode(code)) return code;
+        }
+        return null;
     }
 
     let quickActionRunning = false;
@@ -4399,6 +4441,11 @@
     // ── Preventive Counsel: Z71.3, Z71.82/89, CPT 99401 ──
     async function runPreventiveCounselAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Preventive Counsel: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4430,6 +4477,11 @@
     // ── Smoking: F17.210 + CPT 99406, only for a confirmed smoker ──
     async function runSmokingAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Smoking: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4449,6 +4501,11 @@
     // ── Obesity: E66.9, Z68.xx, CPT G0447 ──
     async function runObesityAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Obesity: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
