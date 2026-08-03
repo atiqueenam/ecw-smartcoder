@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.32
+// @name         Hasan Sheikh SmartCoder v1.33
 // @namespace    http://tampermonkey.net/
-// @version      1.32
+// @version      1.33
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.33 (2026-08-03) - Fixed EKG-in-CC detection for 93000: some CC entries
+//   render as tracked-change <li section="Chief Complaint(s):" content="...">
+//   elements rather than plain visible text, so they weren't always
+//   captured by the innerText-based regex. Added a direct DOM read of
+//   those elements as a second signal — EKG mentioned either way now adds
+//   93000. Still add-only, as before: 93000 is never proposed for deletion.
 // 1.32 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
 //   now blocked by ANY 9-series CPT code already on the chart except 99000
 //   (blood draw never blocks), not just the Preventive/P-C bundle; still
@@ -1584,7 +1590,16 @@
         // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added; EKG → 93000 ----
         const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
         const ccText = ccRaw ? ccRaw[1] : '';
-        if (/\bekg\b|\becg\b/i.test(ccText)) {
+        // CC entries sometimes render as tracked-change <li> elements
+        // (e.g. <li section="Chief Complaint(s):" content="EKG done">)
+        // rather than as plain visible text — those don't reliably show up
+        // in document.body.innerText, so the regex above alone can miss
+        // them. Read those elements directly as a second signal.
+        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
+        const ccDomText = ccDomItems.length
+            ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
+            : '';
+        if (/\bekg\b|\becg\b/i.test(ccText) || /\bekg\b|\becg\b/i.test(ccDomText)) {
             desired.set('93000', 'EKG mentioned in CC');
         }
 
