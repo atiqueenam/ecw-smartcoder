@@ -898,6 +898,30 @@
         });
     }
 
+    // Was `code` billed in any PRIOR encounter within the last `days` days
+    // of the current DOS? Excludes the currently-open encounter's own date.
+    function codeUsedInLastDays(code, days) {
+        const api = window.__ecwPatientHistory;
+        const data = api && api.getData ? api.getData() : null;
+        if (!data || !data.length) return false;
+        const upperCode = code.toUpperCase();
+        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : null;
+        if (!currentTs) return false;
+        return data.some(enc => {
+            if (currentDosStr && enc.encounter_date === currentDosStr) return false;
+            const ts = parseUSDateSnap(enc.encounter_date);
+            if (!ts) return false;
+            const diffDays = Math.abs(currentTs - ts) / 86400000;
+            if (diffDays > days) return false;
+            const codes = [
+                ...(enc.visit_codes || []),
+                ...(enc.procedure_codes || [])
+            ].map(c => (c.code || "").toUpperCase());
+            return codes.includes(upperCode);
+        });
+    }
+
     // Drives the "Tob" flag chip (red = false) and the Smoking button. A
     // literal "smoker" word confirms active smoking on its own; other
     // tobacco language (smokeless, chewing tobacco, cigar) without that word
@@ -1186,18 +1210,28 @@
         }
     }
 
-    // Cleans up Preventive (PV)'s own codes when a different quick action
-    // runs instead — the 993xx E&M code and Z00.01/Z00.121 always go;
-    // Z71.3/Z71.82/Z71.89 only go too if the NEW action doesn't itself need
-    // them (Preventive Counsel reuses those, so it keeps them — Smoking and
-    // Obesity don't, so they clear them).
-    async function cleanupPreventiveCodes(keepZ71Counseling) {
-        await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
-        await deleteCPTCodesByCode(MEDICARE_AWV_CODES);
-        await deleteICDCodesByCode(["Z00.01", "Z00.121"]);
-        if (!keepZ71Counseling) {
+    // Mutual exclusivity across PV/P-C/SM/OB. Clear only the other actions'
+    // bundles; smoking and obesity diagnosis codes remain independent.
+    async function deleteAllBMIZ68Codes() {
+        let entry;
+        while ((entry = getICDRows().find(r => /^Z68\./i.test(r.code)))) {
+            await new Promise(resolve => deleteOneICDRow(entry.row, entry.code, resolve));
+        }
+    }
+
+    async function clearOtherQuickActionBundles(current) {
+        if (current !== 'pv') {
+            await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
+            await deleteCPTCodesByCode(MEDICARE_AWV_CODES);
+            await deleteICDCodesByCode(["Z00.01", "Z00.121"]);
+        }
+        if (current !== 'pv' && current !== 'pc') {
             await deleteICDCodesByCode(["Z71.3", "Z71.82", "Z71.89"]);
         }
+        if (current !== 'pc') await deleteCPTCodesByCode(["99401"]);
+        if (current !== 'sm') await deleteCPTCodesByCode(["99406"]);
+        if (current !== 'ob') await deleteCPTCodesByCode(["G0447"]);
+        if (current !== 'pv' && current !== 'ob') await deleteAllBMIZ68Codes();
     }
 
     // The visible #CPTCode box (eCW's markup can have more than one element
@@ -1306,6 +1340,7 @@
         const insurance = parseInsuranceFromPage(text);
         const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
         const bmi = snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i);
+        const bmiPercentile = snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i);
         const age = getAgeAtDOS(text) ?? 0;
         const gender = getGenderFromDOM();
 
@@ -1319,14 +1354,49 @@
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
 
+        const rawCPTCodesNow = getCPTRows()
+            .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
+            .filter(Boolean);
+        const PREVENTIVE_VISIT_CODES = new Set([
+            '99381', '99382', '99383', '99384', '99385', '99386', '99387',
+            '99391', '99392', '99393', '99394', '99395', '99396', '99397',
+            'G0438', 'G0439'
+        ]);
+        const hasPreventiveVisit = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+
         const desired = new Map(); // code -> reason
 
-        // ---- BMI ----
-        if (bmi) {
-            desired.set('3008F', 'BMI documented');
-            const bmiNum = parseFloat(bmi);
-            const gCode = bmiNum < 18 ? 'G8418' : (bmiNum < 26 ? 'G8420' : 'G8417');
-            desired.set(gCode, `BMI ${bmi}`);
+        // ---- BMI: adult raw-BMI mapping; pediatric mapping uses Z68.51-.54. ----
+        const PEDIATRIC_BMI_Z_TO_GCODE = {
+            'Z68.51': 'G8418',
+            'Z68.52': 'G8420',
+            'Z68.53': 'G8420',
+            'Z68.54': 'G8417'
+        };
+        function pediatricZ68FromPercentile(pct) {
+            if (pct == null || isNaN(pct)) return null;
+            if (pct < 5) return 'Z68.51';
+            if (pct < 85) return 'Z68.52';
+            if (pct < 95) return 'Z68.53';
+            return 'Z68.54';
+        }
+        let correctZ68Ped = null;
+        if (bmi && age < 18) {
+            correctZ68Ped = pediatricZ68FromPercentile(parseFloat(bmiPercentile));
+            if (!correctZ68Ped) {
+                const pedZ68Row = getICDRows().find(r => PEDIATRIC_BMI_Z_TO_GCODE[r.code.toUpperCase()]);
+                if (pedZ68Row) correctZ68Ped = pedZ68Row.code.toUpperCase();
+            }
+        }
+        if (bmi && hasPreventiveVisit) {
+            desired.set('3008F', 'BMI documented (preventive visit)');
+            if (age >= 18) {
+                const bmiNum = parseFloat(bmi);
+                const gCode = bmiNum < 18 ? 'G8418' : (bmiNum < 26 ? 'G8420' : 'G8417');
+                desired.set(gCode, `BMI ${bmi} (preventive visit)`);
+            } else if (correctZ68Ped) {
+                desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped} (preventive visit)`);
+            }
         }
 
         // ---- BP ----
@@ -1414,7 +1484,9 @@
             desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
         }
 
-        if (hasSocialNeeds) desired.set('G0136', 'Social needs screening');
+        if (hasSocialNeeds && !codeUsedInLastDays('G0136', 180)) {
+            desired.set('G0136', 'Social needs screening');
+        }
 
         // ---- Cancer screening CPTs (from HEALTH PROMOTION AND DISEASE PREVENTION) ----
         // Breast: 3014F if the mammogram was done in the current DOS year.
@@ -1538,19 +1610,52 @@
         // gets proposed for removal — same Analyze/Start Action flow as
         // everything else, not just the quick-action buttons.
         const bmiNum = parseFloat(bmi) || null;
-        const correctZ68 = mapBMIToZ68(bmiNum);
+        const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
         if (correctZ68) {
             const icdEntriesForBMI = getICDRows();
             const currentZ68Entries = icdEntriesForBMI.filter(e => /^Z68\./i.test(e.code));
             const hasCorrectZ68 = currentZ68Entries.some(e => e.code.toUpperCase() === correctZ68.toUpperCase());
-            if (!hasCorrectZ68) {
-                toAdd.push({ code: correctZ68, reason: `BMI ${bmiNum} — correct Z68.xx code`, kind: 'icd' });
+            if (!hasCorrectZ68 && (currentZ68Entries.length > 0 || hasPreventiveVisit)) {
+                toAdd.push({ code: correctZ68, reason: `BMI ${age >= 18 ? bmiNum : (bmiPercentile ? bmiPercentile + '%' : correctZ68)} — correct Z68.xx code`, kind: 'icd' });
             }
             currentZ68Entries.forEach(e => {
                 if (e.code.toUpperCase() !== correctZ68.toUpperCase()) {
                     toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong BMI code for current BMI ${bmiNum} (should be ${correctZ68})` });
                 }
             });
+        }
+
+        // Existing adult obesity diagnoses are correction-only: keep them in
+        // sync with BMI, but never introduce obesity from analysis alone.
+        if (age >= 18 && bmi) {
+            const OBESITY_ICD_CODES = ['E66.9', 'E66.01', 'E66.09'];
+            const currentObesityEntries = getICDRows().filter(e => OBESITY_ICD_CODES.includes(e.code.toUpperCase()));
+            if (currentObesityEntries.length) {
+                const bmiNumObesity = parseFloat(bmi);
+                let correctObesityCode = null;
+                if (bmiNumObesity >= 30 && bmiNumObesity < 40) correctObesityCode = 'E66.9';
+                else if (bmiNumObesity >= 40 && bmiNumObesity < 50) correctObesityCode = 'E66.01';
+                else if (bmiNumObesity >= 50) correctObesityCode = 'E66.09';
+
+                if (correctObesityCode) {
+                    const hasCorrectObesity = currentObesityEntries.some(e => e.code.toUpperCase() === correctObesityCode);
+                    if (!hasCorrectObesity) {
+                        toAdd.push({ code: correctObesityCode, reason: `BMI ${bmiNumObesity} — correct obesity code`, kind: 'icd' });
+                        if (correctObesityCode === 'E66.09') {
+                            alert(`BMI ${bmiNumObesity} suggests E66.09 (severe/morbid obesity) — this is a sensitive diagnosis usually documented deliberately by the provider. Please double-check before confirming this change.`);
+                        }
+                    }
+                    currentObesityEntries.forEach(e => {
+                        if (e.code.toUpperCase() !== correctObesityCode) {
+                            toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong obesity code for BMI ${bmiNumObesity} (should be ${correctObesityCode})` });
+                        }
+                    });
+                } else {
+                    currentObesityEntries.forEach(e => {
+                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `BMI ${bmiNumObesity} — under 30, obesity code not applicable` });
+                    });
+                }
+            }
         }
 
         // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
@@ -1726,7 +1831,10 @@
     }
 
     // ====================== PREVENTIVE / COUNSEL / SMOKING / OBESITY ACTIONS ======================
-    function mapBMIToZ68(bmi) {
+    // Adult BMI thresholds only. Pediatric Z68.51-.54 codes require BMI
+    // percentile data and are handled separately in the analysis flow.
+    function mapBMIToZ68(bmi, age) {
+        if (age != null && age < 18) return null;
         if (bmi == null || isNaN(bmi)) return null;
         if (bmi < 19.5) return null; // underweight codes intentionally not auto-added
         if (bmi < 20) return "Z68.1";
@@ -3709,7 +3817,7 @@
 
             const codes = [];
             codes.push(age >= 18 ? "Z00.01" : "Z00.121");
-            const z68 = mapBMIToZ68(bmi);
+            const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
             codes.push("Z71.3");
             const z71Code = determineZ71CodeFast(age, gender, ccText, icdEntries);
@@ -3724,7 +3832,7 @@
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
-            await deleteCPTCodesByCode(["99401"]);
+            await clearOtherQuickActionBundles('pv');
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
 
@@ -3778,10 +3886,7 @@
             const z71Code = determineZ71CodeFast(age, gender, ccText, icdEntries);
             const z71Opposite = z71Code === "Z71.89" ? "Z71.82" : "Z71.89";
             const codes = ["Z71.3", z71Code];
-            // Delete first, then add. Clean up Preventive's own codes
-            // (993xx, Z00.01/Z00.121) but keep Z71.3/82/89 since we need
-            // those ourselves.
-            await cleanupPreventiveCodes(true);
+            await clearOtherQuickActionBundles('pc');
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
             await addSingleCPT("99401");
@@ -3802,7 +3907,7 @@
                 showQuickNotice("Smoking: patient is not a confirmed smoker — skipped.");
                 return;
             }
-            await cleanupPreventiveCodes(false);
+            await clearOtherQuickActionBundles('sm');
             await addICDCodesFast(["F17.210"]);
             await addSingleCPT("99406");
         } finally {
@@ -3819,12 +3924,13 @@
             const text = getEncounterText();
             const bmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
             if (bmi == null) { showQuickNotice("Obesity: BMI not found on this page — skipped."); return; }
+            const age = getAgeAtDOS(text);
 
             const codes = ["E66.9"];
-            const z68 = mapBMIToZ68(bmi);
+            const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
 
-            await cleanupPreventiveCodes(false);
+            await clearOtherQuickActionBundles('ob');
             await addICDCodesFast(codes);
             await addSingleCPT("G0447");
         } finally {
@@ -4062,13 +4168,19 @@
         }
 
         let bmiCode = "";
-        if (bmi) {
+        if (isPediatric && bmiPercentile) {
+            const pctNum = parseFloat(bmiPercentile);
+            const gCode = pctNum < 5 ? "G8418" : (pctNum < 95 ? "G8420" : "G8417");
+            bmiCode = `3008F, ${gCode}`;
+        } else if (bmi && !isPediatric) {
             const bmiNum = parseFloat(bmi);
             let gCode = "";
             if (bmiNum < 18) gCode = "G8418";
             else if (bmiNum >= 18 && bmiNum < 26) gCode = "G8420";
             else if (bmiNum >= 26) gCode = "G8417";
             bmiCode = gCode ? `3008F, ${gCode}` : "3008F";
+        } else if (bmi) {
+            bmiCode = "3008F";
         }
 
         const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());

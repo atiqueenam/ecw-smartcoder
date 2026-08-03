@@ -20,7 +20,7 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.23",
+      "version": "1.29",
       "file": "clients/hasan-sheikh/smartcoder.js",
       "sha256": "c5bed96ead0dc6aaf3efd8cddb8039aef95f2a2976b1d5c93d9c43c00152e21d"
     }
