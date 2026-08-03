@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder Client Loader
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.2.6
+// @version      1.2.7
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.2.6: userscript started.");
+  console.info("eCW SmartCoder Loader v1.2.7: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
@@ -414,7 +414,9 @@
     reload.title = "Check updates and reload";
     reload.setAttribute("role", "button");
     reload.setAttribute("aria-label", "Check SmartCoder updates and reload");
-    reload.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M19.1 15a8 8 0 1 1-.7-7.8L20 11"></path></svg>';
+    // Two-arrow "sync" icon (top arrow one way, bottom arrow the other),
+    // rather than the single-arrow refresh loop this used before.
+    reload.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>';
     reload.addEventListener("mousedown", event => event.stopPropagation());
     reload.addEventListener("click", event => {
       event.stopPropagation();
