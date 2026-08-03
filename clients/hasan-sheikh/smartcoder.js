@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.30
+// @name         Hasan Sheikh SmartCoder v1.31
 // @namespace    http://tampermonkey.net/
-// @version      1.30
+// @version      1.31
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.31 (2026-08-03) - Removed the televisit-based swap between 1157F/1158F —
+//   Hasan Sheikh has no televisit rule for this code family. Both are now
+//   simply retained if present and age >= 65, deleted otherwise (no swap
+//   logic between them, unlike 1125F/1126F which still swap on pain
+//   presence). 1170F unchanged (retain at 65+, delete otherwise). 1159F/
+//   1160F unchanged (retain at 66+, delete otherwise). None of these five
+//   are ever added fresh — correction/deletion only, as before.
 // 1.30 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
 //   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
 //   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
@@ -1567,25 +1574,17 @@
         }
 
         // ---- Age-based correction-only CPTs ----
-        // 1170F/1157F(normal)/1158F(televisit)/1125F(pain)/1126F(no pain):
-        // age 65+, never added fresh, only corrected/deleted.
+        // 1170F/1157F/1158F/1125F(pain)/1126F(no pain): age 65+, never
+        // added fresh, only corrected/deleted. No televisit rule here —
+        // 1157F and 1158F are each just kept if present and age-eligible,
+        // with no swap between them (that's a separate E&M rule elsewhere).
         const icdRows = getICDRows();
         const hasPainOrM = icdRows.some(r => isPainRelatedICDEntry(r.code, r.name));
-        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
 
         if (age >= 65) {
-            const has1157or1158 = rawCPTCodeSet.has('1157F') || rawCPTCodeSet.has('1158F');
-            if (has1157or1158) {
-                const correct6xF = isTelevisitNote ? '1158F' : '1157F';
-                const wrong6xF = correct6xF === '1157F' ? '1158F' : '1157F';
-                desired.set(correct6xF, `Visit-type correction (${isTelevisitNote ? 'televisit' : 'normal visit'}, age ${age})`);
-                if (rawCPTCodeSet.has(wrong6xF)) {
-                    exclusionReasons.set(wrong6xF, `Wrong visit-type code — should be ${correct6xF} (${isTelevisitNote ? 'televisit' : 'normal visit'})`);
-                }
-            }
-            if (rawCPTCodeSet.has('1170F')) {
-                desired.set('1170F', `Age ${age} — retained`);
-            }
+            ['1157F', '1158F', '1170F'].forEach(c => {
+                if (rawCPTCodeSet.has(c)) desired.set(c, `Age ${age} — retained`);
+            });
             const has1125or1126 = rawCPTCodeSet.has('1125F') || rawCPTCodeSet.has('1126F');
             if (has1125or1126) {
                 const correctPain = hasPainOrM ? '1125F' : '1126F';
@@ -1799,6 +1798,10 @@
         // ("umk" in the original request), Empire.
         const isCommercialNoOfficeVisitIns = isUHCInsurance(insurance) ||
             (!!insurance && /aetna|cigna|\bbcbs\b|blue\s*cross|\bumr\b|empire/i.test(insurance.trim()));
+
+        // Used for rule 6.v below (televisit ESTPT visits always use 99213).
+        // No longer used for 1157F/1158F — those have no televisit rule.
+        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
 
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
