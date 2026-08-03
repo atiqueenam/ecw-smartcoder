@@ -1459,6 +1459,17 @@
             }
         }
 
+        // ---- EKG in CC → 93000 ----
+        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
+        const ccText = ccRaw ? ccRaw[1] : '';
+        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
+        const ccDomText = ccDomItems.length
+            ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
+            : '';
+        if (/\bekg\b|\becg\b/i.test(ccText) || /\bekg\b|\becg\b/i.test(ccDomText)) {
+            desired.set('93000', 'EKG mentioned in CC');
+        }
+
         // ---- BP ----
         if (bp) {
             const [sys, dia] = bp.split('/').map(n => parseInt(n));
