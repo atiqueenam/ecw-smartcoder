@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.4
+// @name         Getwell SmartCoder by ATQ v4.5
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 4.5 (2026-08-03) - Fixed the Weekend/99051 blocking rule: the "any 9-series
+//   CPT blocks except 99000" check was also catching the regular
+//   office-visit E&M codes (99211-99215/99203, OFFICE_VISIT_EM_CODES),
+//   which exist on nearly every encounter — so 99051 almost never got
+//   suggested. Those are now exempt from the block, same as 99000.
 // 4.4 (2026-08-03) - EKG-in-CC detection wasn't firing even with the
 //   tracked-change <li> present. Broadened the DOM selector to be
 //   case-insensitive/substring-tolerant on the section attribute, and
@@ -1439,16 +1444,20 @@
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
         // toggle is on AND none of the blocking conditions below are met.
         // Blocked by: any 9-series CPT code already on the chart except
-        // 99000 (blood draw only, never blocks); the Medicare AWV G-codes;
-        // G0447 (Obesity); or a televisit — using Getwell's own visit-type
-        // detection (appointment caption via getVisitType/classifyVisitType,
-        // same as the office-visit E&M rule below uses).
+        // 99000 (blood draw) and the regular office-visit E&M codes
+        // (OFFICE_VISIT_EM_CODES — every visit has one of these, so they
+        // were wrongly blocking 99051 on every chart before this fix);
+        // the Medicare AWV G-codes; G0447 (Obesity); or a televisit — using
+        // Getwell's own visit-type detection (appointment caption via
+        // getVisitType/classifyVisitType, same as the office-visit E&M
+        // rule below uses).
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = classifyVisitType(getVisitType()) === 'televisit';
-            const has9CodeExceptBloodDraw = rawCPTCodesNow.some(c => /^9/.test(c) && c !== '99000');
-            const weekendBlocked = has9CodeExceptBloodDraw ||
+            const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
+                /^9/.test(c) && c !== '99000' && !OFFICE_VISIT_EM_CODES.includes(c));
+            const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
                 rawCPTCodesNow.includes('G0447') ||
                 isTelevisitForWeekend;

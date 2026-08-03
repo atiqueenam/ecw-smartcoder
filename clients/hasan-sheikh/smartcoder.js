@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.33
+// @name         Hasan Sheikh SmartCoder v1.34
 // @namespace    http://tampermonkey.net/
-// @version      1.33
+// @version      1.34
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.34 (2026-08-03) - Fixed the Weekend/99051 blocking rule: the "any 9-series
+//   CPT blocks except 99000" check was also catching the regular
+//   office-visit E&M codes (99211-99215/99203, OFFICE_VISIT_EM_CODES),
+//   which exist on nearly every encounter — so 99051 almost never got
+//   suggested. Those are now exempt from the block, same as 99000.
 // 1.33 (2026-08-03) - Fixed EKG-in-CC detection for 93000: some CC entries
 //   render as tracked-change <li section="Chief Complaint(s):" content="...">
 //   elements rather than plain visible text, so they weren't always
@@ -1499,16 +1504,20 @@
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
         // toggle is on AND none of the blocking conditions below are met.
         // Blocked by: any 9-series CPT code already on the chart except
-        // 99000 (blood draw only, never blocks); the Medicare AWV G-codes;
-        // G0447 (Obesity); or a televisit (98012 present, or "televisit"
-        // in the HPI — same detection this file already uses elsewhere,
-        // see the isTelevisitNote note near the office-visit E&M rule).
+        // 99000 (blood draw) and the regular office-visit E&M codes
+        // (OFFICE_VISIT_EM_CODES — every visit has one of these, so they
+        // were wrongly blocking 99051 on every chart before this fix);
+        // the Medicare AWV G-codes; G0447 (Obesity); or a televisit (98012
+        // present, or "televisit" in the HPI — same detection this file
+        // already uses elsewhere, see the isTelevisitNote note near the
+        // office-visit E&M rule).
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || /televisit/i.test(flags.hpiText);
-            const has9CodeExceptBloodDraw = rawCPTCodesNow.some(c => /^9/.test(c) && c !== '99000');
-            const weekendBlocked = has9CodeExceptBloodDraw ||
+            const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
+                /^9/.test(c) && c !== '99000' && !OFFICE_VISIT_EM_CODES.includes(c));
+            const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodeSet.has(c)) ||
                 rawCPTCodeSet.has('G0447') ||
                 isTelevisitForWeekend;
