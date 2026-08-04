@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.0
+// @name         Getwell SmartCoder by ATQ v5.1
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      5.1
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,13 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.1 (2026-08-03) - Claim tab: when primary insurance is Healthfirst,
+//   clicking Claim Link now unchecks the "Bill to Ins" checkbox for
+//   whichever medication-reconciliation code is present (1159F or
+//   1160F), via a real click on the checkbox so Angular's own
+//   updateBillToIns($index) handler runs. Getwell only.
 
 // CHANGELOG
 // 5.0 (2026-08-03) - Added modifier 95 auto-apply for televisit encounters:
@@ -3937,6 +3944,25 @@
         if (claimPOSInput) cl_setInputValue(claimPOSInput, '10');
     }
 
+    // ─── Healthfirst: 1159F/1160F never billed to insurance ───────────
+    // When primary insurance is Healthfirst, whichever medication-
+    // reconciliation code is present (1159F non-Healthfirst, 1160F
+    // Healthfirst — see the Healthfirst-specific coding rule in
+    // computeAnalysis) gets its "Bill to Ins" checkbox unchecked. Uses a
+    // real .click() on the checkbox (same element cl_isCPTRowSelected
+    // reads) so Angular's own updateBillToIns($index) handler runs,
+    // rather than flipping the DOM checked property directly.
+    function cl_uncheckMedRecBillToInsForHealthfirst(cptRows) {
+        const primaryName = cl_getPrimaryInsuranceName();
+        if (!primaryName || !/health[\s-]*first\b/i.test(primaryName)) return;
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if (code !== '1159F' && code !== '1160F') return;
+            const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+            if (chk && chk.checked && !chk.disabled) chk.click();
+        });
+    }
+
     // ─── Telehealth POS rule (Medicaid / CenterLight / NYCE PPO) ───────
     // If primary insurance is Medicaid, CenterLight, or NYCE PPO, and any
     // CPT row has MOD1 == "95", set POS to "02" on every CPT row.
@@ -4056,6 +4082,7 @@
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
+        cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
         cl_applyMedicaidTelehealthPOS(cptRows);
         cl_applyOtherInsuranceTelehealthPOS(cptRows);
         cl_fillBlankTOS(cptRows);
