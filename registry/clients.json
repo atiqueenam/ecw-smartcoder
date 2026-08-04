@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-04T10:35:05.823Z",
+  "generatedAt": "2026-08-04T11:00:24.423Z",
   "clients": [
     {
       "id": "getwell",
@@ -11,7 +11,7 @@
       ],
       "version": "5.7",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "d8d3ea807689365c0f16a436de626f21d3d9f6a9b3c11d985bbdd8ad6f882003"
+      "sha256": "a727b536d38b9ead5a2de74e47c9c6fd5e324c69c28e843d04a9f19eb2de81c7"
     },
     {
       "id": "hasan-sheikh",
@@ -22,7 +22,7 @@
       ],
       "version": "1.41",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "672e6b3f2e0123b0ba5939cefbcab8102ec468f2071a4dbcbbb668059867d225"
+      "sha256": "49ebd2958f0b241288757482e931ab1b4fdcb439c1ed4b770f5bb6f2f8a17bea"
     }
   ]
 }
