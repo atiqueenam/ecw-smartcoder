@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.4
+// @name         Getwell SmartCoder by ATQ v5.5
 // @namespace    http://tampermonkey.net/
-// @version      5.4
+// @version      5.5
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,16 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 5.5 (2026-08-03) - Fixed smoking detection: an affirmative "smoker"
+//   statement (e.g. "Heavy tobacco smoker") was losing to a trailing
+//   contradicting "Additional Findings: ... Current nonsmoker" summary
+//   from a DIFFERENT question in the same note, because explicitNegative
+//   ("nonsmoker" match anywhere in the text) was checked before the bare
+//   "smoker" word check. Reordered so the affirmative check runs first,
+//   with a widened negation lookbehind (allows one filler word, e.g.
+//   "denies current smoker", "not a smoker") so real negatives still
+//   correctly return non-smoker. Regression-tested against 9 cases.
+//   Getwell only, per request — Hasan Sheikh's file left untouched.
 // 5.4 (2026-08-03) - Added an auto-dismiss watcher for the "Associated CPT
 //   Codes" popup eCW sometimes shows mid-way through an ICD add/delete.
 //   It could interrupt any of this script's add/delete sequences; a
@@ -1060,11 +1070,18 @@
         // Guard against "not/denies/no current smoker" style negation.
         if (/(?<!(?:not|denies|no)\s)\bcurrent\s+smoker\b/i.test(socText)) return false;
 
+        // Same idea, generalized: ANY affirmative "smoker" statement (e.g.
+        // "Heavy tobacco smoker", "Pipe smoker") must also win over a
+        // trailing contradicting "non-user"/"nonsmoker" summary from a
+        // DIFFERENT "Additional Findings" question appended after it.
+        // Excludes non-/former-prefixed and not/denies/no-negated
+        // occurrences, so "non-smoker" or "former smoker" don't
+        // false-positive here.
+        const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)\bsmoker\b/i.test(socText);
+        if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
+
         const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
         if (explicitNegative) return true;
-
-        const smokerWordPresent = /(?<!(?:not|denies|no)\s)\bsmoker\b/i.test(socText);
-        if (smokerWordPresent) return false; // confirmed positive smoker
 
         const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(socText);
         if (otherTobaccoUse) {
