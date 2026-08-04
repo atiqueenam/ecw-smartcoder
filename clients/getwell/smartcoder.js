@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.3
+// @name         Getwell SmartCoder by ATQ v5.4
 // @namespace    http://tampermonkey.net/
-// @version      5.3
+// @version      5.4
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 5.4 (2026-08-03) - Added an auto-dismiss watcher for the "Associated CPT
+//   Codes" popup eCW sometimes shows mid-way through an ICD add/delete.
+//   It could interrupt any of this script's add/delete sequences; a
+//   MutationObserver on document.body now clicks its close button
+//   (ng-click="assocCPTCancle()") the instant it appears, so the rest of
+//   the sequence continues uninterrupted.
 // 5.3 (2026-08-03) - computeComplexVisitCode() (99213 vs 99214) now has a
 //   second qualifying path: exactly 3 qualifying dx codes where all 3 are
 //   chronic (CHRONIC_DISEASE_ICD_CODES) also qualifies for 99214, in
@@ -5023,6 +5029,32 @@
     // initial render, which is exactly when things already feel slow.
     setInterval(checkAndUpdate, 2500);
     setTimeout(checkAndUpdate, 3000);
+
+    // ─── Auto-dismiss "Associated CPT Codes" popup ───────────────────
+    // eCW sometimes shows this modal mid-way through an ICD add/delete
+    // (its close button has ng-click="assocCPTCancle()"). It can appear
+    // in the middle of any of this script's ICD add/delete sequences
+    // (quick actions, Analyze/Apply, Auto Link, Claim Link) and would
+    // otherwise sit there blocking the rest of the sequence. Clicking the
+    // × only cancels the associated-CPT prompt — it doesn't undo the ICD
+    // change itself — so it's safe to auto-dismiss the instant it shows up.
+    function dismissAssocCPTModalIfPresent() {
+        const closeBtn = document.querySelector('button[ng-click="assocCPTCancle()"]');
+        if (closeBtn && closeBtn.offsetParent !== null) {
+            closeBtn.click();
+            return true;
+        }
+        return false;
+    }
+
+    (function startAssocCPTModalWatcher() {
+        const observer = new MutationObserver(() => {
+            dismissAssocCPTModalIfPresent();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        // Catch one that's already open when the watcher starts.
+        dismissAssocCPTModalIfPresent();
+    })();
 
     // Debug hook — these are otherwise closure-private and not reachable
     // from the browser console. Use window.__scDebug.computeAnalysis() etc.

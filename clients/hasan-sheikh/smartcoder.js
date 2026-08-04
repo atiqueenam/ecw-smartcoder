@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.38
+// @name         Hasan Sheikh SmartCoder v1.39
 // @namespace    http://tampermonkey.net/
-// @version      1.38
+// @version      1.39
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.39 (2026-08-03) - Added an auto-dismiss handler for the "Associated CPT
+//   Codes" popup eCW sometimes shows mid-way through an ICD add/delete.
+//   Separate from the existing dismissEcwErrorPopup (that one only
+//   matches modals titled "eClinicalWorks"). Polls every 800ms and clicks
+//   the close button (ng-click="assocCPTCancle()") the instant it
+//   appears, so any in-progress add/delete sequence continues.
 // 1.38 (2026-08-03) - Ported two Getwell fixes: (1) Claim tab — when
 //   primary insurance is Healthfirst, clicking Claim Link now unchecks
 //   the "Bill to Ins" checkbox for whichever medication-reconciliation
@@ -5231,6 +5237,25 @@
         return false;
     }
     setInterval(dismissEcwErrorPopup, 1800);
+
+    // ─── Auto-dismiss "Associated CPT Codes" popup ───────────────────
+    // eCW sometimes shows this modal mid-way through an ICD add/delete
+    // (its close button has ng-click="assocCPTCancle()"). Separate from
+    // dismissEcwErrorPopup above since its title isn't "eClinicalWorks".
+    // It can appear in the middle of any of this script's ICD add/delete
+    // sequences (quick actions, Analyze/Apply, Auto Link, Claim Link) and
+    // would otherwise sit there blocking the rest of the sequence.
+    // Clicking the × only cancels the associated-CPT prompt — it doesn't
+    // undo the ICD change itself — so it's safe to auto-dismiss.
+    function dismissAssocCPTModalIfPresent() {
+        const closeBtn = document.querySelector('button[ng-click="assocCPTCancle()"]');
+        if (closeBtn && closeBtn.offsetParent !== null) {
+            closeBtn.click();
+            return true;
+        }
+        return false;
+    }
+    setInterval(dismissAssocCPTModalIfPresent, 800);
 
     // Give the page more time to actually finish loading/rendering before
     // our own (heavier) checkAndUpdate starts scanning the DOM — running
