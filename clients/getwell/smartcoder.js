@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.2
+// @name         Getwell SmartCoder by ATQ v5.3
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      5.3
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,13 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.3 (2026-08-03) - computeComplexVisitCode() (99213 vs 99214) now has a
+//   second qualifying path: exactly 3 qualifying dx codes where all 3 are
+//   chronic (CHRONIC_DISEASE_ICD_CODES) also qualifies for 99214, in
+//   addition to the existing 4+ total / 2+ chronic path. Still subject to
+//   the same 15-day 99214-reuse downgrade to 99213.
 
 // CHANGELOG
 // 5.2 (2026-08-03) - G0444/G0442 are excluded from MANAGED_CODES on
@@ -914,14 +921,14 @@
         "R07.0", "R07.1", "R07.2", "R07.9",
         "M54.2", "M54.5", "M54.4", "M54.8", "M54.9", "M54.59", "M54.50", "M54.12",
         "M25.5", "M25.51", "M25.52", "M25.53", "M25.54", "M25.55", "M25.56", "M25.57", "M25.58", "M25.59",
-        "M25.511", "M25.512", "M25.519", "M25.521", "M25.522", "M25.529", "M25.531", "M25.532", "M25.539", "M25.541", 	"M25.542", "M25.549",
+        "M25.511", "M25.512", "M25.519", "M25.521", "M25.522", "M25.529", "M25.531", "M25.532", "M25.539", "M25.541", "M25.542", "M25.549",
         "M25.551", "M25.552", "M25.559", "M25.561", "M25.562", "M25.569", "M25.571", "M25.572", "M25.579",
         "M79.6", "M79.1", "M79.2", "M79.7",
         "G89.0", "G89.2", "G89.3", "G89.4", "G89.21", "G89.22", "G89.29",
         "G50.1", "G56.0", "G57.0",
-        "R10.0", "R10.2", "R10.30", "R10.4","M17.0",
+        "R10.0", "R10.2", "R10.30", "R10.4", "M17.0",
         "N94.4", "N94.5", "N94.6","M72.2",
-        "R52.81", "R52.82", "R52.89","M54.16","M10.9","M17.12","M79.10","M85.80","R25.2",
+        "R52.81", "R52.82", "R52.89", "M54.16", "M10.9", "M17.12", "M79.10","M85.80","R25.2",
         "T14.0", "T79.8XXA",
         "K52.9",
         "R11.2"
@@ -2400,9 +2407,14 @@
             if (/^Z/.test(c)) return false;
             return true;
         });
-        if (qualifying.length < 4) return '99213';
         const chronicCount = qualifying.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
-        if (chronicCount < 2) return '99213';
+
+        // Normal path: 4+ qualifying dx, 2+ of them chronic.
+        // Second path: exactly 3 qualifying dx, but all 3 are chronic —
+        // fewer total codes, but all chronic is complex enough on its own.
+        const normalPathEligible = qualifying.length >= 4 && chronicCount >= 2;
+        const threeChronicPathEligible = qualifying.length === 3 && chronicCount === 3;
+        if (!normalPathEligible && !threeChronicPathEligible) return '99213';
 
         // Otherwise eligible for 99214 — but not if it was already used
         // within the past 30 days; downgrade to 99213 instead.
