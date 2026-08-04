@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.1
+// @name         Getwell SmartCoder by ATQ v5.2
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      5.2
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,15 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.2 (2026-08-03) - G0444/G0442 are excluded from MANAGED_CODES on
+//   purpose, so the existing Medicaid/Medicare/UHC eligibility gate only
+//   ever stopped adding them — it never cleaned up either one if it was
+//   already wrongly on the chart (e.g. left from a prior insurance).
+//   Analyze now actively deletes G0444/G0442 when insurance is Medicaid
+//   or Medicare specifically (UHC's add-gate is unchanged, no new
+//   deletion behavior added for UHC).
 
 // CHANGELOG
 // 5.1 (2026-08-03) - Claim tab: when primary insurance is Healthfirst,
@@ -912,7 +921,7 @@
         "G50.1", "G56.0", "G57.0",
         "R10.0", "R10.2", "R10.30", "R10.4","M17.0",
         "N94.4", "N94.5", "N94.6",
-        "R52.81", "R52.82", "R52.89","M54.16","M10.9","M17.12","M79.10",
+        "R52.81", "R52.82", "R52.89","M54.16","M10.9","M17.12","M79.10","M85.80",
         "T14.0", "T79.8XXA",
         "K52.9",
         "R11.2"
@@ -1690,6 +1699,20 @@
             if (hasAlc !== null && !codeUsedInYear('G0442', dosYear)) {
                 desired.set('G0442', 'Annual alcohol screening (once/year)');
             }
+        }
+
+        // Medicaid/Medicare never use G0444/G0442 at all — unlike the add
+        // gate above, this actively deletes either one if it's already on
+        // the chart (e.g. left from a prior insurance, or added before
+        // this payer was on file). G0444/G0442 are intentionally NOT in
+        // MANAGED_CODES, so this is the only path that removes them.
+        if (isMedicaidOrMedicareIns(insurance)) {
+            ['G0444', 'G0442'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
+                }
+            });
         }
 
         // ---- Diff against current chart ----

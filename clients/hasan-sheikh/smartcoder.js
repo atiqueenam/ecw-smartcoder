@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.37
+// @name         Hasan Sheikh SmartCoder v1.38
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.38 (2026-08-03) - Ported two Getwell fixes: (1) Claim tab — when
+//   primary insurance is Healthfirst, clicking Claim Link now unchecks
+//   the "Bill to Ins" checkbox for whichever medication-reconciliation
+//   code is present (1159F or 1160F), via a real click so Angular's own
+//   updateBillToIns($index) handler runs; (2) Analyze now actively
+//   deletes G0444/G0442 when insurance is Medicaid or Medicare — these
+//   two are deliberately excluded from MANAGED_CODES, so before this,
+//   only the existing age-based cleanup removed them, never an
+//   insurance-based one.
 // 1.37 (2026-08-03) - Added high-level code exclusions for Pap smear
 //   (Q0091/G0101), Advance Care (99497), and TCM/Post-Hospitalization
 //   (99495/99496): (1) any of these now also blocks Weekend/99051, same
@@ -2028,6 +2037,19 @@
             if (g0444Row && !toDelete.some(d => d.code === 'G0444')) {
                 toDelete.push({ code: 'G0444', row: g0444Row.row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
             }
+        }
+
+        // Medicaid/Medicare never use G0444/G0442 at all — same reasoning
+        // as the age cleanup above (deliberately excluded from
+        // MANAGED_CODES, so this is the only path that removes either one
+        // if it's already on the chart, e.g. left from a prior insurance).
+        if (isMedicaidOrMedicareIns(insurance)) {
+            ['G0444', 'G0442'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
+                }
+            });
         }
 
         // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
@@ -4139,6 +4161,25 @@
         }
     }
 
+    // ─── Healthfirst: 1159F/1160F never billed to insurance ───────────
+    // When primary insurance is Healthfirst, whichever medication-
+    // reconciliation code is present (1159F non-Healthfirst, 1160F
+    // Healthfirst — see the Healthfirst-specific coding rule in
+    // computeAnalysis) gets its "Bill to Ins" checkbox unchecked. Uses a
+    // real .click() on the checkbox so Angular's own updateBillToIns
+    // ($index) handler runs, rather than flipping the DOM checked
+    // property directly.
+    function cl_uncheckMedRecBillToInsForHealthfirst(cptRows) {
+        const primaryName = cl_getPrimaryInsuranceName();
+        if (!primaryName || !/health[\s-]*first\b/i.test(primaryName)) return;
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if (code !== '1159F' && code !== '1160F') return;
+            const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+            if (chk && chk.checked && !chk.disabled) chk.click();
+        });
+    }
+
     // ─── Telehealth POS rule (Healthfirst / Fidelis / Metroplus) ───────
     // If primary insurance is Healthfirst, Fidelis, or Metroplus, and any
     // CPT row has MOD1 == "93" or "95", set POS to "10" on every CPT row.
@@ -4287,6 +4328,7 @@
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
+        cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
         cl_applyMedicaidTelehealthPOS(cptRows);
         cl_applyOtherInsuranceTelehealthPOS(cptRows);
         cl_fillBlankTOS(cptRows);
