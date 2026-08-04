@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v4.8
+// @name         Getwell SmartCoder by ATQ v5.0
 // @namespace    http://tampermonkey.net/
-// @version      4.8
+// @version      5.0
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,22 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 5.0 (2026-08-03) - Added modifier 95 auto-apply for televisit encounters:
+//   clicking Auto Link now sets modifier 95 on whichever office-visit E&M
+//   code (OFFICE_VISIT_EM_CODES) is on the chart, but only when the visit
+//   is classified as a televisit. Mirrors the existing SL-modifier pattern
+//   for pediatric vaccines (Angular scope write with a DOM-input
+//   fallback). Getwell only.
+
+// CHANGELOG
+// 4.9 (2026-08-03) - Added high-level code exclusions for Pap smear
+//   (Q0091/G0101), Advance Care (99497), and TCM/Post-Hospitalization
+//   (99495/99496): (1) any of these now also blocks Weekend/99051, same
+//   as the other blocking conditions; (2) clicking Preventive Counsel,
+//   Smoking, or Obesity while one is present now shows a popup and does
+//   nothing instead of applying — Preventive (PV) is unaffected; (3)
+//   Analyze now proposes deleting any existing counseling code
+//   (99401/99406/G0447) when one of these is present on the chart.
 // 4.8 (2026-08-03) - Weekend/99051 is now also blocked whenever the
 //   insurance is UHC/United Healthcare/UMR/Oxford (UMR and Oxford are both
 //   UnitedHealthcare-owned brands), regardless of what else is on the
@@ -1459,6 +1475,12 @@
 
         const desired = new Map(); // code -> reason
 
+        // Pap smear (Q0091/G0101), Advance Care (99497), TCM/Post-Hosp
+        // (99495/99496) — no counseling code may coexist with these, and
+        // (per the block below) none of the three block Weekend either.
+        const HIGH_LEVEL_BLOCKING_CODES = ['Q0091', 'G0101', '99497', '99495', '99496'];
+        const hasHighLevelCode = HIGH_LEVEL_BLOCKING_CODES.some(c => rawCPTCodesNow.includes(c));
+
         // ---- Weekend rule: CPT 99051 is desired only when the Weekend
         // toggle is on AND none of the blocking conditions below are met.
         // Blocked by: any 9-series CPT code already on the chart except
@@ -1468,10 +1490,9 @@
         // the Medicare AWV G-codes; G0447 (Obesity); a televisit — using
         // Getwell's own visit-type detection (appointment caption via
         // getVisitType/classifyVisitType, same as the office-visit E&M
-        // rule below uses); or the insurance being UHC/United Healthcare/
+        // rule below uses); the insurance being UHC/United Healthcare/
         // UMR/Oxford (UMR and Oxford are both UnitedHealthcare-owned
-        // brands) — 99051 is never used for that payer family regardless
-        // of what else is on the chart.
+        // brands); or one of the high-level codes above being present.
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
         const isUHCFamilyForWeekend = !!insurance &&
@@ -1484,7 +1505,8 @@
                 MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
                 rawCPTCodesNow.includes('G0447') ||
                 isTelevisitForWeekend ||
-                isUHCFamilyForWeekend;
+                isUHCFamilyForWeekend ||
+                hasHighLevelCode;
             if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
         }
 
@@ -1764,6 +1786,22 @@
             currentRows.forEach(r => {
                 if (/^G\d/i.test(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
+                }
+            });
+        }
+
+        // High-level codes (Pap smear Q0091/G0101, Advance Care 99497, TCM/
+        // Post-Hospitalization 99495/99496): no counseling code may coexist
+        // with these. If any is present, any existing counseling code
+        // (99401 Preventive Counseling, 99406 Smoking, G0447 Obesity) gets
+        // proposed for deletion here. Preventive itself is unaffected —
+        // this list intentionally excludes the preventive E&M/AWV codes.
+        const triggeringHighLevelCode = HIGH_LEVEL_BLOCKING_CODES.find(c => rawCPTCodesNow.includes(c));
+        if (triggeringHighLevelCode) {
+            ['99401', '99406', 'G0447'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${triggeringHighLevelCode} present — counseling codes can't coexist with it` });
                 }
             });
         }
@@ -2105,6 +2143,17 @@
             el.style.opacity = '0';
             setTimeout(() => el.remove(), 400);
         }, 5000);
+    }
+
+    // Pap smear (Q0091/G0101), Advance Care (99497), TCM/Post-Hosp (99495/
+    // 99496): no counseling quick action (P/C, Smoking, Obesity) may run
+    // while any of these is present. Preventive (PV) is unaffected.
+    function getHighLevelBlockingCode() {
+        const codes = ['Q0091', 'G0101', '99497', '99495', '99496'];
+        for (const code of codes) {
+            if (getCPTRowByCode(code)) return code;
+        }
+        return null;
     }
 
     let quickActionRunning = false;
@@ -3065,6 +3114,46 @@
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
+    // Televisit modifier: CPT modifier 95 identifies a telehealth-furnished
+    // service. Applied to whichever office-visit E&M code
+    // (OFFICE_VISIT_EM_CODES: 99211-99215/99203) is on the chart, only
+    // when the visit is classified as a televisit (Getwell's own
+    // appointment-caption detection, same as the office-visit E&M rule
+    // and the Weekend rule use). Getwell only. Runs as part of Auto Link,
+    // same trigger as the SL modifier above.
+    function al_apply95ModifierForTelevisit() {
+        if (classifyVisitType(getVisitType()) !== 'televisit') return;
+        const tbody = document.querySelector("#billingTbl4 tbody");
+        if (!tbody) return;
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        rows.forEach(row => {
+            const cptCode = row.querySelector("td:nth-child(2)")?.textContent.trim();
+            if (!cptCode || !OFFICE_VISIT_EM_CODES.includes(cptCode)) return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope) {
+                    scope.$applyAsync(() => {
+                        if (scope.cpt) scope.cpt.mod1 = "95";
+                    });
+                } else {
+                    const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                                     row.querySelector('input[name="mod1"]') ||
+                                     row.querySelector('input[id*="mod1"]');
+                    if (modInput) {
+                        modInput.focus();
+                        modInput.value = "95";
+                        modInput.dispatchEvent(new Event("input", { bubbles: true }));
+                        modInput.dispatchEvent(new Event("change", { bubbles: true }));
+                        modInput.blur();
+                    }
+                }
+            } catch (e) {
+                console.error("95 modifier error:", cptCode, e);
+            }
+        });
+        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    }
+
     function al_mainFlow() {
         al_deleteUnwantedCodes(() => {
             const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
@@ -3072,6 +3161,7 @@
             al_linkCPTGeneric(icdRows, cptRows);
             al_handleUnlistedCPTs(cptRows);
             al_applySLModifierForPedsVaccines();
+            al_apply95ModifierForTelevisit();
             al_alertDuplicateICDStart(icdRows);
             al_alertDuplicateCPT(cptRows);
             al_validatePreventiveCPT(cptRows);
@@ -4114,6 +4204,11 @@
     // ── Preventive Counsel: Z71.3, Z71.82/89, CPT 99401 ──
     async function runPreventiveCounselAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Preventive Counsel: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4138,6 +4233,11 @@
     // ── Smoking: F17.210 + CPT 99406, only for a confirmed smoker ──
     async function runSmokingAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Smoking: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4157,6 +4257,11 @@
     // ── Obesity: E66.9, Z68.xx, CPT G0447 ──
     async function runObesityAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        const blockingCode = getHighLevelBlockingCode();
+        if (blockingCode) {
+            showQuickNotice(`Obesity: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
