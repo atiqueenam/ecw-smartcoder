@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.40
+// @name         Hasan Sheikh SmartCoder v1.41
 // @namespace    http://tampermonkey.net/
-// @version      1.40
+// @version      1.41
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,13 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.41 (2026-08-03) - CPT 96372 now always gets modifier 59 set on it,
+//   both on Auto Link (billing tab, mirrors the existing
+//   al_applyTelevisitModifier Angular-scope/DOM-fallback pattern) and
+//   Claim Link (Claim tab, via the existing cl_getCPTMod1Input/
+//   cl_setInputValue helpers).
 
 // CHANGELOG
 // 1.40 (2026-08-03) - Same fix as Getwell: the BMI-30/40/50 obesity code
@@ -3370,6 +3377,35 @@
         });
     }
 
+    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
+    // injection) always needs modifier 59 (distinct procedural service)
+    // to avoid a bundling denial. Same Angular-scope-with-DOM-fallback
+    // mechanics as al_applyTelevisitModifier above.
+    function al_apply59ModifierFor96372() {
+        const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
+        cptRows.forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (code !== '96372') return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope && scope.cpt) {
+                    scope.$applyAsync(() => { scope.cpt.mod1 = '59'; });
+                    return;
+                }
+            } catch (e) { /* fall through to manual input path */ }
+            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                             row.querySelector('input[name="mod1"]') ||
+                             row.querySelector('input[id*="mod1"]');
+            if (modInput) {
+                modInput.focus();
+                modInput.value = '59';
+                modInput.dispatchEvent(new Event('input', { bubbles: true }));
+                modInput.dispatchEvent(new Event('change', { bubbles: true }));
+                modInput.blur();
+            }
+        });
+    }
+
     // ─── 99214 eligibility reminder (informational only — Link button) ──
     // Purely a notification/reminder shown on Link click; does not touch
     // any codes. The Analyze function's own 99214 logic (with the 30-day
@@ -3428,6 +3464,7 @@
             al_handleUnlistedCPTs(cptRows);
             al_applySLModifierForPedsVaccines();
             al_applyTelevisitModifier();
+            al_apply59ModifierFor96372();
             al_alertDuplicateICDStart(icdRows);
             al_alertDuplicateCPT(cptRows);
             al_validatePreventiveCPT(cptRows);
@@ -3599,6 +3636,18 @@
 
     function cl_getCPTTOSInput(row) {
         return row.querySelector('input[data-fieldname="ClaimCPTTOS"]');
+    }
+
+    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
+    // injection) always needs modifier 59 (distinct procedural service)
+    // to avoid a bundling denial. Runs as part of Claim Link.
+    function cl_apply59ModifierFor96372(cptRows) {
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if (code !== '96372') return;
+            const modInput = cl_getCPTMod1Input(row);
+            if (modInput) cl_setInputValue(modInput, '59');
+        });
     }
 
     // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
@@ -4342,6 +4391,7 @@
         cl_checkForFluVaccineCPTs(cptRows);
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
+        cl_apply59ModifierFor96372(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
         cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
         cl_applyMedicaidTelehealthPOS(cptRows);

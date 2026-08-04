@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.6
+// @name         Getwell SmartCoder by ATQ v5.7
 // @namespace    http://tampermonkey.net/
-// @version      5.6
+// @version      5.7
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,12 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.7 (2026-08-03) - CPT 96372 now always gets modifier 59 set on it,
+//   both on Auto Link (billing tab, Angular-scope write with a DOM-input
+//   fallback) and Claim Link (Claim tab, via the existing
+//   cl_getCPTMod1Input/cl_setInputValue helpers).
 
 // CHANGELOG
 // 5.6 (2026-08-03) - The BMI-30/40/50 obesity code rule (E66.9/E66.01/
@@ -3227,6 +3233,42 @@
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
+    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
+    // injection) always needs modifier 59 (distinct procedural service)
+    // to avoid a bundling denial. Same Angular-scope-with-DOM-fallback
+    // mechanics as the 95 modifier above. Runs as part of Auto Link.
+    function al_apply59ModifierFor96372() {
+        const tbody = document.querySelector("#billingTbl4 tbody");
+        if (!tbody) return;
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        rows.forEach(row => {
+            const cptCode = row.querySelector("td:nth-child(2)")?.textContent.trim();
+            if (cptCode !== "96372") return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope) {
+                    scope.$applyAsync(() => {
+                        if (scope.cpt) scope.cpt.mod1 = "59";
+                    });
+                } else {
+                    const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                                     row.querySelector('input[name="mod1"]') ||
+                                     row.querySelector('input[id*="mod1"]');
+                    if (modInput) {
+                        modInput.focus();
+                        modInput.value = "59";
+                        modInput.dispatchEvent(new Event("input", { bubbles: true }));
+                        modInput.dispatchEvent(new Event("change", { bubbles: true }));
+                        modInput.blur();
+                    }
+                }
+            } catch (e) {
+                console.error("59 modifier error:", cptCode, e);
+            }
+        });
+        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    }
+
     function al_mainFlow() {
         al_deleteUnwantedCodes(() => {
             const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
@@ -3235,6 +3277,7 @@
             al_handleUnlistedCPTs(cptRows);
             al_applySLModifierForPedsVaccines();
             al_apply95ModifierForTelevisit();
+            al_apply59ModifierFor96372();
             al_alertDuplicateICDStart(icdRows);
             al_alertDuplicateCPT(cptRows);
             al_validatePreventiveCPT(cptRows);
@@ -4010,6 +4053,18 @@
         if (claimPOSInput) cl_setInputValue(claimPOSInput, '10');
     }
 
+    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
+    // injection) always needs modifier 59 (distinct procedural service)
+    // to avoid a bundling denial. Runs as part of Claim Link.
+    function cl_apply59ModifierFor96372(cptRows) {
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if (code !== '96372') return;
+            const modInput = cl_getCPTMod1Input(row);
+            if (modInput) cl_setInputValue(modInput, '59');
+        });
+    }
+
     // ─── Healthfirst: 1159F/1160F never billed to insurance ───────────
     // When primary insurance is Healthfirst, whichever medication-
     // reconciliation code is present (1159F non-Healthfirst, 1160F
@@ -4147,6 +4202,7 @@
         cl_checkForFluVaccineCPTs(cptRows);
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
+        cl_apply59ModifierFor96372(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
         cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
         cl_applyMedicaidTelehealthPOS(cptRows);
