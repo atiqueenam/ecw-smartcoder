@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.39
+// @name         Hasan Sheikh SmartCoder v1.40
 // @namespace    http://tampermonkey.net/
-// @version      1.39
+// @version      1.40
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,15 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.40 (2026-08-03) - Same fix as Getwell: the BMI-30/40/50 obesity code
+//   rule (E66.9/E66.01/E66.09) already existed in Analyze's correction
+//   logic, but the OB quick-action button was still hardcoded to always
+//   add E66.9 regardless of BMI. It now picks the same threshold-correct
+//   code on first add (with the same E66.09 double-check alert), and
+//   skips with a notice if BMI is under 30 instead of adding an
+//   inapplicable code.
 
 // CHANGELOG
 // 1.39 (2026-08-03) - Added an auto-dismiss handler for the "Associated CPT
@@ -4565,9 +4574,19 @@
             }
             const bmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
             if (bmi == null) { showQuickNotice("Obesity: BMI not found on this page — skipped."); return; }
+            if (bmi < 30) { showQuickNotice(`Obesity: BMI ${bmi} is under 30 — obesity code not applicable, skipped.`); return; }
             const age = getAgeAtDOS(text);
 
-            const codes = ["E66.9"];
+            // Same BMI-threshold rule Analyze uses to correct an existing
+            // obesity code: 30-39.9 -> E66.9, 40-49.9 -> E66.01, 50+ -> E66.09.
+            let obesityCode = 'E66.9';
+            if (bmi >= 50) obesityCode = 'E66.09';
+            else if (bmi >= 40) obesityCode = 'E66.01';
+            if (obesityCode === 'E66.09') {
+                alert(`BMI ${bmi} suggests E66.09 (severe/morbid obesity) — this is a sensitive diagnosis usually documented deliberately by the provider. Please double-check before confirming this change.`);
+            }
+
+            const codes = [obesityCode];
             const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
 
