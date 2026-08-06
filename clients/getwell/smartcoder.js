@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.7
+// @name         Getwell SmartCoder by ATQ v5.10
 // @namespace    http://tampermonkey.net/
-// @version      5.7
+// @version      5.10
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,32 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.10 (2026-08-03) - Fixed the Preventive Counsel insurance block: the
+//   v5.9 regex matched "medicare" broadly, which incorrectly blocked VNS
+//   Choice too (it's a Medicare Advantage plan, not straight Medicare).
+//   Rewritten to match Hasan Sheikh's existing (correct) logic —
+//   isAnyMedicareIns(name) && !isVNSChoiceIns(name) — so VNS Choice can
+//   have Preventive Counsel. Regression-tested against 9 cases.
+
+// CHANGELOG
+// 5.9 (2026-08-03) - Three fixes: (1) Claim Link now bumps any 0.00 (or
+//   blank) Billed Fee to 0.01, since a $0.00 fee causes claim rejection
+//   for most payers; (2) Preventive Counsel now blocks with a popup
+//   ("Preventive counseling cannot be applied for <insurance>") when
+//   insurance is Medicaid/Metroplus/Medicare/UHC/United Healthcare/NYCE
+//   PPO — this rule didn't exist in Getwell before; (3) verified modifier
+//   25 is never applied to G0402/G0438/G0439 — it already wasn't
+//   (al_apply25ModifierFor99211/cl_apply25ModifierFor99211 only ever
+//   match CPT 99211 exactly), no change needed there.
+
+// CHANGELOG
+// 5.8 (2026-08-03) - CPT 99211 now always gets modifier 25 set on it, on
+//   both Auto Link and Claim Link, no matter what else is on the chart —
+//   G0402/G0438/G0439 are explicitly never touched by this. Getwell's
+//   G0402/G0438/G0439 preventive-bundle ICD linking was already correct
+//   in both modules (verified — no fix needed here).
 
 // CHANGELOG
 // 5.7 (2026-08-03) - CPT 96372 now always gets modifier 59 set on it,
@@ -3269,6 +3295,43 @@
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
+    // 99211 modifier: CPT 99211 always needs modifier 25 (significant,
+    // separately identifiable E/M service), no matter what else is on
+    // the chart. The Medicare AWV G-codes (G0402/G0438/G0439) never get
+    // a modifier here, even though they can appear on the same encounter
+    // as 99211 — only 99211 itself is targeted below.
+    function al_apply25ModifierFor99211() {
+        const tbody = document.querySelector("#billingTbl4 tbody");
+        if (!tbody) return;
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        rows.forEach(row => {
+            const cptCode = row.querySelector("td:nth-child(2)")?.textContent.trim();
+            if (cptCode !== "99211") return; // never G0402/G0438/G0439
+            try {
+                const scope = angular.element(row).scope();
+                if (scope) {
+                    scope.$applyAsync(() => {
+                        if (scope.cpt) scope.cpt.mod1 = "25";
+                    });
+                } else {
+                    const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                                     row.querySelector('input[name="mod1"]') ||
+                                     row.querySelector('input[id*="mod1"]');
+                    if (modInput) {
+                        modInput.focus();
+                        modInput.value = "25";
+                        modInput.dispatchEvent(new Event("input", { bubbles: true }));
+                        modInput.dispatchEvent(new Event("change", { bubbles: true }));
+                        modInput.blur();
+                    }
+                }
+            } catch (e) {
+                console.error("25 modifier error:", cptCode, e);
+            }
+        });
+        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    }
+
     function al_mainFlow() {
         al_deleteUnwantedCodes(() => {
             const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
@@ -3278,6 +3341,7 @@
             al_applySLModifierForPedsVaccines();
             al_apply95ModifierForTelevisit();
             al_apply59ModifierFor96372();
+            al_apply25ModifierFor99211();
             al_alertDuplicateICDStart(icdRows);
             al_alertDuplicateCPT(cptRows);
             al_validatePreventiveCPT(cptRows);
@@ -3447,6 +3511,22 @@
 
     function cl_getCPTTOSInput(row) {
         return row.querySelector('input[data-fieldname="ClaimCPTTOS"]');
+    }
+
+    function cl_getCPTBilledFeeInput(row) {
+        return row.querySelector('input[data-fieldname="ClaimCPTBilledFee"]');
+    }
+
+    // Billed Fee 0.00 -> 0.01: a $0.00 billed fee causes claim rejection
+    // for most payers, so any row showing exactly 0.00 (or blank/0) gets
+    // bumped to 0.01. Runs as part of Claim Link.
+    function cl_fixZeroBilledFee(cptRows) {
+        cptRows.forEach(row => {
+            const feeInput = cl_getCPTBilledFeeInput(row);
+            if (!feeInput) return;
+            const fee = parseFloat(feeInput.value);
+            if (isNaN(fee) || fee === 0) cl_setInputValue(feeInput, '0.01');
+        });
     }
 
     // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
@@ -4065,6 +4145,20 @@
         });
     }
 
+    // 99211 modifier: CPT 99211 always needs modifier 25 (significant,
+    // separately identifiable E/M service), no matter what else is on
+    // the chart. The Medicare AWV G-codes (G0402/G0438/G0439) never get
+    // a modifier here, even though they can appear on the same encounter
+    // as 99211 — only 99211 itself is targeted below.
+    function cl_apply25ModifierFor99211(cptRows) {
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if (code !== '99211') return; // never G0402/G0438/G0439
+            const modInput = cl_getCPTMod1Input(row);
+            if (modInput) cl_setInputValue(modInput, '25');
+        });
+    }
+
     // ─── Healthfirst: 1159F/1160F never billed to insurance ───────────
     // When primary insurance is Healthfirst, whichever medication-
     // reconciliation code is present (1159F non-Healthfirst, 1160F
@@ -4193,6 +4287,7 @@
 
         cl_linkCPTGeneric(icdRows, cptRows);
         cl_handleUnlistedCPTs(cptRows);
+        cl_fixZeroBilledFee(cptRows);
         cl_alertDuplicateICDStart(icdRows);
         cl_checkICDOrderZBeforeDx(icdRows);
         cl_alertDuplicateCPT(cptRows);
@@ -4203,6 +4298,7 @@
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
         cl_apply59ModifierFor96372(cptRows);
+        cl_apply25ModifierFor99211(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
         cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
         cl_applyMedicaidTelehealthPOS(cptRows);
@@ -4351,11 +4447,31 @@
     }
 
     // ── Preventive Counsel: Z71.3, Z71.82/89, CPT 99401 ──
+    // Preventive Counsel is never applicable for these payers. "Medicare"
+    // means straight Medicare specifically — VNS Choice is a Medicare
+    // Advantage plan and CAN have Preventive Counsel, so it's explicitly
+    // excluded from the Medicare block.
+    function getPreventiveCounselBlockedInsurance(insurance) {
+        if (!insurance) return null;
+        const name = insurance.trim();
+        if (/metro\s*plus/i.test(name)) return name;
+        if (/medicaid/i.test(name)) return name;
+        if (isUHCInsurance(name)) return name;
+        if (/nyce\s*ppo/i.test(name)) return name;
+        if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return name; // "only Medicare" = straight Medicare
+        return null;
+    }
+
     async function runPreventiveCounselAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
         const blockingCode = getHighLevelBlockingCode();
         if (blockingCode) {
             showQuickNotice(`Preventive Counsel: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
+            return;
+        }
+        const blockedInsurance = getPreventiveCounselBlockedInsurance(parseInsuranceFromPage(getEncounterText()));
+        if (blockedInsurance) {
+            alert(`Preventive counseling cannot be applied for ${blockedInsurance}`);
             return;
         }
         quickActionRunning = true;
