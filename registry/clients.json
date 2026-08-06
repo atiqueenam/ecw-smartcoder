@@ -9,7 +9,7 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "5.18",
+      "version": "5.20",
       "file": "clients/getwell/smartcoder.js",
       "sha256": "ae853b52f24e47fe5930f5307982acdd6ec76afbd8270b47c5abf5217254ac60"
     },
@@ -20,7 +20,7 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.51",
+      "version": "1.52",
       "file": "clients/hasan-sheikh/smartcoder.js",
       "sha256": "f65ae3c7e2b17a68cf39d0cee4067731cbed5860d0ec9347d5fa947c45ac3759"
     }

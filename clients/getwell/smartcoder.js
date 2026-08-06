@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.18
+// @name         Getwell SmartCoder by ATQ v5.20
 // @namespace    http://tampermonkey.net/
-// @version      5.18
+// @version      5.20
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,26 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.20 (2026-08-03) - Added G0010 (HepB, Medicare) to the Z23 linking
+//   config on both Auto Link and Claim Link. This was a pre-existing gap
+//   in the original Hasan Sheikh script (inherited when the Vaccine
+//   Administration Coding feature was ported), not something specific
+//   to Getwell — same fix applied to both files.
+
+// CHANGELOG
+// 5.19 (2026-08-03) - Ported the Vaccine Administration Coding feature
+//   from Hasan Sheikh's file (it didn't exist in Getwell at all). Works
+//   out 90460/90461 (under 18, component-count based) or 90471/90472
+//   (18+, per-vaccine) from whatever vaccine product codes are on the
+//   chart, plus Medicare-only overrides (G0008 flu, G0009 pneumococcal,
+//   G0010 HepB, 90480 COVID — no age limit for any of these). Also
+//   corrects the Units field on an existing admin code and removes a
+//   stale/inapplicable one. New kind:'vaxadmin' item type wired into
+//   both the main and recheck Apply passes. Ported verbatim — no
+//   Getwell-specific rule changes, since this logic is payer/age based,
+//   not client-specific.
 
 // CHANGELOG
 // 5.18 (2026-08-03) - Fixed the Preventive Counsel Medicare block: it used
@@ -1624,6 +1644,125 @@
         return results;
     }
 
+    // ====================== VACCINE ADMINISTRATION CODING ======================
+    // Component counts per vaccine product CPT code (from the AAP
+    // "Component Count" reference). Used to compute 90460/90461 units for
+    // patients under 18. Anything not listed defaults to 1 component.
+    const VACCINE_COMPONENT_MAP = {
+        '90589': 1, '90700': 3, '90702': 2, '90696': 4, '90697': 6,
+        '90723': 5, '90698': 5, '90633': 1, '90740': 1, '90743': 1,
+        '90744': 1, '90746': 1, '90747': 1, '90647': 1, '90648': 1,
+        '90651': 1, '90707': 3, '90710': 4, '90619': 1, '90620': 1,
+        '90621': 1, '90623': 1, '90624': 1, '90734': 1, '90670': 1,
+        '90671': 1, '90677': 1, '90732': 1, '90713': 1, '90680': 1,
+        '90681': 1, '90714': 2, '90715': 3, '90716': 1, '90622': 1,
+        '90611': 2,
+        // Influenza (all single-component)
+        '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
+        '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
+        '90687': 1, '90688': 1, '90756': 1
+    };
+    // COVID vaccines are never counted via 90460-90474 — always 90480,
+    // for every patient regardless of age or payer.
+    const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
+    // Medicare-only overrides (no age limit) — these use their own G-codes
+    // instead of the standard 90460-90474 scheme, for Medicare patients only.
+    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
+    const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
+    const HEPB_VACCINE_CODES = new Set(['90740', '90743', '90744', '90746', '90747']);
+    // Every admin code this feature manages — used to find stale/wrong ones.
+    const VACCINE_ADMIN_CODE_UNIVERSE = ['90460', '90461', '90471', '90472', '90473', '90474', 'G0008', 'G0009', 'G0010', '90480'];
+
+    function getCPTRowUnits(row) {
+        const input = row.querySelector('input[data-fieldname="units"]');
+        if (!input) return null;
+        const n = parseFloat(input.value);
+        return isNaN(n) ? null : n;
+    }
+
+    // Sets the Units field on an existing CPT row (the ng-model="cpt.units"
+    // input eCW renders per row) — tries the Angular scope first, falls
+    // back to a manual input + event dispatch.
+    async function setCPTUnitsByCode(code, units) {
+        const row = getCPTRowByCode(code);
+        if (!row) return { ok: false };
+        const unitsStr = Number(units).toFixed(2); // eCW displays units as "1.00", "2.00", etc.
+        try {
+            const scope = angular.element(row).scope();
+            if (scope && scope.cpt) {
+                scope.$applyAsync(() => { scope.cpt.units = unitsStr; });
+                await new Promise(r => setTimeout(r, 300));
+                return { ok: true };
+            }
+        } catch (e) { /* fall through to manual input path */ }
+        const unitsInput = row.querySelector('input[data-fieldname="units"]');
+        if (unitsInput) {
+            unitsInput.focus();
+            unitsInput.value = unitsStr;
+            unitsInput.dispatchEvent(new Event('input', { bubbles: true }));
+            unitsInput.dispatchEvent(new Event('change', { bubbles: true }));
+            unitsInput.blur();
+            await new Promise(r => setTimeout(r, 300));
+            return { ok: true };
+        }
+        return { ok: false };
+    }
+
+    // Pure planning function: given the vaccine PRODUCT rows currently on
+    // the chart, works out which administration code(s) apply and at what
+    // unit count. `rows` is an array of {code, row} (from currentRows).
+    function computeVaccineAdminPlan(rows, age, isMedicareIns) {
+        const covidRows = [];
+        const fluRows = [];
+        const pneumoRows = [];
+        const hepbRows = [];
+        const otherVaccineRows = [];
+
+        rows.forEach(r => {
+            const code = r.code;
+            if (COVID_VACCINE_CODES.has(code)) { covidRows.push(r); return; }
+            if (!(code in VACCINE_COMPONENT_MAP)) return; // not a vaccine product code
+            if (isMedicareIns && FLU_VACCINE_CODES.has(code)) { fluRows.push(r); return; }
+            if (isMedicareIns && PNEUMOCOCCAL_VACCINE_CODES.has(code)) { pneumoRows.push(r); return; }
+            if (isMedicareIns && HEPB_VACCINE_CODES.has(code)) { hepbRows.push(r); return; }
+            otherVaccineRows.push(r);
+        });
+
+        const plan = []; // { code, units, reason }
+
+        if (covidRows.length) {
+            plan.push({ code: '90480', units: 1, reason: 'COVID-19 vaccine administration' });
+        }
+        if (fluRows.length) {
+            plan.push({ code: 'G0008', units: 1, reason: 'Medicare — Influenza vaccine administration' });
+        }
+        if (pneumoRows.length) {
+            plan.push({ code: 'G0009', units: 1, reason: 'Medicare — Pneumococcal vaccine administration' });
+        }
+        if (hepbRows.length) {
+            plan.push({ code: 'G0010', units: 1, reason: 'Medicare — Hepatitis B vaccine administration (high/intermediate risk)' });
+        }
+
+        if (otherVaccineRows.length) {
+            const vaccineCount = otherVaccineRows.length;
+            if (age != null && age >= 18) {
+                plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
+                if (vaccineCount > 1) {
+                    plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
+                }
+            } else if (age != null) {
+                const totalComponents = otherVaccineRows.reduce((sum, r) => sum + (VACCINE_COMPONENT_MAP[r.code] || 1), 0);
+                plan.push({ code: '90460', units: vaccineCount, reason: `${vaccineCount} vaccine(s), ${totalComponents} total component(s) — first component of each` });
+                const extra = totalComponents - vaccineCount;
+                if (extra > 0) {
+                    plan.push({ code: '90461', units: extra, reason: `${totalComponents} total component(s) across ${vaccineCount} vaccine(s) — additional components` });
+                }
+            }
+        }
+
+        return plan;
+    }
+
     function computeAnalysis() {
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
@@ -2154,6 +2293,39 @@
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'J-code not applicable — removed' });
             }
         });
+
+        // ---- Vaccine administration coding ----
+        // Works out 90460/90461 (under 18, component-based), 90471/90472
+        // (18+, per-vaccine), and the Medicare-only overrides (G0008 flu,
+        // G0009 pneumococcal, G0010 HepB, 90480 COVID — no age limit) from
+        // whatever vaccine PRODUCT codes are already on the chart. Uses
+        // kind:'vaxadmin' so Start Action will fix the Units field even
+        // when the admin code itself is already present.
+        {
+            const isMedicareForVax = isAnyMedicareIns(insurance) || isVNSChoiceIns(insurance);
+            const vaccinePlan = computeVaccineAdminPlan(currentRows, age, isMedicareForVax);
+            const plannedCodes = new Set(vaccinePlan.map(p => p.code));
+
+            vaccinePlan.forEach(p => {
+                const existingRow = currentRows.find(r => r.code === p.code);
+                if (!existingRow) {
+                    toAdd.push({ code: p.code, reason: p.reason, kind: 'vaxadmin', units: p.units });
+                } else {
+                    const currentUnits = getCPTRowUnits(existingRow.row);
+                    if (currentUnits !== p.units) {
+                        toAdd.push({ code: p.code, reason: `${p.reason} (units ${currentUnits ?? '?'} → ${p.units})`, kind: 'vaxadmin', units: p.units });
+                    }
+                }
+            });
+
+            // Any admin code from the managed universe that's present but
+            // not part of the current plan is stale — remove it.
+            currentRows.forEach(r => {
+                if (VACCINE_ADMIN_CODE_UNIVERSE.includes(r.code) && !plannedCodes.has(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Vaccine admin code not applicable for the vaccines currently on this chart' });
+                }
+            });
+        }
 
         return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance };
     }
@@ -2782,6 +2954,7 @@
             "90472": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "G0010": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90674": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90686": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90688": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -3779,6 +3952,7 @@
             "90472": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "G0010": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90674": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90686": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90688": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
@@ -4699,6 +4873,17 @@
             } else if (item.kind === 'em') {
                 const result = await addEMTreeCode(item.code, item.emCategory, item.emIsNewPatient);
                 actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: result.message });
+            } else if (item.kind === 'vaxadmin') {
+                let ok = true, message;
+                if (!getCPTRowByCode(item.code)) {
+                    const result = await addSingleCPT(item.code);
+                    ok = result.ok; message = result.message;
+                }
+                if (ok && item.units) {
+                    const unitsResult = await setCPTUnitsByCode(item.code, item.units);
+                    if (!unitsResult.ok) message = 'Added, but could not set Units — set it manually';
+                }
+                actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: ok ? 'success' : 'fail', message });
             } else {
                 const result = await addSingleCPT(item.code);
                 actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: result.message });
@@ -4777,6 +4962,16 @@
                 } else if (item.kind === 'em') {
                     const result = await addEMTreeCode(item.code, item.emCategory, item.emIsNewPatient);
                     actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: 'Found on recheck pass' });
+                } else if (item.kind === 'vaxadmin') {
+                    let ok = true, message = 'Found on recheck pass';
+                    if (!getCPTRowByCode(item.code)) {
+                        const result = await addSingleCPT(item.code);
+                        ok = result.ok;
+                    }
+                    if (ok && item.units) {
+                        await setCPTUnitsByCode(item.code, item.units);
+                    }
+                    actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: ok ? 'success' : 'fail', message });
                 } else {
                     const result = await addSingleCPT(item.code);
                     actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: 'Found on recheck pass' });

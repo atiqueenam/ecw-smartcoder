@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.51
+// @name         Hasan Sheikh SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.51
+// @version      1.52
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,11 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.52 (2026-08-03) - Added G0010 (HepB, Medicare) to the Z23 linking
+//   config on both Auto Link and Claim Link. This was a pre-existing gap
+//   from before this session — same fix applied to Getwell too.
 
 // CHANGELOG
 // 1.51 (2026-08-03) - Fixed the Preventive Counsel Medicare block: it used
@@ -2825,6 +2830,7 @@
             "90472": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "G0010": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90674": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90686": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90688": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -3985,6 +3991,7 @@
             "90472": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "G0010": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90674": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90686": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90688": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
