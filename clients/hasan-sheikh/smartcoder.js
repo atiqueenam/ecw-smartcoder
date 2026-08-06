@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.49
+// @name         Hasan Sheikh SmartCoder v1.50
 // @namespace    http://tampermonkey.net/
-// @version      1.49
+// @version      1.50
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,16 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.50 (2026-08-03) - Reverted the modifier-25 rule back to the v1.41
+//   behavior: only 99211 gets modifier 25, always, unconditionally.
+//   Removed the v1.42/v1.45 additions entirely — G0402/G0438/G0439 and
+//   the rest of the office-visit family (99212-99215/99203) are no
+//   longer touched at all by this rule (no add, no clear). Those
+//   additions were clearing a "25" that a provider had legitimately set
+//   for an unrelated reason. All other modifier rules (SL, 93/95
+//   televisit, 59 for 96372) were not touched and remain exactly as-is.
 
 // CHANGELOG
 // 1.49 (2026-08-03) - The v5.14/v1.47 fix wasn't enough — the button was
@@ -3508,46 +3518,27 @@
     }
 
     // 99211 always gets modifier 25 (unconditional, no matter what else
-    // is on the chart). The rest of the office-visit family
-    // (99212-99215/99203) gets modifier 25 only when a preventive code is
-    // ALSO present — either a "9" preventive code (ALL_PREVENTIVE_EM_CODES,
-    // 99381-99397) or a "G" preventive code (G0402/G0438/G0439). If
-    // neither condition applies, an existing 25 on one of those rows gets
-    // cleared. The AWV G-codes themselves never get modifier 25 — and if
-    // one was mistakenly typed in by hand, it gets cleared here too.
-    const G0402_FAMILY = ["G0402", "G0438", "G0439"];
+    // is on the chart). Nothing else is touched by this rule —
+    // G0402/G0438/G0439 and the rest of the office-visit family are
+    // never given or cleared of modifier 25 here.
     function al_apply25ModifierFor99211() {
         const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
-        const codesPresent = cptRows
-            .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
-            .filter(Boolean);
-        const hasPreventiveCode = codesPresent.some(c =>
-            ALL_PREVENTIVE_EM_CODES.includes(c) || G0402_FAMILY.includes(c));
-
         cptRows.forEach(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
-            const isAWVFamily = G0402_FAMILY.includes(code);
-            const isOfficeVisit = OFFICE_VISIT_EM_CODES.includes(code);
-            if (!isAWVFamily && !isOfficeVisit) return;
-
-            const wants25 = isOfficeVisit && (code === '99211' || hasPreventiveCode);
+            if (code !== '99211') return;
             try {
                 const scope = angular.element(row).scope();
                 if (scope && scope.cpt) {
-                    if (wants25) {
-                        scope.$applyAsync(() => { scope.cpt.mod1 = '25'; });
-                    } else if (scope.cpt.mod1 === '25') {
-                        scope.$applyAsync(() => { scope.cpt.mod1 = ''; });
-                    }
+                    scope.$applyAsync(() => { scope.cpt.mod1 = '25'; });
                     return;
                 }
             } catch (e) { /* fall through to manual input path */ }
             const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
                              row.querySelector('input[name="mod1"]') ||
                              row.querySelector('input[id*="mod1"]');
-            if (modInput && (wants25 || modInput.value.trim() === '25')) {
+            if (modInput) {
                 modInput.focus();
-                modInput.value = wants25 ? '25' : '';
+                modInput.value = '25';
                 modInput.dispatchEvent(new Event('input', { bubbles: true }));
                 modInput.dispatchEvent(new Event('change', { bubbles: true }));
                 modInput.blur();
@@ -3816,35 +3807,16 @@
         });
     }
 
-    // 99211 modifier: CPT 99211 always needs modifier 25 (significant,
-    // separately identifiable E/M service), no matter what else is on
-    // the chart. The Medicare AWV G-codes (G0402/G0438/G0439) never get
-    // a modifier here, even though they can appear on the same encounter
-    // as 99211 — only 99211 itself is targeted below.
-    // 99211 always gets modifier 25 (unconditional). The rest of the
-    // office-visit family (99212-99215/99203) gets modifier 25 only when
-    // a preventive code is ALSO present (ALL_PREVENTIVE_EM_CODES or
-    // G0402/G0438/G0439). The AWV G-codes themselves never get modifier
-    // 25 — and if one was mistakenly typed in by hand, it gets cleared.
+    // 99211 always gets modifier 25 (unconditional, no matter what else
+    // is on the chart). Nothing else is touched by this rule —
+    // G0402/G0438/G0439 and the rest of the office-visit family are
+    // never given or cleared of modifier 25 here.
     function cl_apply25ModifierFor99211(cptRows) {
-        const codesPresent = cptRows.map(cl_getCPTCode).filter(Boolean);
-        const hasPreventiveCode = codesPresent.some(c =>
-            ALL_PREVENTIVE_EM_CODES.includes(c) || G0402_FAMILY.includes(c));
-
         cptRows.forEach(row => {
             const code = cl_getCPTCode(row);
-            const isAWVFamily = G0402_FAMILY.includes(code);
-            const isOfficeVisit = OFFICE_VISIT_EM_CODES.includes(code);
-            if (!isAWVFamily && !isOfficeVisit) return;
-
-            const wants25 = isOfficeVisit && (code === '99211' || hasPreventiveCode);
+            if (code !== '99211') return;
             const modInput = cl_getCPTMod1Input(row);
-            if (!modInput) return;
-            if (wants25) {
-                cl_setInputValue(modInput, '25');
-            } else if (modInput.value.trim() === '25') {
-                cl_setInputValue(modInput, '');
-            }
+            if (modInput) cl_setInputValue(modInput, '25');
         });
     }
 
