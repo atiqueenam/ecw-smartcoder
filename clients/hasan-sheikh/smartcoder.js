@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.47
+// @name         Hasan Sheikh SmartCoder v1.48
 // @namespace    http://tampermonkey.net/
-// @version      1.47
+// @version      1.48
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,17 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.48 (2026-08-03) - The History button now hides when the Coding
+//   Snapshot panel closes (minimizes to tab) and reappears when it
+//   opens. Added hideButton/showButton to the Module 1 -> Module 2
+//   bridge (window.__ecwPatientHistory) — hideButton just sets display:
+//   none, showButton restores it and calls the existing
+//   ensurePatientHistoryButton so it still respects normal
+//   patient-presence logic. Doesn't touch loaded history state or the
+//   button's own default visibility on page load — only fires on the
+//   Snapshot panel's own open/close actions.
 
 // CHANGELOG
 // 1.47 (2026-08-03) - Fixed the Patient History button sticking around on
@@ -374,7 +385,19 @@
     isLoading: () => isHistoryLoading,
     getErrors: () => (historyProgress && historyProgress.errors) || 0,
     getCurrentKey: () => currentPatientKey,
-    getEncounterCount: () => (patientHistoryData ? patientHistoryData.length : 0)
+    getEncounterCount: () => (patientHistoryData ? patientHistoryData.length : 0),
+    // Lets the Coding Snapshot panel hide/show the History button in sync
+    // with its own open/close — doesn't touch loaded history state, just
+    // the button's visibility, so nothing needs re-fetching either way.
+    hideButton: () => {
+      const btn = document.getElementById("docproPatientHistoryBtn");
+      if (btn) btn.style.display = "none";
+    },
+    showButton: () => {
+      const btn = document.getElementById("docproPatientHistoryBtn");
+      if (btn) btn.style.display = "";
+      ensurePatientHistoryButton();
+    }
   };
 
 })();
@@ -5389,11 +5412,13 @@
         actionRunning = false;
         panel.style.display = 'block';
         renderSnapshotBlock();
+        window.__ecwPatientHistory && window.__ecwPatientHistory.showButton && window.__ecwPatientHistory.showButton();
     }
 
     function closePanelToTab() {
         if (panel) panel.style.display = 'none';
         showTab();
+        window.__ecwPatientHistory && window.__ecwPatientHistory.hideButton && window.__ecwPatientHistory.hideButton();
     }
 
     function isPanelOpen() {
