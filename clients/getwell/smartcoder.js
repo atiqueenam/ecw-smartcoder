@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.10
+// @name         Getwell SmartCoder by ATQ v5.12
 // @namespace    http://tampermonkey.net/
-// @version      5.10
+// @version      5.12
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,22 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.12 (2026-08-03) - Extended the modifier-25 rule to the whole
+//   office-visit family (previously only 99211 got it, on Claim Link —
+//   Auto Link had already been updated). 99211 keeps its unconditional
+//   25. The rest (99212-99215/99203) now get modifier 25 only when a
+//   preventive code is also present (99381-99397 OR G0402/G0438/G0439);
+//   otherwise an existing 25 on one of those rows is cleared. G0402/
+//   G0438/G0439 themselves are still never given modifier 25.
+
+// CHANGELOG
+// 5.11 (2026-08-03) - al_apply25ModifierFor99211/cl_apply25ModifierFor99211
+//   correctly never ADDED modifier 25 to G0402/G0438/G0439, but also
+//   never cleaned one up if a provider mistakenly typed "25" into one of
+//   those rows by hand. Both now also check the G0402/G0438/G0439 rows
+//   and clear modifier 25 if found there, on Auto Link and Claim Link.
 
 // CHANGELOG
 // 5.10 (2026-08-03) - Fixed the Preventive Counsel insurance block: the
@@ -3295,31 +3311,51 @@
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
-    // 99211 modifier: CPT 99211 always needs modifier 25 (significant,
-    // separately identifiable E/M service), no matter what else is on
-    // the chart. The Medicare AWV G-codes (G0402/G0438/G0439) never get
-    // a modifier here, even though they can appear on the same encounter
-    // as 99211 — only 99211 itself is targeted below.
+    // 99211 always gets modifier 25 (significant, separately identifiable
+    // E/M service), no matter what else is on the chart. The rest of the
+    // office-visit family (99212-99215/99203) gets modifier 25 only when
+    // a preventive code is ALSO present (ALL_PREVENTIVE_EM_CODES or
+    // G0402/G0438/G0439) — pairing an office visit with a preventive
+    // service on the same day needs the 25 to show they're separately
+    // identifiable. If neither condition applies, an existing 25 on one
+    // of those rows gets cleared. The Medicare AWV G-codes themselves
+    // never get modifier 25 added — and if one was mistakenly typed in
+    // by hand, it gets cleared here too.
+    const G0402_FAMILY = ["G0402", "G0438", "G0439"];
     function al_apply25ModifierFor99211() {
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;
         const rows = Array.from(tbody.querySelectorAll("tr"));
+        const codesPresent = rows
+            .map(r => r.querySelector("td:nth-child(2)")?.textContent.trim())
+            .filter(Boolean);
+        const hasPreventiveCode = codesPresent.some(c =>
+            ALL_PREVENTIVE_EM_CODES.includes(c) || G0402_FAMILY.includes(c));
+
         rows.forEach(row => {
             const cptCode = row.querySelector("td:nth-child(2)")?.textContent.trim();
-            if (cptCode !== "99211") return; // never G0402/G0438/G0439
+            const isAWVFamily = G0402_FAMILY.includes(cptCode);
+            const isOfficeVisit = OFFICE_VISIT_EM_CODES.includes(cptCode);
+            if (!isAWVFamily && !isOfficeVisit) return;
+
+            const wants25 = isOfficeVisit && (cptCode === "99211" || hasPreventiveCode);
             try {
                 const scope = angular.element(row).scope();
                 if (scope) {
-                    scope.$applyAsync(() => {
-                        if (scope.cpt) scope.cpt.mod1 = "25";
-                    });
+                    if (wants25) {
+                        scope.$applyAsync(() => {
+                            if (scope.cpt) scope.cpt.mod1 = "25";
+                        });
+                    } else if (scope.cpt && scope.cpt.mod1 === "25") {
+                        scope.$applyAsync(() => { scope.cpt.mod1 = ""; });
+                    }
                 } else {
                     const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
                                      row.querySelector('input[name="mod1"]') ||
                                      row.querySelector('input[id*="mod1"]');
-                    if (modInput) {
+                    if (modInput && (wants25 || modInput.value.trim() === "25")) {
                         modInput.focus();
-                        modInput.value = "25";
+                        modInput.value = wants25 ? "25" : "";
                         modInput.dispatchEvent(new Event("input", { bubbles: true }));
                         modInput.dispatchEvent(new Event("change", { bubbles: true }));
                         modInput.blur();
@@ -4145,17 +4181,33 @@
         });
     }
 
-    // 99211 modifier: CPT 99211 always needs modifier 25 (significant,
-    // separately identifiable E/M service), no matter what else is on
-    // the chart. The Medicare AWV G-codes (G0402/G0438/G0439) never get
-    // a modifier here, even though they can appear on the same encounter
-    // as 99211 — only 99211 itself is targeted below.
+    // 99211 always gets modifier 25 (unconditional, no matter what else
+    // is on the chart). The rest of the office-visit family
+    // (99212-99215/99203) gets modifier 25 only when a preventive code is
+    // ALSO present — either a "9" preventive code (ALL_PREVENTIVE_EM_CODES,
+    // 99381-99397) or a "G" preventive code (G0402/G0438/G0439). If
+    // neither condition applies, an existing 25 on one of those rows gets
+    // cleared. The AWV G-codes themselves never get modifier 25 — and if
+    // one was mistakenly typed in by hand, it gets cleared here too.
     function cl_apply25ModifierFor99211(cptRows) {
+        const codesPresent = cptRows.map(cl_getCPTCode).filter(Boolean);
+        const hasPreventiveCode = codesPresent.some(c =>
+            ALL_PREVENTIVE_EM_CODES.includes(c) || G0402_FAMILY.includes(c));
+
         cptRows.forEach(row => {
             const code = cl_getCPTCode(row);
-            if (code !== '99211') return; // never G0402/G0438/G0439
+            const isAWVFamily = G0402_FAMILY.includes(code);
+            const isOfficeVisit = OFFICE_VISIT_EM_CODES.includes(code);
+            if (!isAWVFamily && !isOfficeVisit) return;
+
+            const wants25 = isOfficeVisit && (code === '99211' || hasPreventiveCode);
             const modInput = cl_getCPTMod1Input(row);
-            if (modInput) cl_setInputValue(modInput, '25');
+            if (!modInput) return;
+            if (wants25) {
+                cl_setInputValue(modInput, '25');
+            } else if (modInput.value.trim() === '25') {
+                cl_setInputValue(modInput, '');
+            }
         });
     }
 
