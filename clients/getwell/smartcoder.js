@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.17
+// @name         Getwell SmartCoder by ATQ v5.18
 // @namespace    http://tampermonkey.net/
-// @version      5.17
+// @version      5.18
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,14 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.18 (2026-08-03) - Fixed the Preventive Counsel Medicare block: it used
+//   isAnyMedicareIns(), which matches "medicare" anywhere in the string,
+//   so "Healthfirst Medicare Plan" was wrongly blocked even though
+//   Medicare isn't the first word (not straight Medicare). Now requires
+//   the name to START with "Medicare" (/^medicare\b/i). Regression-tested
+//   against 10 cases including this exact one.
 
 // CHANGELOG
 // 5.17 (2026-08-03) - Reverted the modifier-25 rule back to the v5.10
@@ -4532,9 +4540,10 @@
 
     // ── Preventive Counsel: Z71.3, Z71.82/89, CPT 99401 ──
     // Preventive Counsel is never applicable for these payers. "Medicare"
-    // means straight Medicare specifically — VNS Choice is a Medicare
-    // Advantage plan and CAN have Preventive Counsel, so it's explicitly
-    // excluded from the Medicare block.
+    // means straight Medicare specifically — the insurance name must
+    // START with "Medicare". A Medicare-branded plan administered by
+    // another payer (e.g. "Healthfirst Medicare Plan") is NOT straight
+    // Medicare and CAN have Preventive Counsel.
     function getPreventiveCounselBlockedInsurance(insurance) {
         if (!insurance) return null;
         const name = insurance.trim();
@@ -4542,7 +4551,7 @@
         if (/medicaid/i.test(name)) return name;
         if (isUHCInsurance(name)) return name;
         if (/nyce\s*ppo/i.test(name)) return name;
-        if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return name; // "only Medicare" = straight Medicare
+        if (/^medicare\b/i.test(name)) return name; // straight Medicare = starts with "Medicare"
         return null;
     }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.50
+// @name         Hasan Sheikh SmartCoder v1.51
 // @namespace    http://tampermonkey.net/
-// @version      1.50
+// @version      1.51
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,14 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.51 (2026-08-03) - Fixed the Preventive Counsel Medicare block: it used
+//   isAnyMedicareIns(), which matches "medicare" anywhere in the string,
+//   so "Healthfirst Medicare Plan" was wrongly blocked even though
+//   Medicare isn't the first word (not straight Medicare). Now requires
+//   the name to START with "Medicare" (/^medicare\b/i). Regression-tested
+//   against 10 cases including this exact one.
 
 // CHANGELOG
 // 1.50 (2026-08-03) - Reverted the modifier-25 rule back to the v1.41
@@ -4706,6 +4714,11 @@
     // Medicaid, straight/plain Medicare (not VNS Choice — that's handled
     // separately via the Medicare AWV codes elsewhere), UHC/United
     // Healthcare, and Nyce PPO.
+    // Preventive Counsel is never applicable for these payers. "Medicare"
+    // means straight Medicare specifically — the insurance name must
+    // START with "Medicare". A Medicare-branded plan administered by
+    // another payer (e.g. "Healthfirst Medicare Plan") is NOT straight
+    // Medicare and CAN have Preventive Counsel.
     function isPreventiveCounselBlockedIns(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
@@ -4713,7 +4726,7 @@
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
         if (/nyce/i.test(name) && /ppo/i.test(name)) return true;
-        if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
+        if (/^medicare\b/i.test(name)) return true; // straight Medicare = starts with "Medicare"
         return false;
     }
 
