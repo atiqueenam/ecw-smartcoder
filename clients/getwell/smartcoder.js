@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.21
+// @name         Getwell SmartCoder by ATQ v5.22
 // @namespace    http://tampermonkey.net/
-// @version      5.21
+// @version      5.22
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,15 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 5.22 (2026-08-03) - Fixed alcohol screening interpretation: some notes
+//   (AUDIT-C) show "Points 3 ... Interpretation Negative" together, and
+//   the old logic took the literal "Interpretation:" label at face
+//   value, ignoring the nonzero point total. Any Points value > 0 now
+//   takes priority and is treated as a positive screen regardless of
+//   what the Interpretation label says. Same fix already applied to
+//   Hasan Sheikh's file.
 
 // CHANGELOG
 // 5.21 (2026-08-03) - Reverted Module 1 (Patient History) back to the
@@ -1287,14 +1296,28 @@
         let hasAlc = null;
         if (alcPresent) {
             let officialResult = null;
-            const auditInterp = drugsAlcText.match(/Interpretation\s+(Negative|Positive)\b/i);
-            if (auditInterp) officialResult = /negative/i.test(auditInterp[1]);
-            const scoredInterp = drugsAlcText.match(/Interpretation of Score:\s*(No[nz]e|Low|Minimal|Mild|Moderate|Substantial|Severe|High)/i);
-            if (scoredInterp) {
-                const level = scoredInterp[1].toLowerCase();
-                const isLow = /no[nz]e|low|minimal/.test(level);
-                officialResult = officialResult === false ? false : isLow;
+
+            // Points > 0 means a positive screen, regardless of what the
+            // source "Interpretation:" label says — some notes show
+            // "Points 3 ... Interpretation Negative" together, but a
+            // nonzero point total is treated as positive here first,
+            // before the Interpretation text is even checked.
+            const pointsMatches = [...drugsAlcText.matchAll(/\bPoints\s+(\d+)/gi)];
+            const hasPositivePoints = pointsMatches.some(m => Number(m[1]) > 0);
+
+            if (hasPositivePoints) {
+                officialResult = false; // positive screen
+            } else {
+                const auditInterp = drugsAlcText.match(/Interpretation\s+(Negative|Positive)\b/i);
+                if (auditInterp) officialResult = /negative/i.test(auditInterp[1]);
+                const scoredInterp = drugsAlcText.match(/Interpretation of Score:\s*(No[nz]e|Low|Minimal|Mild|Moderate|Substantial|Severe|High)/i);
+                if (scoredInterp) {
+                    const level = scoredInterp[1].toLowerCase();
+                    const isLow = /no[nz]e|low|minimal/.test(level);
+                    officialResult = officialResult === false ? false : isLow;
+                }
             }
+
             if (officialResult !== null) {
                 hasAlc = officialResult;
             } else {
