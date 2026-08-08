@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.31
+// @name         Bronx Health SmartCoder v1.32
 // @namespace    http://tampermonkey.net/
-// @version      1.31
-// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
+// @version      1.32
+// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
@@ -11,6 +11,18 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.32 (2026-08-08) - Added Module 3: automatic PN/coding modal resize
+//   (#mainPNDialog) for Bronx, folded in from the standalone "eCW PN Modal
+//   Resize" script. Bronx's coding modal renders bigger than our other
+//   client sites, which was the root cause of the blank space around the
+//   note/coding grid (and, downstream, the Coding Snapshot panel not
+//   having sane room to sit in). Shrinks the dialog to a fixed, readable
+//   size with a safe minimum and keeps the body height in sync, the
+//   moment the modal opens for any patient — fully automatic, no per-
+//   patient action needed. Debounced to one layout pass per animation
+//   frame (the original standalone script re-ran on every single DOM
+//   mutation, which is what caused lag on a big note) and wrapped
+//   defensively so it can never break the page or the update loop.
 // 1.31 (2026-08-08) - Fixed Coding Snapshot floating window sizing on Bronx's
 //   coding tab: the panel now auto-fits its content (flex layout + internal
 //   scroll on #ecsBody) instead of leaving blank space or overflowing off
@@ -5146,4 +5158,129 @@
     // initial render, which is exactly when things already feel slow.
     setInterval(checkAndUpdate, 2500);
     setTimeout(checkAndUpdate, 3000);
+})();
+
+/* ============================================================
+   MODULE 3 — PN MODAL RESIZE (Bronx only)
+   Bronx's Progress Note / coding modal (#mainPNDialog) renders
+   at a different default size than eCW uses on our other client
+   sites. Left alone, that mismatch is what was producing the
+   blank space around the note/coding grid and, by extension,
+   throwing off where our own SmartCoder floating panel had room
+   to sit. This shrinks the dialog to a sane fixed size (with a
+   safe minimum) and keeps its body height in sync with the new
+   header/footer measurements, automatically, the moment the
+   modal is opened for any patient — no per-patient action needed.
+   Runs independently of Modules 1/2 and is fully self-contained;
+   a failure here never touches the Patient History or Coding
+   Snapshot features.
+   ============================================================ */
+(function () {
+    'use strict';
+
+    const CFG = {
+        dialogWidth: '60vw',
+        dialogHeight: '75vh',
+        minWidthPx: 980,
+        minHeightPx: 640,
+        margin: '10px auto'
+    };
+
+    function px(n) { return `${Math.round(n)}px`; }
+
+    function clampPx(v, minPx) { return Math.max(v, minPx); }
+
+    function parseSizeToPx(value) {
+        if (typeof value !== 'string') return null;
+        const s = value.trim().toLowerCase();
+        if (s.endsWith('px')) return parseFloat(s);
+        if (s.endsWith('vw')) return (window.innerWidth * parseFloat(s)) / 100;
+        if (s.endsWith('vh')) return (window.innerHeight * parseFloat(s)) / 100;
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function isVisible(el) {
+        if (!el) return false;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+
+    function setImp(el, prop, value) {
+        if (!el) return;
+        el.style.setProperty(prop, value, 'important');
+    }
+
+    function getPnEls() {
+        const dialog = document.querySelector('#mainPNDialog');
+        const content = document.querySelector('#mainPNContent');
+        const header = document.querySelector('#pn-modal-header');
+        const footer = document.querySelector('#main-footer');
+        const body = dialog ? dialog.querySelector('.modal-body') : null;
+        return { dialog, content, header, footer, body };
+    }
+
+    function applyPnResize() {
+        try {
+            const { dialog, content, header, footer, body } = getPnEls();
+            if (!dialog || !content || !isVisible(dialog)) return;
+
+            let w = parseSizeToPx(CFG.dialogWidth);
+            let h = parseSizeToPx(CFG.dialogHeight);
+            if (!Number.isFinite(w) || !Number.isFinite(h)) return;
+
+            w = clampPx(w, CFG.minWidthPx);
+            h = clampPx(h, CFG.minHeightPx);
+
+            setImp(dialog, 'width', px(w));
+            setImp(dialog, 'height', px(h));
+            setImp(dialog, 'margin', CFG.margin);
+            setImp(content, 'height', '100%');
+
+            if (body) {
+                const headerH = header ? header.getBoundingClientRect().height : 0;
+                const footerH = footer ? footer.getBoundingClientRect().height : 0;
+                const bodyH = Math.max(0, h - headerH - footerH - 2);
+                setImp(body, 'height', px(bodyH));
+                setImp(body, 'maxHeight', px(bodyH));
+                setImp(body, 'overflowX', 'hidden');
+            }
+        } catch (e) {
+            // Never let a resize hiccup break the page or the modal.
+        }
+    }
+
+    // The modal's own DOM churns a lot while eCW builds it (rows/fields
+    // streaming in), so a MutationObserver firing applyPnResize on every
+    // single mutation — as the original standalone version of this script
+    // did — becomes a real source of lag on a big note. Debounce to one
+    // pass per animation frame instead: same responsiveness the moment
+    // anything actually changes, without redoing the layout math dozens
+    // of times per second.
+    let pnResizeScheduled = false;
+    function schedulePnResize() {
+        if (pnResizeScheduled) return;
+        pnResizeScheduled = true;
+        requestAnimationFrame(() => {
+            pnResizeScheduled = false;
+            applyPnResize();
+        });
+    }
+
+    const pnObserver = new MutationObserver(schedulePnResize);
+    pnObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class']
+    });
+
+    window.addEventListener('resize', schedulePnResize);
+    // Light safety-net poll in addition to the observer, in case the modal
+    // is swapped in via a path that doesn't trigger a matching mutation.
+    setInterval(schedulePnResize, 1000);
+
+    schedulePnResize();
 })();
