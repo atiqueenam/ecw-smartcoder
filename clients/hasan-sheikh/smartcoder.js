@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.53
+// @name         Hasan Sheikh SmartCoder v1.54
 // @namespace    http://tampermonkey.net/
-// @version      1.53
+// @version      1.54
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,21 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.54 (2026-08-03) - Two fixes: (1) Removed the commercial-insurance
+//   exclusion (isCommercialNoOfficeVisitIns — no office-visit code for
+//   Aetna/Cigna/BCBS/UHC/UMR/Empire). The office-visit E&M suggestion now
+//   applies regardless of insurance, same as before that rule existed.
+//   (2) Diagnosed the E&M picker closing mid-selection: dismissEcwErrorPopup
+//   matches any visible modal titled exactly "eClinicalWorks" and
+//   auto-clicks it closed every 1.8s — the E&M picker (billingBtn2 ->
+//   billingBtn29) appears to share that same generic title, so it was
+//   getting auto-closed before a code could be selected. Added an
+//   exclusion: a modal containing #billingBtn29 (the E&M picker's own OK
+//   button) is never treated as an error dialog. Verified the televisit
+//   93/95 modifier rule (Healthfirst/Metroplus/Fidelis -> 93, else 95) is
+//   already correct as-is — no change made there.
 
 // CHANGELOG
 // 1.53 (2026-08-03) - Reverted Module 1 (Patient History) back to the
@@ -2037,10 +2052,6 @@
         // below) exist for this provider. Suggested code goes to the TOP
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
-        // No office-visit code at all for: Aetna, Cigna, BCBS, UHC, UMR
-        // ("umk" in the original request), Empire.
-        const isCommercialNoOfficeVisitIns = isUHCInsurance(insurance) ||
-            (!!insurance && /aetna|cigna|\bbcbs\b|blue\s*cross|\bumr\b|empire/i.test(insurance.trim()));
 
         // Used for rule 6.v below (televisit ESTPT visits always use 99213).
         // No longer used for 1157F/1158F — those have no televisit rule.
@@ -2048,7 +2059,7 @@
 
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
-        if (visitCategory && !isCommercialNoOfficeVisitIns) {
+        if (visitCategory) {
             let ovCode;
             let ovIsNewPatient = false;
             let ovReason;
@@ -5482,6 +5493,14 @@
         if (!title) return false;
 
         const modal = title.closest('.modal, .modal-content, [role="dialog"]') || document;
+
+        // The E&M picker (opened via billingBtn2, confirmed via billingBtn29)
+        // shares this same generic "eClinicalWorks" modal title — don't
+        // treat it as an error dialog and auto-close it out from under an
+        // in-progress code selection (this was closing the E&M tree every
+        // ~1.8s before the user/script could finish picking a code).
+        if (modal.querySelector('#billingBtn29')) return false;
+
         const bodyText = (modal.textContent || '').replace(title.textContent, '').trim();
 
         if (bodyText && bodyText !== lastEcwErrorShown) {
