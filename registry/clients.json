@@ -1,7 +1,18 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-03T05:13:02.866Z",
+  "generatedAt": "2026-08-08T05:37:50.359Z",
   "clients": [
+    {
+      "id": "bronx",
+      "name": "Bronx Health",
+      "siteId": "ynfexq7i5dh95jitbvapp",
+      "hostnames": [
+        "ynfexq7i5dh95jitbvapp.ecwcloud.com"
+      ],
+      "version": "1.0",
+      "file": "clients/bronx/smartcoder.js",
+      "sha256": "050ccca1496159444635389653b17d2714a7c3569fa7cba5c677446ead64039f"
+    },
     {
       "id": "getwell",
       "name": "Getwell",
