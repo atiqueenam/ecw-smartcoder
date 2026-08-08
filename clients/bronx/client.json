@@ -2,9 +2,7 @@
   "id": "bronx",
   "name": "Bronx Health",
   "siteId": "ynfexq7i5dh95jitbvapp",
-  "hostnames": [
-    "ynfexq7i5dh95jitbvapp.ecwcloud.com"
-  ],
+  "hostnames": ["ynfexq7i5dh95jitbvapp.ecwcloud.com"],
   "version": "1.0",
   "entry": "smartcoder.js",
   "enabled": true
