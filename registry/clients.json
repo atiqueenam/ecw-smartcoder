@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-08T06:43:45.585Z",
+  "generatedAt": "2026-08-08T07:10:45.908Z",
   "clients": [
     {
       "id": "getwell",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.54",
+      "version": "1.56",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "5dbe73978bbb72dfce5429974d13bf7050e0270dd11c0f954f55cef6d92d4a80"
+      "sha256": "7be403bf0fbd4a3863a3a98d9ff89baef04a5eb7b5e70a442934015ed521635f"
     }
   ]
 }
