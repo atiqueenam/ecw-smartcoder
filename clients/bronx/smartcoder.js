@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.30
+// @name         Bronx Health SmartCoder v1.31
 // @namespace    http://tampermonkey.net/
-// @version      1.30
+// @version      1.31
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.31 (2026-08-08) - Fixed Coding Snapshot floating window sizing on Bronx's
+//   coding tab: the panel now auto-fits its content (flex layout + internal
+//   scroll on #ecsBody) instead of leaving blank space or overflowing off
+//   screen, and re-clamps itself into the viewport on every render and on
+//   window resize. Runs automatically whenever a patient is opened; wrapped
+//   defensively so a layout hiccup can never break the panel or the update loop.
 // 1.30 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
 //   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
 //   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
@@ -291,6 +297,7 @@
         #ecwCodingSnapshot {
             position: fixed;
             width: ${PANEL_WIDTH}px;
+            max-height: calc(100vh - 20px);
             background: #ffffff;
             border: 1px solid #e2e8f0;
             border-radius: 14px;
@@ -298,7 +305,20 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
             box-shadow: 0 10px 30px -10px rgba(0,0,0,0.2);
             overflow: hidden;
+            display: flex;
+            flex-direction: column;
         }
+        #ecsHeader { flex: 0 0 auto; }
+        #ecsBody {
+            flex: 1 1 auto;
+            min-height: 0;
+            max-height: calc(100vh - 60px);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        #ecsBody::-webkit-scrollbar { width: 5px; }
+        #ecsBody::-webkit-scrollbar-track { background: transparent; }
+        #ecsBody::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
         #ecsHeader {
             background: linear-gradient(90deg, #0f766e, #14b8a6);
             color: white;
@@ -4763,7 +4783,53 @@
                 if (newScroller) newScroller.scrollTop = prevScrollTop;
             }
         }
+
+        // Bronx's coding tab renders with different available page height
+        // than the other clients, which was leaving the panel's own fixed
+        // size out of sync with its (now variable-length) content — either
+        // trailing blank space below a short render, or the bottom of the
+        // panel pushed off-screen on a tall one. Re-clamp on every render
+        // so the panel always hugs its content and stays fully visible.
+        clampPanelToViewport();
     }
+
+    // Keeps the floating panel's height matched to its actual content and
+    // fully inside the viewport, on every patient/encounter it opens for.
+    // Wrapped defensively — this must never be the thing that breaks the
+    // panel or throws into checkAndUpdate's loop.
+    let __ecsClampScheduled = false;
+    function clampPanelToViewport() {
+        if (__ecsClampScheduled) return;
+        __ecsClampScheduled = true;
+        requestAnimationFrame(() => {
+            __ecsClampScheduled = false;
+            try {
+                if (!panel || panel.style.display === 'none') return;
+
+                const maxLeft = Math.max(0, window.innerWidth - PANEL_WIDTH - 4);
+                const curLeft = parseInt(panel.style.left, 10);
+                if (!isNaN(curLeft) && curLeft > maxLeft) {
+                    panel.style.left = maxLeft + 'px';
+                }
+
+                // Let the panel size to its content (CSS max-height already
+                // caps it and #ecsBody scrolls internally when content is
+                // taller than the viewport allows), then nudge it back on
+                // screen if dragging left it partially below/right of the
+                // viewport with room now freed up by a shorter render.
+                const rect = panel.getBoundingClientRect();
+                const maxTop = Math.max(4, window.innerHeight - rect.height - 4);
+                const curTop = parseFloat(panel.style.top);
+                if (!isNaN(curTop) && curTop > maxTop) {
+                    panel.style.top = maxTop + 'px';
+                }
+            } catch (e) {
+                // Never let a layout hiccup break the coding snapshot panel.
+            }
+        });
+    }
+
+    window.addEventListener('resize', clampPanelToViewport);
 
     function escapeHtml(str) {
         return String(str || "")
