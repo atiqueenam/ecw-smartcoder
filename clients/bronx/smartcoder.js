@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.30
+// @name         Bronx Health SmartCoder v1.30
 // @namespace    http://tampermonkey.net/
 // @version      1.30
-// @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
+// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
