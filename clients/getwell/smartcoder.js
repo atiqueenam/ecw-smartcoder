@@ -1898,6 +1898,7 @@
             const weekendBlocked = has9CodeExceptExempt ||
                 MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
                 rawCPTCodesNow.includes('G0447') ||
+                rawCPTCodeSet.has('99406') ||
                 isTelevisitForWeekend ||
                 isUHCFamilyForWeekend ||
                 hasHighLevelCode;
