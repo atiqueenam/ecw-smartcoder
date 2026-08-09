@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.36
+// @name         Bronx Health SmartCoder v1.37
 // @namespace    http://tampermonkey.net/
-// @version      1.36
+// @version      1.37
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,18 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.37 (2026-08-09) - Two corrections from user feedback on 1.36:
+//   1) Removed the Healthfirst/MetroPlus/Fidelis 93-modifier carve-out for
+//      the televisit Auto Link rule — Bronx does not follow that special
+//      case. Every insurance now gets modifier 95 on the office-visit code
+//      for a televisit (CON), with mod2 = 25 added on top when CPT 95251
+//      is present (still 95/25, never 93/25).
+//   2) Broadened med-refill detection for the televisit 99212-vs-99213
+//      E&M rule: previously only matched "med refill"/"medication refill"
+//      in the Chief Complaint. Now also matches variants like "refill all
+//      Rx", "refill meds", "refill prescriptions", etc., and checks the
+//      whole encounter note (not just the CC) — covers e.g. a "Refill all
+//      Rx." line in the orders/plan section.
 // 1.36 (2026-08-09) - Fixed a real-chart miss reported right after 1.35:
 //   a CON (televisit) visit with CPT 95251 and no 98012 was resolving to
 //   99212 with no modifiers instead of 99213 + mod 95/25. Root cause:
@@ -2190,12 +2202,15 @@
                     ovCode = '99212';
                     ovReason = '99211 is never used for this provider — corrected to 99212';
                 } else if (isTelevisitNote) {
-                    // Televisit (appointment caption = CON): CC mentioning
-                    // a med/medication refill uses 99212, otherwise 99213.
-                    const isMedRefillCC = /\bmed(?:ication)?\s*refill\b/i.test(ccText);
+                    // Televisit (appointment caption = CON): a med/
+                    // medication refill (in the CC, or e.g. a "Refill all
+                    // Rx" orders/plan line elsewhere on the note) uses
+                    // 99212, otherwise 99213.
+                    const MED_REFILL_RE = /\b(?:med(?:ication)?\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?))\b/i;
+                    const isMedRefillCC = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
                     ovCode = isMedRefillCC ? '99212' : '99213';
                     ovReason = isMedRefillCC
-                        ? 'Televisit (CON), med refill in CC — 99212'
+                        ? 'Televisit (CON), med refill — 99212'
                         : 'Televisit (CON) — 99213';
                 } else if (!isVitalsDocumented(text)) {
                     // rule 6.ii
@@ -3468,11 +3483,12 @@
     }
 
     // On Link click, a televisit (appointment caption visit type = CON)
-    // gets modifier 95 on the office-visit code — or 93 for Healthfirst/
-    // MetroPlus/Fidelis. Determined from the caption, not from CPT 98012 —
-    // this client doesn't use 98012 as a televisit signal.
+    // gets modifier 95 on the office-visit code, for EVERY insurance —
+    // Bronx doesn't follow the 93-modifier carve-out some other clients
+    // use for Healthfirst/MetroPlus/Fidelis. Determined from the caption,
+    // not from CPT 98012 — this client doesn't use 98012 as a televisit
+    // signal.
     const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203']);
-    const AL_MOD93_INSURANCES = /health[\s-]*first|metro\s*plus|fidelis/i;
 
     function al_applyTelevisitModifier() {
         const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
@@ -3481,9 +3497,8 @@
             .filter(Boolean);
         if (getVisitType().toLowerCase().trim() !== 'con') return; // not a televisit — leave modifiers alone
 
-        let insurance = '';
-        try { insurance = parseInsuranceFromPage(getEncounterText()) || ''; } catch (e) { /* ignore */ }
-        const modifierValue = AL_MOD93_INSURANCES.test(insurance) ? '93' : '95';
+        // Always 95 — no insurance-based 93 carve-out for this client.
+        const modifierValue = '95';
         // 95251 present -> office visit code also gets mod2 = 25. Absent ->
         // office visit code only gets the mod1 modifier above.
         const has95251 = codesPresent.includes('95251');
