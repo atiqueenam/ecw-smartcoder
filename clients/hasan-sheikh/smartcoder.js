@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.58
+// @name         Hasan Sheikh SmartCoder v1.59
 // @namespace    http://tampermonkey.net/
-// @version      1.58
+// @version      1.59
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,15 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.59 (2026-08-09) - Fixed tobacco-use false positive: "Tobacco Non-User
+//   ... Current non-smoker" was being read as an active smoker because the
+//   "current smoker" regex guarded the wrong word (checked negation before
+//   "current" instead of before "smoker"), so "Current non-smoker" slipped
+//   through as a match. The negation check now guards "smoker" itself, so
+//   "Current non-smoker" / "former smoker" correctly resolve to
+//   non-smoker (tobacco screening negative) again.
 
 // CHANGELOG
 // 1.58 (2026-08-09) - BP codes (3074F/3075F/3078F/3079F) now enforce a
@@ -1225,8 +1234,13 @@
     function isConfirmedNonSmoker(socText) {
         // "current ... smoker" wins over other text in the section (eCW
         // sometimes appends a contradicting trailing summary). Allows a
-        // short gap for phrasing like "current every day smoker".
-        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bcurrent\\b[\\s\\S]{0,25}?\\bsmoker\\b`, "i").test(socText)) return false;
+        // short gap for phrasing like "current every day smoker". The
+        // negation lookbehind must guard the word "smoker" itself, not
+        // "current" — otherwise "Current non-smoker" (current tense of a
+        // non-smoker finding) matches "current" + "smoker" and gets
+        // misread as an active smoker, when "non-" right before "smoker"
+        // is exactly the negation this guard exists to catch.
+        if (new RegExp(`\\bcurrent\\b[\\s\\S]{0,25}?${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(socText)) return false;
 
         // Bare "smoker" mention (e.g. "Light cigarette smoker") — checked
         // before "other tobacco use? No" below, since that question is
