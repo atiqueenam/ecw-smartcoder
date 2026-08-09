@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-09T10:44:31.231Z",
+  "generatedAt": "2026-08-09T11:45:32.922Z",
   "clients": [
     {
       "id": "bronx",
@@ -22,7 +22,7 @@
       ],
       "version": "5.24",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "3128aea2b6547126d72e14efbe49a154af6960c1b946dc3c455cdc4aa966930a"
+      "sha256": "4bcca66e44aaa0cd0a41456f6be3a08930feda2ede4a0a8a305dc08a6237f70f"
     },
     {
       "id": "hasan-sheikh",
