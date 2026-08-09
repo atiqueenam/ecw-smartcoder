@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.56
+// @name         Hasan Sheikh SmartCoder v1.58
 // @namespace    http://tampermonkey.net/
-// @version      1.57
+// @version      1.58
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,7 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG
-// 1.57 (2026-08-09) - patient history highlighted 
+// 1.58 (2026-08-09) - BP codes (3074F/3075F/3078F/3079F) now enforce a
+//   once-per-calendar-year limit, same pattern as the G0444/G0442 annual
+//   screening codes: if the qualifying systolic/diastolic code was already
+//   billed earlier this year, it's excluded from this encounter and, if
+//   still present on the chart, deleted. I10-required / no-BP-documented
+//   exclusion logic is unchanged.
+
+// CHANGELOG
+// 1.57 (2026-08-09) - patient history highlighted
 //chronic disease for the currnet encounter.
 
 // CHANGELOG
@@ -1845,8 +1853,12 @@
         // toDelete diff further down).
         const exclusionReasons = new Map();
 
-        // ---- BP: needs I10, both values under threshold. No yearly limit
-        // — BP codes can be used multiple times a year. ----
+        // ---- BP: needs I10, both values under threshold. Yearly limit —
+        // each BP code (3074F/3075F/3078F/3079F) can only be used once per
+        // calendar year. If a code was already billed earlier this year,
+        // it's excluded (and deleted from the chart if present) instead of
+        // being re-added, even if the current reading would otherwise
+        // qualify it. ----
         if (!bp) {
             exclusionReasons.set('3074F', 'No BP documented this encounter');
             exclusionReasons.set('3075F', 'No BP documented this encounter');
@@ -1857,6 +1869,7 @@
             const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
             const sysOk = !isNaN(sys) && sys < 140;
             const diaOk = !isNaN(dia) && dia < 90;
+            const bpDosYear = getCurrentDosYear();
 
             let bpReason = null;
             if (!hasI10) bpReason = 'No I10 (hypertension) on the ICD list';
@@ -1867,8 +1880,20 @@
             if (bpReason) {
                 ['3074F', '3075F', '3078F', '3079F'].forEach(c => exclusionReasons.set(c, bpReason));
             } else {
-                desired.set(sys <= 129 ? '3074F' : '3075F', `Systolic ${sys}`);
-                desired.set(dia <= 79 ? '3078F' : '3079F', `Diastolic ${dia}`);
+                const sysCode = sys <= 129 ? '3074F' : '3075F';
+                const diaCode = dia <= 79 ? '3078F' : '3079F';
+
+                if (codeUsedInYear(sysCode, bpDosYear)) {
+                    exclusionReasons.set(sysCode, `${sysCode} already billed earlier this year (once/year limit)`);
+                } else {
+                    desired.set(sysCode, `Systolic ${sys}`);
+                }
+
+                if (codeUsedInYear(diaCode, bpDosYear)) {
+                    exclusionReasons.set(diaCode, `${diaCode} already billed earlier this year (once/year limit)`);
+                } else {
+                    desired.set(diaCode, `Diastolic ${dia}`);
+                }
             }
         }
 
