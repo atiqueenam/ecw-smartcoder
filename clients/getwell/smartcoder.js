@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.22
+// @name         Getwell SmartCoder by ATQ v5.24
 // @namespace    http://tampermonkey.net/
-// @version      5.23
+// @version      5.24
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,7 +12,22 @@
 
 
 // CHANGELOG
-// 5.23 (2026-08-09) - patient history highlighted 
+// 5.24 (2026-08-09) - Fixed a smoking-status false positive: eCW's own
+//   "Ex-cigar smoker" (and similarly worded "Ex-<something> smoker")
+//   phrasing means former/past use, but isConfirmedNonSmoker()'s
+//   affirmative-"smoker" check only excluded "non-" and "former-"
+//   prefixes right before the word, so "Ex-cigar smoker" matched as a
+//   bare affirmative "smoker" and the Tobacco flag showed positive
+//   (red) even though the chart's actual "Tobacco use: Nonsmoker" and
+//   "Current nonsmoker" answers were negative. Added a negative
+//   lookbehind for the "Ex-" prefix (optionally with one descriptor
+//   word in between, e.g. "cigar") so it now falls through to the
+//   existing non/former-smoker negative match and correctly reports
+//   Nonsmoker. Getwell-specific fix — Hasan Sheikh's file uses the
+//   older tobacco-flag logic and was not touched.
+
+// CHANGELOG
+// 5.23 (2026-08-09) - patient history highlighted
 //chronic disease for the currnet encounter.
 
 // CHANGELOG
@@ -1272,8 +1287,12 @@
         // DIFFERENT "Additional Findings" question appended after it.
         // Excludes non-/former-prefixed and not/denies/no-negated
         // occurrences, so "non-smoker" or "former smoker" don't
-        // false-positive here.
-        const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)\bsmoker\b/i.test(socText);
+        // false-positive here. Also excludes "Ex-" prefixed phrasing (e.g.
+        // "Ex-cigar smoker", "Ex-pipe smoker") which eCW uses as its own
+        // way of saying former/past use — without this, "Ex-cigar smoker"
+        // was matching the bare "smoker" word and flagging a documented
+        // nonsmoker as a confirmed current smoker.
+        const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)(?<!\bex[\s-](?:\w+[\s-])?)\bsmoker\b/i.test(socText);
         if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
 
         const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
