@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.57 (2026-08-09) - patient history highlighted 
+//chronic disease for the currnet encounter.
+
+// CHANGELOG
 // 1.56 (2026-08-03) - Fixed alcohol screening interpretation: some notes
 //   show "Points 2 ... Interpretation Negative" together, and the old
 //   logic took the literal "Interpretation:" label at face value,
