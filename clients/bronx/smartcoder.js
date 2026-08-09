@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.35
+// @name         Bronx Health SmartCoder v1.36
 // @namespace    http://tampermonkey.net/
-// @version      1.35
+// @version      1.36
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.36 (2026-08-09) - Fixed a real-chart miss reported right after 1.35:
+//   a CON (televisit) visit with CPT 95251 and no 98012 was resolving to
+//   99212 with no modifiers instead of 99213 + mod 95/25. Root cause:
+//   televisit detection (both the office-visit E&M rule and the Auto Link
+//   95/25 modifier rule) was keyed off CPT 98012 being present, but this
+//   client's schedule marks a televisit via the appointment caption's
+//   visit type (CON) instead — 98012 isn't used here at all. Both rules
+//   now read the visit type straight from the appointment caption
+//   (getVisitType() === 'CON') instead of checking for 98012.
 // 1.35 (2026-08-09) - Applied the 29-item client rule sheet. Items that
 //   required an actual code change:
 //   1) WEEKEND/HOLIDAY RULE — fully removed: CSS, the CPT 99051 desired-
@@ -38,9 +47,15 @@
 //      applicable (already had MetroPlus/Medicaid/UHC/Medicare/NYCE PPO).
 //   8) Visit type "LAB" (if the appointment caption ever renders that way)
 //      now always resolves to 99212.
-//   9) Televisit (98012 present) office-visit code: CC mentioning "med
-//      refill"/"medication refill" now resolves to 99212; otherwise 99213
-//      (previously always 99213 regardless of CC).
+//   9) Televisit office-visit code: CC mentioning "med refill"/
+//      "medication refill" now resolves to 99212; otherwise 99213
+//      (previously always 99213 regardless of CC). Also fixed in this
+//      same pass: televisit detection (both this rule and the 95/25
+//      modifier rule below) was keyed off CPT 98012, which this client
+//      doesn't use — it's now keyed off the appointment caption's visit
+//      type instead (CON = televisit), matching how Bronx's schedule
+//      actually marks a televisit. A CON visit with CPT 95251 and no
+//      98012 was previously missed entirely by both rules.
 //   10/15/16) CPT 99173 (visual acuity/vision) rule fully removed —
 //      Analyze's own 99173 add/delete logic, the Auto Link "eyeExam"
 //      linking type + its eye-ICD detector + preventive-Z-code list, the
@@ -1884,7 +1899,10 @@
         // age 65+, never added fresh, only corrected/deleted.
         const icdRows = getICDRows();
         const hasPainOrM = icdRows.some(r => isPainRelatedICDEntry(r.code, r.name));
-        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
+        // Televisit is determined from the appointment caption's visit type
+        // ("CON" = televisit for this provider) — not from CPT 98012, which
+        // this client doesn't use for that purpose.
+        const isTelevisitNote = getVisitType().toLowerCase().trim() === 'con';
 
         if (age >= 65) {
             const has1157or1158 = rawCPTCodeSet.has('1157F') || rawCPTCodeSet.has('1158F');
@@ -2172,13 +2190,13 @@
                     ovCode = '99212';
                     ovReason = '99211 is never used for this provider — corrected to 99212';
                 } else if (isTelevisitNote) {
-                    // Televisit (98012 present): CC mentioning a med/
-                    // medication refill uses 99212, otherwise 99213.
+                    // Televisit (appointment caption = CON): CC mentioning
+                    // a med/medication refill uses 99212, otherwise 99213.
                     const isMedRefillCC = /\bmed(?:ication)?\s*refill\b/i.test(ccText);
                     ovCode = isMedRefillCC ? '99212' : '99213';
                     ovReason = isMedRefillCC
-                        ? 'Televisit (98012 present), med refill in CC — 99212'
-                        : 'Televisit (98012 present) — 99213';
+                        ? 'Televisit (CON), med refill in CC — 99212'
+                        : 'Televisit (CON) — 99213';
                 } else if (!isVitalsDocumented(text)) {
                     // rule 6.ii
                     ovCode = '99212';
@@ -2664,12 +2682,12 @@
         return m ? m[1].trim() : '';
     }
 
-    // NP and ESTPT are the two visit types normally seen for this provider.
-    // Televisit is detected from 98012 in the CPT list (see
-    // computeAnalysis), not from the appointment caption — but CON/F-U/LAB
-    // captions are also recognized in case they appear: CON -> televisit,
-    // F/U -> established (follow up), LAB -> lab (always 99212, see rule
-    // sheet item 8). Anything else gets no E&M recommendation.
+    // Visit type comes straight from the appointment caption for this
+    // client: NP -> new patient, ESTPT/F-U -> established (follow up),
+    // CON -> televisit (established category, but isTelevisitNote in
+    // computeAnalysis is what actually flags it as a televisit — see
+    // there, no longer based on CPT 98012), LAB -> lab (always 99212, see
+    // rule sheet item 8). Anything else gets no E&M recommendation.
     function classifyVisitType(visitType) {
         const v = (visitType || '').toLowerCase().trim();
         if (v === 'np') return 'new';
@@ -3449,8 +3467,10 @@
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
-    // On Link click, a televisit (98012 present) gets modifier 95 on the
-    // office-visit code — or 93 for Healthfirst/MetroPlus/Fidelis.
+    // On Link click, a televisit (appointment caption visit type = CON)
+    // gets modifier 95 on the office-visit code — or 93 for Healthfirst/
+    // MetroPlus/Fidelis. Determined from the caption, not from CPT 98012 —
+    // this client doesn't use 98012 as a televisit signal.
     const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203']);
     const AL_MOD93_INSURANCES = /health[\s-]*first|metro\s*plus|fidelis/i;
 
@@ -3459,7 +3479,7 @@
         const codesPresent = cptRows
             .map(r => r.querySelector('td:nth-child(2)')?.textContent.trim().toUpperCase())
             .filter(Boolean);
-        if (!codesPresent.includes('98012')) return; // not a televisit — leave modifiers alone
+        if (getVisitType().toLowerCase().trim() !== 'con') return; // not a televisit — leave modifiers alone
 
         let insurance = '';
         try { insurance = parseInsuranceFromPage(getEncounterText()) || ''; } catch (e) { /* ignore */ }
