@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.34
+// @name         Bronx Health SmartCoder v1.35
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,61 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.35 (2026-08-09) - Applied the 29-item client rule sheet. Items that
+//   required an actual code change:
+//   1) WEEKEND/HOLIDAY RULE — fully removed: CSS, the CPT 99051 desired-
+//      code logic, the whole WEEKEND_HOLIDAYS/isWeekendEnabled/override
+//      module, the toggle UI next to CURRENT ENCOUNTER, its change-event
+//      listener, and every 99051 reference in MANAGED_CODES / Auto Link /
+//      Claim Link. No leftover code paths remain.
+//   3) BLOOD PRESSURE — rewritten: 3074F/3075F/3078F/3079F now only get
+//      proposed when the CC contains "Controlling BP" AND a BP value AND
+//      I10 are present, and only once per calendar year per side
+//      (systolic/diastolic independently, via codeUsedInYear). An already-
+//      present BP code is never deleted outright when the conditions
+//      aren't met — it's left on the chart untouched; it's only replaced
+//      when we can compute a different, correct bucket for the same side.
+//   4) EKG/ECG — if CPT 93000 is present (existing or about to be added)
+//      and none of the ECG-linkable ICDs are already on the chart, Z13.6
+//      is now proposed so Auto Link/Claim Link (both already had Z13.6 in
+//      their ecgICDs linking list) have something to link 93000 to.
+//      EMPIRE PLAN — alcohol (G0442/G9622/99408/Z13.9) and tobacco
+//      (99406/1000F/1036F/G9275/G9276) screening codes are never proposed
+//      for Empire, and any of them already on the chart get removed.
+//   6) Added Clover Health alongside Medicare/VNS Choice for the
+//      G0438(new)/G0439(established) annual-visit-code quick action.
+//   7) Added Molina to the payers where Preventive Counseling (P/C) isn't
+//      applicable (already had MetroPlus/Medicaid/UHC/Medicare/NYCE PPO).
+//   8) Visit type "LAB" (if the appointment caption ever renders that way)
+//      now always resolves to 99212.
+//   9) Televisit (98012 present) office-visit code: CC mentioning "med
+//      refill"/"medication refill" now resolves to 99212; otherwise 99213
+//      (previously always 99213 regardless of CC).
+//   10/15/16) CPT 99173 (visual acuity/vision) rule fully removed —
+//      Analyze's own 99173 add/delete logic, the Auto Link "eyeExam"
+//      linking type + its eye-ICD detector + preventive-Z-code list, the
+//      99173 entries in both the Auto Link and Claim Link rule tables, and
+//      the 8-prefix-deletion module's H53.8 companion add are all gone.
+//   11) "8 related codes" deletion removed — the CPT-code-starting-with-8
+//      auto-delete (and its Z13.88 auto-add) is gone from both Analyze and
+//      the Auto Link button; codes starting with '8' are no longer touched
+//      by this script at all.
+//   28) Televisit modifier rule: when CPT 95251 is present, the office-
+//      visit code's mod1 keeps its existing value (95, or 93 for
+//      Healthfirst/MetroPlus/Fidelis) and now also gets mod2 = 25. Without
+//      95251, only mod1 is set, same as before.
+//   29) Insurance name space-variant handling: the Claim Link telehealth-
+//      POS rule for Healthfirst/Fidelis/MetroPlus now matches "Health
+//      First" and "Metro Plus" (with a space) the same as the one-word
+//      spelling — it previously only matched the exact one-word form.
+//   Everything else on the rule sheet (BMI, Depression/Alcohol/Tobacco/
+//   Social/UHC screening shape, age-based correction rules, L21.0/L21.9,
+//   NP/99203, the F/U cascade, 99214 ICD exclusions, mismatch cleanup,
+//   vaccine admin, quick actions, the high-level blocker, mutual cleanup
+//   between buttons, Claim Link rules, and commercial-payer suppression)
+//   was reviewed against the sheet and left untouched — current behavior
+//   already matches, per the sheet's own "as is" / "probably already
+//   implemented" notes for those items.
 // 1.34 (2026-08-09) - Three changes:
 //   1) Alcohol screening: found the actual rule behind more reported
 //      mismatches — eCW's own "Interpretation: Negative/Positive" label on
@@ -445,20 +500,6 @@
         #ecsHeaderBtns span:hover { background: rgba(255,255,255,0.32); }
         #ecsBody { padding: 11px; color: #1e2937; }
         .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; display:flex; align-items:center; justify-content:space-between; }
-        .weekend-toggle { display:flex; align-items:center; gap:5px; cursor:pointer; text-transform:none; }
-        .weekend-toggle .weekend-label { font-size: 9px; font-weight: 800; color:#64748b; }
-        .weekend-toggle input { display:none; }
-        .weekend-toggle .weekend-slider {
-            width: 30px; height: 16px; border-radius: 999px; background: #cbd5e1;
-            position: relative; transition: background .15s ease; flex-shrink:0;
-        }
-        .weekend-toggle .weekend-slider::before {
-            content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
-            border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
-            transition: transform .15s ease;
-        }
-        .weekend-toggle input:checked + .weekend-slider { background: #2563eb; }
-        .weekend-toggle input:checked + .weekend-slider::before { transform: translateX(14px); }
         .top-info { display: flex; flex-direction: column; gap: 2px; margin-bottom: 9px; font-size: 11px; }
         .link-btn-row { gap: 6px; }
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
@@ -983,6 +1024,12 @@
         return !!insurance && /^\s*(united[\s-]*health[\s-]*care|uhc)\b/i.test(insurance.trim());
     }
 
+    // Empire plan: alcohol/tobacco screening codes aren't used for this
+    // payer — any already on the chart get removed.
+    function isEmpireIns(insurance) {
+        return !!insurance && /empire/i.test(insurance.trim());
+    }
+
     // Eligible unless insurance starts with Medicaid/Medicare or is
     // UHC/United Health Care. Unknown/unparsed insurance defaults eligible
     // (previously required truthy insurance, which wrongly blocked/removed
@@ -1296,7 +1343,7 @@
         '1157F', '1158F', '1170F',
         'G8510', 'G8431', 'G9622', '3016F',
         'G9275', 'G9276', '1036F', '1000F',
-        'G0136', 'G9744', '99051'
+        'G0136', 'G9744'
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
 
@@ -1735,16 +1782,6 @@
 
         const desired = new Map(); // code -> reason
 
-        // ---- Weekend rule: CPT 99051 is desired only when the Weekend
-        // toggle is on AND no Preventive / Preventive Counseling / Obesity
-        // code is present on this chart. Smoking (99406) doesn't block it.
-        // Analyze/Apply decides this, not the toggle itself — flipping the
-        // toggle just changes what the next Analyze run will propose. ----
-        if (isWeekendEnabled()) {
-            const weekendBlocked = hasPreventiveVisit || rawCPTCodeSet.has('99401') || rawCPTCodeSet.has('G0447');
-            if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no preventive/counseling code present');
-        }
-
         // ---- BMI: CPTs only added when a preventive visit is present.
         // Adults (18+): G8417/G8418/G8420 from raw BMI thresholds.
         // Under 18: BMI-for-age percentile, not raw BMI. Preferred source
@@ -1790,36 +1827,54 @@
         // toDelete diff further down).
         const exclusionReasons = new Map();
 
-        // ---- BP: needs I10, both values under threshold. No yearly limit
-        // — BP codes can be used multiple times a year. ----
-        if (!bp) {
-            exclusionReasons.set('3074F', 'No BP documented this encounter');
-            exclusionReasons.set('3075F', 'No BP documented this encounter');
-            exclusionReasons.set('3078F', 'No BP documented this encounter');
-            exclusionReasons.set('3079F', 'No BP documented this encounter');
-        } else {
-            const [sys, dia] = bp.split('/').map(n => parseInt(n));
-            const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
-            const sysOk = !isNaN(sys) && sys < 140;
-            const diaOk = !isNaN(dia) && dia < 90;
+        // ---- Chief Complaint text (needed by the BP rule below, and by the
+        // EKG-in-CC rule further down). ----
+        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
+        const ccText = ccRaw ? ccRaw[1] : '';
 
-            let bpReason = null;
-            if (!hasI10) bpReason = 'No I10 (hypertension) on the ICD list';
-            else if (!sysOk && !diaOk) bpReason = `Systolic ${sys} and diastolic ${dia} both at/over threshold (140/90)`;
-            else if (!sysOk) bpReason = `Systolic ${sys} at/over 140`;
-            else if (!diaOk) bpReason = `Diastolic ${dia} at/over 90`;
+        // ---- BP: CC must mention "Controlling BP". Add (or fix to the
+        // correct bucket) only once per calendar year per side — if a
+        // systolic/diastolic BP code was already billed earlier this year,
+        // no need to add again. An already-present BP code is NEVER simply
+        // deleted; if we can't confirm/compute the correct code (no
+        // "Controlling BP" in CC, no BP value this encounter, no I10, or
+        // already used this year) we leave whatever is currently on the
+        // chart untouched. ----
+        {
+            const ccHasControllingBP = /controlling\s*bp/i.test(ccText);
+            const dosYearBp = getCurrentDosYear();
+            const sysCodes = ['3074F', '3075F'];
+            const diaCodes = ['3078F', '3079F'];
+            const sysUsedThisYear = sysCodes.some(c => codeUsedInYear(c, dosYearBp));
+            const diaUsedThisYear = diaCodes.some(c => codeUsedInYear(c, dosYearBp));
+            const existingCptCodesBp = getCPTRows().map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
+            const existingSysCode = sysCodes.find(c => existingCptCodesBp.includes(c));
+            const existingDiaCode = diaCodes.find(c => existingCptCodesBp.includes(c));
 
-            if (bpReason) {
-                ['3074F', '3075F', '3078F', '3079F'].forEach(c => exclusionReasons.set(c, bpReason));
-            } else {
-                desired.set(sys <= 129 ? '3074F' : '3075F', `Systolic ${sys}`);
-                desired.set(dia <= 79 ? '3078F' : '3079F', `Diastolic ${dia}`);
+            let sysTarget = null, diaTarget = null;
+            if (bp && ccHasControllingBP) {
+                const [sys, dia] = bp.split('/').map(n => parseInt(n));
+                const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
+                if (hasI10) {
+                    if (!isNaN(sys) && sys <= 139) sysTarget = sys <= 129 ? '3074F' : '3075F';
+                    if (!isNaN(dia) && dia <= 89) diaTarget = dia <= 79 ? '3078F' : '3079F';
+                }
+            }
+
+            if (sysTarget && !sysUsedThisYear) {
+                desired.set(sysTarget, `Systolic BP (Controlling BP)`);
+            } else if (existingSysCode) {
+                desired.set(existingSysCode, 'Already on chart — BP code not removed');
+            }
+
+            if (diaTarget && !diaUsedThisYear) {
+                desired.set(diaTarget, `Diastolic BP (Controlling BP)`);
+            } else if (existingDiaCode) {
+                desired.set(existingDiaCode, 'Already on chart — BP code not removed');
             }
         }
 
         // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added; EKG → 93000 ----
-        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        const ccText = ccRaw ? ccRaw[1] : '';
         if (/\bekg\b|\becg\b/i.test(ccText)) {
             desired.set('93000', 'EKG mentioned in CC');
         }
@@ -1928,6 +1983,16 @@
             });
         }
 
+        // Empire plan: alcohol/tobacco screening codes aren't used for this
+        // payer — never propose adding them (existing ones get removed
+        // further below, alongside the ICD cleanup).
+        const isEmpire = isEmpireIns(insurance);
+        const EMPIRE_ALCOHOL_CODES = ['G0442', 'G9622', '99408'];
+        const EMPIRE_TOBACCO_CODES = ['99406', '1000F', '1036F', 'G9275', 'G9276'];
+        if (isEmpire) {
+            [...EMPIRE_ALCOHOL_CODES, ...EMPIRE_TOBACCO_CODES].forEach(code => desired.delete(code));
+        }
+
         const toAdd = [];
         desired.forEach((reason, code) => {
             if (!currentCodes.has(code)) toAdd.push({ code, reason, kind: 'cpt' });
@@ -1942,8 +2007,19 @@
         if (age >= 12 && hasDep !== null && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
         }
-        if (age >= 18 && hasAlc !== null && !currentICDCodesForScreening.includes('Z13.9')) {
+        if (age >= 18 && hasAlc !== null && !isEmpire && !currentICDCodesForScreening.includes('Z13.9')) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
+        }
+
+        // ---- EKG/ECG: if 93000 is on the CPT list (existing or about to be
+        // added) and none of the ECG-related ICDs are already on the chart,
+        // add Z13.6 so Auto Link / Claim Link have something to link 93000
+        // to. ----
+        const EKG_LINK_ICDS = ['E78.5', 'I10', 'R00.0', 'R00.1', 'R00.2', 'R03.0', 'R06.02', 'R07.9', 'Z13.6'];
+        const has93000 = rawCPTCodeSet.has('93000') || desired.has('93000');
+        const hasEkgLinkIcd = currentICDCodesForScreening.some(c => EKG_LINK_ICDS.includes(c));
+        if (has93000 && !hasEkgLinkIcd) {
+            toAdd.push({ code: 'Z13.6', reason: '93000 present, no ECG-related ICD on chart — added for linking', kind: 'icd' });
         }
 
         const toDelete = [];
@@ -1963,6 +2039,22 @@
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
                 }
             });
+        }
+
+        // Empire plan: remove any alcohol/tobacco screening code (and the
+        // alcohol screening ICD) already on the chart — this payer doesn't
+        // use them at all.
+        if (isEmpire) {
+            currentRows.forEach(r => {
+                if ((EMPIRE_ALCOHOL_CODES.includes(r.code) || EMPIRE_TOBACCO_CODES.includes(r.code)) && !toDelete.some(d => d.code === r.code)) {
+                    const isAlcCode = EMPIRE_ALCOHOL_CODES.includes(r.code);
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: `Empire plan — ${isAlcCode ? 'alcohol' : 'smoking'}-related code not used for this payer` });
+                }
+            });
+            const empireZ139 = getICDGridEntriesFast().find(e => e.code.toUpperCase() === 'Z13.9');
+            if (empireZ139) {
+                toDelete.push({ code: empireZ139.code, row: empireZ139.row, kind: 'icd', reason: 'Empire plan — alcohol screening ICD not used for this payer' });
+            }
         }
 
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
@@ -2069,6 +2161,10 @@
                 ovCode = '99203';
                 ovIsNewPatient = true;
                 ovReason = `Office visit (${visitType}) — NP, suggested E&M code`;
+            } else if (visitCategory === 'lab') {
+                // Lab visit always uses 99212.
+                ovCode = '99212';
+                ovReason = `Lab visit (${visitType}) — 99212`;
             } else {
                 // established patient — evaluate in priority order
                 if (rawCPTCodeSet.has('99211')) {
@@ -2076,9 +2172,13 @@
                     ovCode = '99212';
                     ovReason = '99211 is never used for this provider — corrected to 99212';
                 } else if (isTelevisitNote) {
-                    // rule 6.v: televisit (98012 present) always uses 99213
-                    ovCode = '99213';
-                    ovReason = 'Televisit (98012 present) — 99213';
+                    // Televisit (98012 present): CC mentioning a med/
+                    // medication refill uses 99212, otherwise 99213.
+                    const isMedRefillCC = /\bmed(?:ication)?\s*refill\b/i.test(ccText);
+                    ovCode = isMedRefillCC ? '99212' : '99213';
+                    ovReason = isMedRefillCC
+                        ? 'Televisit (98012 present), med refill in CC — 99212'
+                        : 'Televisit (98012 present) — 99213';
                 } else if (!isVitalsDocumented(text)) {
                     // rule 6.ii
                     ovCode = '99212';
@@ -2143,44 +2243,6 @@
                     toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong age-based L21 code (should be ${correctL21})` });
                 }
             });
-        }
-
-        // ---- CPT codes starting with '8' → delete + add Z13.88 ----
-        // Previously only in the Link-button module; now also enforced
-        // here so it fires from Analyze/Start Action too, not just Link.
-        const eightPrefixRows = currentRows.filter(r => /^8/.test(r.code));
-        eightPrefixRows.forEach(r => {
-            if (!toDelete.some(d => d.code === r.code)) {
-                toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: "CPT code starting with '8' — not applicable, removed" });
-            }
-        });
-        if (eightPrefixRows.length) {
-            const currentICDCodesFor8 = getICDRows().map(e => e.code.toUpperCase());
-            if (!currentICDCodesFor8.includes('Z13.88')) {
-                toAdd.push({ code: 'Z13.88', reason: "CPT code starting with '8' removed — add Z13.88", kind: 'icd' });
-            }
-        }
-
-        // ---- 99173 (visual acuity) — same rule as the Link button ----
-        // Preventive visit + no eye ICD -> delete 99173. Not preventive +
-        // 99173 present + no eye ICD -> add H53.8 so it has something to
-        // link to. (Kept in sync with al_deleteUnwantedCodes.)
-        {
-            const has99173Now = currentCodes.has('99173');
-            if (has99173Now) {
-                const hasEyeICDNow = getICDRows().some(r => al_isEyeICD(r.code));
-                if (hasPreventiveVisit && !hasEyeICDNow) {
-                    const row99173 = currentRows.find(r => r.code === '99173');
-                    if (row99173 && !toDelete.some(d => d.code === '99173')) {
-                        toDelete.push({ code: '99173', row: row99173.row, kind: 'cpt', reason: 'Preventive visit with no eye-related ICD — 99173 not applicable' });
-                    }
-                } else if (!hasPreventiveVisit && !hasEyeICDNow) {
-                    const currentICDCodesFor99173 = getICDRows().map(e => e.code.toUpperCase());
-                    if (!currentICDCodesFor99173.includes('H53.8')) {
-                        toAdd.push({ code: 'H53.8', reason: '99173 present, no eye ICD — added for linking', kind: 'icd' });
-                    }
-                }
-            }
         }
 
         // ---- Age cleanup for G0442/G0444 ----
@@ -2451,6 +2513,10 @@
         return !!insurance && /\bvns\b/i.test(insurance);
     }
 
+    function isCloverHealthIns(insurance) {
+        return !!insurance && /clover/i.test(insurance);
+    }
+
     function isAnyMedicareIns(insurance) {
         return !!insurance && /medicare/i.test(insurance);
     }
@@ -2598,13 +2664,18 @@
         return m ? m[1].trim() : '';
     }
 
-    // Only two visit types exist for this provider: NP and ESTPT.
+    // NP and ESTPT are the two visit types normally seen for this provider.
     // Televisit is detected from 98012 in the CPT list (see
-    // computeAnalysis), not from the appointment caption.
+    // computeAnalysis), not from the appointment caption — but CON/F-U/LAB
+    // captions are also recognized in case they appear: CON -> televisit,
+    // F/U -> established (follow up), LAB -> lab (always 99212, see rule
+    // sheet item 8). Anything else gets no E&M recommendation.
     function classifyVisitType(visitType) {
         const v = (visitType || '').toLowerCase().trim();
         if (v === 'np') return 'new';
-        if (v === 'estpt') return 'established';
+        if (v === 'estpt' || v === 'f/u' || v === 'fu' || v === 'follow up' || v === 'follow-up') return 'established';
+        if (v === 'con' || v === 'televisit') return 'established';
+        if (v === 'lab') return 'lab';
         return null;
     }
 
@@ -2729,16 +2800,6 @@
         "99387": { min: 65, max: 999 }
     };
 
-    // Eye/adnexa ICD detection (H00-H59 minus unused ranges, plus C69/D31/
-    // Q10-15/S05/T15/T26/P39.1) — used to route 99173 (visual acuity).
-    const AL_EYE_ICD_PATTERNS = [
-        /^H(0[0-6]|1[0-9]|2[0-8]|3[0-6]|40|4[2-9]|5[0-9])/,
-        /^C69/, /^D31/, /^Q1[0-5]/, /^S05/, /^T15/, /^T26/, /^P39\.1/
-    ];
-    function al_isEyeICD(code) {
-        return !!code && AL_EYE_ICD_PATTERNS.some(rx => rx.test(code.toUpperCase()));
-    }
-    const AL_PREVENTIVE_Z_CODES_99173 = ["Z00.01", "Z00.121", "Z00.00", "Z00.129"];
 
     // ─── CPT Rules ──────────────────────────────────────────────────────
     function al_buildCPTRules() {
@@ -2895,7 +2956,6 @@
             "97802": { type: "customICDCollector", icdList: ["Y93.79","Y93.81"], fallback: "al_officeVisit" },
             "J3420": { type: "customICDCollector", icdList: b12ICDs, fallback: "al_officeVisit" },
             "99408": { type: "exact", icds: ["Z13.9"], fallback: "al_officeVisit" },
-            "99173": { type: "eyeExam", fallback: "al_officeVisit" },
             "82270": { type: "exact", icds: ["Z12.11"], fallback: "al_officeVisit" },
             "G0108": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "2028F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
@@ -2926,7 +2986,6 @@
             "99205": { type: "al_officeVisit" },
             "36415": { type: "officeVisitThenZ13" },
             "1111F": { type: "al_officeVisit" },
-            "99051": { type: "al_officeVisit" },
             "82274": { type: "al_officeVisit" },
             "99000": { type: "al_officeVisit" }
         });
@@ -3114,28 +3173,6 @@
                     return;
                 }
 
-                if (rule.type === "eyeExam") {
-                    // Link to eye-related (non-Z) ICDs if any are present,
-                    // up to 4. If none, fall back to Office Visit linking.
-                    const matchedRows = icdRows.filter(r => {
-                        const val = r.querySelector("td:nth-child(3)")?.textContent.trim().toUpperCase();
-                        return al_isEyeICD(val);
-                    });
-                    if (matchedRows.length) {
-                        matchedRows.slice(0, 4).forEach((icdRow, idx) => {
-                            const rowNum = icdRow.querySelector('td:first-child center.ng-binding')?.textContent.trim();
-                            if (rowNum) {
-                                const input = row.querySelector(`input[data-fieldname="icd${idx + 1}"]`);
-                                if (input) al_setInputValue(input, rowNum);
-                            }
-                        });
-                    } else if (rule.fallback === "al_officeVisit") {
-                        al_officeVisit([cpt], icdRows, cptRows);
-                    }
-                    al_refreshICDDisplay(row);
-                    return;
-                }
-
                 const icdGroups = Array.isArray(rule.icds[0]) ? rule.icds : [rule.icds];
                 let foundAny = false;
                 icdGroups.forEach((options, idx) => {
@@ -3239,28 +3276,6 @@
         // whole BP qualifier set doesn't belong — delete it. (3077F/3080F
         // are also deleted unconditionally below, since rule 2 never adds
         // them in the first place.)
-        const icdCodesPresentAL = Array.from(document.querySelectorAll('#billingTbl2 tbody tr'))
-            .map(r => r.querySelector('td:nth-child(3)')?.textContent.trim().toUpperCase());
-        const hasI10AL = icdCodesPresentAL.includes('I10');
-        const cptCodesPresentAL = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'))
-            .map(r => r.querySelector('td:nth-child(2)')?.textContent.trim().toUpperCase());
-        const hasHTNMeasureAL = cptCodesPresentAL.includes('3077F') || cptCodesPresentAL.includes('3080F');
-        const deleteHTNQualifiersAL = !hasI10AL || hasHTNMeasureAL;
-
-        // 99173 (visual acuity) routing:
-        //  Case A — preventive visit (Z00.x well-visit code) present AND
-        //           no eye ICD present -> delete 99173 (not needed here).
-        //  Case B — NOT a preventive visit, but 99173 is already present:
-        //           if an eye ICD is present, leave it (the "eyeExam" CPT
-        //           rule in al_linkCPTGeneric links to it). If NOT, add
-        //           H53.8 (visual disturbance, unspecified) so there's
-        //           something for that same eyeExam rule to link 99173 to.
-        const hasPreventiveZ99173AL = icdCodesPresentAL.some(c => AL_PREVENTIVE_Z_CODES_99173.includes(c));
-        const hasEyeICD99173AL = icdCodesPresentAL.some(c => al_isEyeICD(c));
-        const deleteEyeExam99173AL = hasPreventiveZ99173AL && !hasEyeICD99173AL;
-        const has99173PresentAL = cptCodesPresentAL.includes('99173');
-        const needsH538AL = !hasPreventiveZ99173AL && has99173PresentAL && !hasEyeICD99173AL;
-
         // NOTE: G9744 and 3016F are deliberately NOT in this list — G9744
         // is handled exclusively by the Analyze function's MANAGED_CODES
         // (to avoid double-handling), and 3016F is handled exclusively by
@@ -3271,18 +3286,12 @@
             'G9903', '4000F', '1034F', '3080F', '3077F',
             '3050F', '3046F', '0521F',
             '3048F', '3061F', '3062F',
-            '3725F', 'H0049', '',
-            ...(deleteHTNQualifiersAL ? ['3074F', '3075F', '3078F', '3079F'] : []),
-            ...(deleteEyeExam99173AL ? ['99173'] : [])
+            '3725F', 'H0049', ''
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
             'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
         ]);
-
-        // Any CPT starting with '8' gets deleted; if one was actually
-        // removed, Z13.88 is added once cleanup finishes.
-        let al_deleted8PrefixCode = false;
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
         function al_getICDRows() { return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')); }
@@ -3290,7 +3299,7 @@
         function findNextCPTToDelete() {
             return al_getCPTRows().find(row => {
                 const code = row.querySelector('td:nth-child(2)')?.textContent.trim();
-                return code && (cptsToDelete.has(code) || /^8/.test(code));
+                return code && cptsToDelete.has(code);
             });
         }
 
@@ -3379,8 +3388,6 @@
         function deleteAllCPTs(next) {
             const row = findNextCPTToDelete();
             if (!row) { next(); return; }
-            const code = row.querySelector('td:nth-child(2)')?.textContent.trim() || '';
-            if (/^8/.test(code)) al_deleted8PrefixCode = true;
             deleteOneCPTRow(row, () => {
                 setTimeout(() => deleteAllCPTs(next), 50);
             });
@@ -3396,19 +3403,7 @@
 
         deleteAllCPTs(() => {
             deleteAllICDs(() => {
-                const postDeleteICDs = [];
-                if (al_deleted8PrefixCode) postDeleteICDs.push('Z13.88');
-                if (needsH538AL) postDeleteICDs.push('H53.8');
-                if (postDeleteICDs.length) {
-                    // Awaited (not fire-and-forget) — H53.8 needs to exist
-                    // in the ICD grid before al_linkCPTGeneric runs, so the
-                    // "eyeExam" rule has something to link 99173 to.
-                    Promise.resolve(addICDCodesFast(postDeleteICDs)).catch(() => {}).then(() => {
-                        if (typeof done === 'function') done();
-                    });
-                } else {
-                    if (typeof done === 'function') done();
-                }
+                if (typeof done === 'function') done();
             });
         });
     }
@@ -3469,6 +3464,9 @@
         let insurance = '';
         try { insurance = parseInsuranceFromPage(getEncounterText()) || ''; } catch (e) { /* ignore */ }
         const modifierValue = AL_MOD93_INSURANCES.test(insurance) ? '93' : '95';
+        // 95251 present -> office visit code also gets mod2 = 25. Absent ->
+        // office visit code only gets the mod1 modifier above.
+        const has95251 = codesPresent.includes('95251');
 
         cptRows.forEach(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
@@ -3476,7 +3474,10 @@
             try {
                 const scope = angular.element(row).scope();
                 if (scope && scope.cpt) {
-                    scope.$applyAsync(() => { scope.cpt.mod1 = modifierValue; });
+                    scope.$applyAsync(() => {
+                        scope.cpt.mod1 = modifierValue;
+                        if (has95251) scope.cpt.mod2 = '25';
+                    });
                     return;
                 }
             } catch (e) { /* fall through to manual input path */ }
@@ -3489,6 +3490,18 @@
                 modInput.dispatchEvent(new Event('input', { bubbles: true }));
                 modInput.dispatchEvent(new Event('change', { bubbles: true }));
                 modInput.blur();
+            }
+            if (has95251) {
+                const mod2Input = row.querySelector('input[data-fieldname="mod2"]') ||
+                                 row.querySelector('input[name="mod2"]') ||
+                                 row.querySelector('input[id*="mod2"]');
+                if (mod2Input) {
+                    mod2Input.focus();
+                    mod2Input.value = '25';
+                    mod2Input.dispatchEvent(new Event('input', { bubbles: true }));
+                    mod2Input.dispatchEvent(new Event('change', { bubbles: true }));
+                    mod2Input.blur();
+                }
             }
         });
     }
@@ -3954,7 +3967,6 @@
             "97802": { type: "customICDCollector", icdList: ["Y93.79","Y93.81"], fallback: "cl_officeVisit" },
             "J3420": { type: "customICDCollector", icdList: b12ICDs, fallback: "cl_officeVisit" },
             "99408": { type: "exact", icds: ["Z13.9"], fallback: "cl_officeVisit" },
-            "99173": { type: "exact", icds: ["Z01.00","Z00.01","Z00.121"], fallback: "cl_officeVisit" },
             "82270": { type: "exact", icds: ["Z12.11"], fallback: "cl_officeVisit" },
             "G0108": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "2028F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
@@ -3985,7 +3997,6 @@
             "99205": { type: "cl_officeVisit" },
             "36415": { type: "officeVisitThenZ13" },
             "1111F": { type: "cl_officeVisit" },
-            "99051": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
             "99000": { type: "cl_officeVisit" }
         });
@@ -4307,8 +4318,11 @@
     function cl_applyHealthfirstTelehealthPOS(cptRows) {
         const primaryName = cl_getPrimaryInsuranceName();
         if (!primaryName) return;
-        const upperName = primaryName.toUpperCase();
-        const matchesTargetInsurance = cl_TELEHEALTH_POS_INSURANCES.some(name => upperName.includes(name));
+        // Some payers render with a space in the middle ("Health First",
+        // "Metro Plus") instead of one word — strip whitespace before
+        // matching so both spellings hit the same rule.
+        const upperNameNoSpace = primaryName.toUpperCase().replace(/\s+/g, '');
+        const matchesTargetInsurance = cl_TELEHEALTH_POS_INSURANCES.some(name => upperNameNoSpace.includes(name));
         if (!matchesTargetInsurance) return;
 
         // MOD1 "93" or "95" can appear on any row, not necessarily the first
@@ -4455,60 +4469,6 @@
 
     // ====================== END IMPORTED MODULE: CLAIM LINK ======================
 
-    // ================= WEEKEND RULE (CPT 99051) =================
-    // 99051 = services provided on a weekend/holiday. Auto-detected from the
-    // current encounter's DOS (Sat/Sun or a listed federal holiday, 2026-2029),
-    // but always user-overridable via the toggle next to CURRENT ENCOUNTER.
-    // Rule: allowed alongside a plain visit or Smoking (SM) counseling;
-    // NEVER allowed alongside Preventive (PV), Preventive Counseling (P/C),
-    // or Obesity (OB) — those bundles auto-clear it.
-    const WEEKEND_HOLIDAYS = new Set([
-        // 2026
-        "01/01/2026", "01/19/2026", "02/16/2026", "05/25/2026", "06/19/2026",
-        "07/03/2026", "09/07/2026", "10/12/2026", "11/11/2026", "11/26/2026", "12/25/2026",
-        // 2027
-        "01/01/2027", "01/18/2027", "02/15/2027", "05/31/2027", "06/18/2027",
-        "07/05/2027", "09/06/2027", "10/11/2027", "11/11/2027", "11/25/2027", "12/24/2027",
-        // 2028 (New Year's Day observed 12/31/2027)
-        "12/31/2027", "01/17/2028", "02/21/2028", "05/29/2028", "06/19/2028",
-        "07/04/2028", "09/04/2028", "10/09/2028", "11/10/2028", "11/23/2028", "12/25/2028",
-        // 2029
-        "01/01/2029", "01/15/2029", "02/19/2029", "05/28/2029", "06/19/2029",
-        "07/04/2029", "09/03/2029", "10/08/2029", "11/12/2029", "11/22/2029", "12/25/2029",
-    ]);
-
-    function getCurrentDOSStr() {
-        return document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
-    }
-
-    function isWeekendOrHolidayDOS(dosStr) {
-        const m = String(dosStr || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        if (!m) return false;
-        if (WEEKEND_HOLIDAYS.has(dosStr)) return true;
-        const day = new Date(+m[3], +m[1] - 1, +m[2]).getDay();
-        return day === 0 || day === 6;
-    }
-
-    const weekendOverrides = {}; // `${patientKey}_${dos}` -> true/false, manual override only
-
-    function getWeekendKey() {
-        const pidKey = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
-            ? (window.__ecwPatientHistory.getCurrentKey() || "")
-            : "";
-        return `${pidKey}_${getCurrentDOSStr()}`;
-    }
-
-    function isWeekendEnabled() {
-        const key = getWeekendKey();
-        return Object.prototype.hasOwnProperty.call(weekendOverrides, key)
-            ? weekendOverrides[key]
-            : isWeekendOrHolidayDOS(getCurrentDOSStr());
-    }
-
-    function setWeekendOverride(val) {
-        weekendOverrides[getWeekendKey()] = val;
-    }
-
     // Auto Link (AL) button: runs on the billing tab (#billingTbl2/#billingTbl4).
     function runAutoLinkAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
@@ -4548,6 +4508,7 @@
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
             const isMedicare = isAnyMedicareIns(insurance);
+            const isClover = isCloverHealthIns(insurance);
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
@@ -4555,14 +4516,15 @@
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
 
-            if (isVNS || isMedicare) {
-                // VNS Choice and any other Medicare are treated the same:
-                // directly add G0438/G0439. Never G0402 (retired).
+            if (isVNS || isMedicare || isClover) {
+                // VNS Choice, Clover Health, and any other Medicare are
+                // treated the same: directly add G0438/G0439. Never G0402
+                // (retired).
                 const medicareAwvCode = established ? 'G0439' : 'G0438';
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
                 await deleteCPTCodesByCode(MEDICARE_AWV_CODES.filter(c => c !== medicareAwvCode));
                 const result = await addSingleCPT(medicareAwvCode);
-                const payerLabel = isVNS ? 'VNS Choice' : 'Medicare';
+                const payerLabel = isVNS ? 'VNS Choice' : (isClover ? 'Clover Health' : 'Medicare');
                 showQuickNotice(result.ok
                     ? `${payerLabel} — added ${medicareAwvCode} (${established ? 'Established' : 'New'} Patient).`
                     : `${payerLabel} — could not add ${medicareAwvCode} automatically (${result.message}).`);
@@ -4586,7 +4548,7 @@
     // Preventive Counseling can't be applied for these payers: MetroPlus,
     // Medicaid, straight/plain Medicare (not VNS Choice — that's handled
     // separately via the Medicare AWV codes elsewhere), UHC/United
-    // Healthcare, and Nyce PPO.
+    // Healthcare, Nyce PPO, and Molina.
     function isPreventiveCounselBlockedIns(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
@@ -4594,6 +4556,7 @@
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
         if (/nyce/i.test(name) && /ppo/i.test(name)) return true;
+        if (/molina/i.test(name)) return true;
         if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
         return false;
     }
@@ -4973,11 +4936,6 @@
             </div>
             <div class="snapshot-header">
                 CURRENT ENCOUNTER
-                <label class="weekend-toggle" title="Weekend rule (99051)">
-                    <span class="weekend-label">Weekend</span>
-                    <input type="checkbox" id="ecsWeekendToggle" ${isWeekendEnabled() ? 'checked' : ''}>
-                    <span class="weekend-slider"></span>
-                </label>
             </div>
             ${insurance ? `<div class="ins-line">🏥 ${escapeHtml(insurance)}</div>` : ''}
             <div class="top-info">
@@ -5300,12 +5258,6 @@
                 else if (e.target.closest('#ecsObesityBtn')) runObesityAction();
                 else if (e.target.closest('#ecsAutoLinkBtn')) runAutoLinkAction();
                 else if (e.target.closest('#ecsClaimLinkBtn')) runClaimLinkAction();
-            });
-            body.addEventListener('change', (e) => {
-                if (e.target.closest('#ecsWeekendToggle')) {
-                    setWeekendOverride(!!e.target.checked);
-                    renderSnapshotBlock();
-                }
             });
         }
     }
