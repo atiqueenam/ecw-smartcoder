@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.59
+// @name         Hasan Sheikh SmartCoder v1.60
 // @namespace    http://tampermonkey.net/
-// @version      1.59
+// @version      1.60
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -9,6 +9,20 @@
 // @match        *://*.eclinicalweb.com/*
 // @grant        none
 // ==/UserScript==
+
+// CHANGELOG
+// 1.60 (2026-08-09) - BP once/year rule now applies to the whole qualifier
+//   set, not each code independently. Previously a prior visit billing
+//   3074F/3078F only blocked an exact repeat of 3074F this visit — a
+//   different partner like 3079F slipped through. Also extended the
+//   year-used check to the full 6-code BP family (3074F/3075F/3077F/
+//   3078F/3079F/3080F): 3077F/3080F ("over threshold" tier) are still
+//   never added for Hasan Sheikh, but if either was billed earlier this
+//   year, that now also blocks billing any of 3074F/3075F/3078F/3079F
+//   again this year, since it means the BP measure was already reported.
+//   If any of the six was used earlier this year, all four addable codes
+//   are excluded/deleted for this encounter regardless of which pair the
+//   current reading would otherwise select.
 
 // CHANGELOG
 // 1.59 (2026-08-09) - Fixed tobacco-use false positive: "Tobacco Non-User
@@ -1868,16 +1882,24 @@
         const exclusionReasons = new Map();
 
         // ---- BP: needs I10, both values under threshold. Yearly limit —
-        // each BP code (3074F/3075F/3078F/3079F) can only be used once per
-        // calendar year. If a code was already billed earlier this year,
-        // it's excluded (and deleted from the chart if present) instead of
-        // being re-added, even if the current reading would otherwise
-        // qualify it. ----
+        // the BP qualifier set as a WHOLE can only be used once per
+        // calendar year, not each code independently. The full BP code
+        // family is 3074F/3075F/3077F (systolic tiers) and
+        // 3078F/3079F/3080F (diastolic tiers); 3077F/3080F (the
+        // "over threshold" tier) are never added for Hasan Sheikh, but
+        // they still count as "the BP measure was billed" — if either was
+        // used earlier this year (e.g. billed elsewhere, or left over from
+        // before this rule existed), that still blocks billing any BP
+        // qualifier again this year, same as a repeat of 3074F/3075F/
+        // 3078F/3079F would. If ANY of the six was already billed earlier
+        // this year, the entire addable set (3074F/3075F/3078F/3079F) is
+        // excluded for this encounter and deleted from the chart if
+        // present, regardless of which specific pair the current reading
+        // would otherwise select. ----
+        const BP_ADDABLE_CODES = ['3074F', '3075F', '3078F', '3079F'];
+        const BP_ALL_CODES_FOR_YEAR_CHECK = ['3074F', '3075F', '3077F', '3078F', '3079F', '3080F'];
         if (!bp) {
-            exclusionReasons.set('3074F', 'No BP documented this encounter');
-            exclusionReasons.set('3075F', 'No BP documented this encounter');
-            exclusionReasons.set('3078F', 'No BP documented this encounter');
-            exclusionReasons.set('3079F', 'No BP documented this encounter');
+            BP_ADDABLE_CODES.forEach(c => exclusionReasons.set(c, 'No BP documented this encounter'));
         } else {
             const [sys, dia] = bp.split('/').map(n => parseInt(n));
             const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
@@ -1892,20 +1914,17 @@
             else if (!diaOk) bpReason = `Diastolic ${dia} at/over 90`;
 
             if (bpReason) {
-                ['3074F', '3075F', '3078F', '3079F'].forEach(c => exclusionReasons.set(c, bpReason));
+                BP_ADDABLE_CODES.forEach(c => exclusionReasons.set(c, bpReason));
             } else {
                 const sysCode = sys <= 129 ? '3074F' : '3075F';
                 const diaCode = dia <= 79 ? '3078F' : '3079F';
+                const usedThisYear = BP_ALL_CODES_FOR_YEAR_CHECK.find(c => codeUsedInYear(c, bpDosYear));
 
-                if (codeUsedInYear(sysCode, bpDosYear)) {
-                    exclusionReasons.set(sysCode, `${sysCode} already billed earlier this year (once/year limit)`);
+                if (usedThisYear) {
+                    const yearReason = `${usedThisYear} already billed earlier this year (once/year limit for the whole BP qualifier set)`;
+                    BP_ADDABLE_CODES.forEach(c => exclusionReasons.set(c, yearReason));
                 } else {
                     desired.set(sysCode, `Systolic ${sys}`);
-                }
-
-                if (codeUsedInYear(diaCode, bpDosYear)) {
-                    exclusionReasons.set(diaCode, `${diaCode} already billed earlier this year (once/year limit)`);
-                } else {
                     desired.set(diaCode, `Diastolic ${dia}`);
                 }
             }
