@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.32
+// @name         Bronx Health SmartCoder v1.33
 // @namespace    http://tampermonkey.net/
-// @version      1.32
+// @version      1.33
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,29 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.33 (2026-08-08) - Rebuilt Tobacco/Alcohol/Social-screening detection
+//   from real Bronx chart examples (Migrated Social History + PRAPARE +
+//   Alcohol Screen/AUDIT-C + Tobacco Control widgets). Found and fixed the
+//   actual bug behind the reported false positives: the smoker-detection
+//   regex's negation list was missing "never", so "Never smoker" — the
+//   single most common structured Tobacco Use answer in this data — was
+//   being read as a bare, unnegated "smoker" mention and flagged as an
+//   active smoker. Also fixed unbounded "Social History:"/"Drugs/Alcohol:"
+//   text extraction that had no real stop boundary in Bronx's flattened
+//   widget format and could run to the end of the note, picking up
+//   unrelated words. Detection now reads only the structured screening-
+//   widget answers (DOM-scoped, freetext "leftPaneData" narrative
+//   excluded — that freetext can restate or flatly contradict the actual
+//   screening result) and anchors each answer to the next known category
+//   label instead of a SOAP heading that doesn't exist in this format.
+//   Added Social Determinants/PRAPARE detection (Bronx's actual social-
+//   screening questionnaire; the old code only looked for "SCN Screening"
+//   phrasing, which never appears in Bronx's notes at all). Depression
+//   (PHQ-9) detection is unchanged — same shape held up fine against
+//   these examples. Falls back to a bounded plain-text scan only when no
+//   structured widgets are present on the note at all. Runs automatically,
+//   same as everything else in this module; wrapped so a bad parse can
+//   only fall back to "no data" (null/grey chip) rather than throw.
 // 1.32 (2026-08-08) - Added Module 3: automatic PN/coding modal resize
 //   (#mainPNDialog) for Bronx, folded in from the standalone "eCW PN Modal
 //   Resize" script. Bronx's coding modal renders bigger than our other
@@ -291,6 +314,12 @@
     // hides it from innerText), so analysis stays correct on either tab.
     let cachedEncounterText = "";
     let cachedEncounterKey = "";
+    // Caches just the structured screening-widget text (Tobacco Use / Drug
+    // Alcohol / Social Determinants "readOnlyCategory_*" answers, with the
+    // freetext narrative stripped out) from the same moment — see
+    // extractStructuredScreeningText() below for why the freetext has to
+    // be excluded.
+    let cachedStructuredScreeningText = "";
 
     // NOTE: the three selectors below are best-effort heuristics because the
     // exact CPT grid table / delete-confirm dialog HTML wasn't available when
@@ -965,29 +994,101 @@
                /\b(?:O2\s*Sat|SpO2)\s*:?\s*\d/i.test(cleaned);
     }
 
-    // Drives the "Tob" flag chip (red = false) and the Smoking button. A
-    // literal "smoker" word confirms active smoking on its own; other
-    // tobacco language (smokeless, chewing tobacco, cigar) without that word
-    // needs a prior F17.210 in history to confirm. Returns true = NOT a
-    // confirmed smoker (green), false = confirmed (red).
-    // "Smoker" not preceded by a negation word (not/denies/no/former/past)
-    // or "non-"/"non " — used for both checks below.
-    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|former|past)\\s)(?<!non[\\s-])";
+    // ====================== BRONX SCREENING DETECTION (Tobacco/Alcohol/Social) ======================
+    // Rebuilt from real Bronx chart examples. eCW renders every screening
+    // answer inline as "<Label>: (<SubType>): <answers>." back-to-back with
+    // no line breaks or SOAP headings to anchor on. The old version of this
+    // logic assumed traditional dictated-note headings (Objective/
+    // Assessment/Plan/etc.) to know where a "Social History"/"Drugs/
+    // Alcohol:" section ended — those headings don't exist in Bronx's
+    // flattened widget text, so with no real stop boundary a match could
+    // run all the way to the end of the note and pick up unrelated words
+    // from later sections (this — plus the bug below — was the source of
+    // the false positives/negatives reported on this client). Anchoring on
+    // the *next* known label instead means a section's content can never
+    // run past where the next real category actually begins.
+    const SCREENING_LABEL_RE = /(Tobacco Use|Drugs?\/Alcohol|Alcohol|Tobacco|Social Determinants|Misc|Sexual Hx|Health Promotion and Disease Prevention|Tobacco Control \(Standard\)|PRAPARE)\s*:\s*(?:\(([^)]*)\)\s*:)?/g;
 
-    function isConfirmedNonSmoker(socText) {
+    function extractScreeningSections(text) {
+        if (!text) return [];
+        const matches = [...text.matchAll(SCREENING_LABEL_RE)];
+        const sections = [];
+        for (let i = 0; i < matches.length; i++) {
+            const start = matches[i].index + matches[i][0].length;
+            const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+            sections.push({ label: matches[i][1], subtype: matches[i][2] || '', content: text.slice(start, end).trim() });
+        }
+        return sections;
+    }
+
+    // Bronx's screening answers live inside eCW's "readOnlyCategory_*"
+    // widgets, each of which pairs the actual structured answer (e.g. a
+    // scored Alcohol Screen/AUDIT-C, or the Tobacco Use question) with a
+    // separate freetext "leftPaneData" table underneath where the provider
+    // can type anything at all — including text that restates,
+    // contradicts, or has nothing to do with the structured answer (real
+    // example: freetext "periodic drinker" directly under a structured
+    // Alcohol Screen reading "Interpretation: Negative", and freetext
+    // mentioning smoking with no Tobacco Use widget present on the note at
+    // all). Auto-coding must only ever act on the structured answer, so
+    // this strips every ".leftPaneData" table out before reading a
+    // category's text.
+    function extractStructuredScreeningText() {
+        const categories = document.querySelectorAll('div[id^="readOnlyCategory_"]');
+        if (!categories.length) return "";
+        const parts = [];
+        categories.forEach(cat => {
+            const clone = cat.cloneNode(true);
+            clone.querySelectorAll('.leftPaneData').forEach(el => el.remove());
+            const t = (clone.textContent || "").replace(/\s+/g, " ").trim();
+            if (t) parts.push(t);
+        });
+        return parts.join(" ");
+    }
+
+    // "Smoker" not preceded by a negation word (not/denies/no/never/
+    // former/past) or "non-"/"non " — used below. Missing "never" here was
+    // the actual bug behind Bronx's false smoker flags: "Never smoker" —
+    // by far the most common structured Tobacco Use answer in this data —
+    // was being read as a bare, unnegated "smoker" mention and flipping
+    // the flag to a confirmed smoker.
+    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|never|former|past)\\s)(?<!non[\\s-])";
+
+    // Returns true = confirmed NOT a smoker (green "Tob" chip), false =
+    // confirmed smoker (red), null = no usable Tobacco Use answer at all
+    // (category absent, or present but left blank — e.g. "(Smoking):"
+    // with nothing filled in — which isn't a screening result and
+    // shouldn't be shown as one).
+    function evaluateTobacco(sections) {
+        const tobSections = sections.filter(s => s.label === 'Tobacco Use' || s.label === 'Tobacco Control (Standard)');
+        if (!tobSections.length) return null;
+
+        const combined = tobSections.map(s => s.content).join(' ').trim();
+        if (!combined || /^\.+$/.test(combined)) return null;
+
+        // Bronx's terse "(Smoking):no." shape — a bare "no" answer.
+        if (/^no\.?$/i.test(combined)) return true;
+
+        if (/non[\s-]?user/i.test(combined)) return true; // "Tobacco non-user: Never used..."
+
         // "current ... smoker" wins over other text in the section (eCW
         // sometimes appends a contradicting trailing summary). Allows a
         // short gap for phrasing like "current every day smoker".
-        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bcurrent\\b[\\s\\S]{0,25}?\\bsmoker\\b`, "i").test(socText)) return false;
+        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bcurrent\\b[\\s\\S]{0,25}?\\bsmoker\\b`, "i").test(combined)) return false;
 
-        // Bare "smoker" mention (e.g. "Light cigarette smoker") — checked
-        // before "other tobacco use? No" below, since that question is
-        // about smokeless/chewing tobacco, not cigarettes.
-        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(socText)) return false;
+        // Explicit negative phrasing checked BEFORE the bare "smoker"
+        // mention below — "Never smoker"/"Non-smoker"/"Former smoker" all
+        // contain the literal word "smoker" and must never fall through
+        // to the bare-mention check.
+        if (/non[\s-]?smoker|never\s+smoker|former\s+smoker|other\s+tobacco.*No/i.test(combined)) return true;
 
-        if (/non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText)) return true;
+        // Bare "smoker" mention (e.g. "Light cigarette smoker").
+        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(combined)) return false;
 
-        const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(socText);
+        // Other tobacco language (smokeless, chewing tobacco, cigar)
+        // without the word "smoker" needs a prior F17.210 in history to
+        // confirm — otherwise it's ambiguous, treat as not-a-confirmed-smoker.
+        const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(combined);
         if (otherTobaccoUse) {
             const api = window.__ecwPatientHistory;
             const data = api && api.getData ? api.getData() : null;
@@ -995,18 +1096,61 @@
                 [...(enc.assessments || []), ...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
                     .some(c => (c.code || "").toUpperCase().startsWith("F17.210"))
             );
-            return !confirmedByHistory; // unconfirmed -> treat as not-a-confirmed-smoker
+            return !confirmedByHistory;
         }
 
         return true; // no positive indicators found
+    }
+
+    // Returns true = confirmed negative alcohol screen, false = confirmed
+    // positive, null = no usable alcohol answer on this note. Only
+    // "Drug/Alcohol" category items that are actually about alcohol count
+    // — the same category label also carries Domestic Violence / drug-only
+    // content that has nothing to do with alcohol use. The alcohol/drink
+    // wording is usually only in the item's subtype ("(Alcohol Screen)",
+    // "(AUDIT-C (Standard))") rather than repeated in the answer text
+    // itself, so both are checked.
+    function evaluateAlcohol(sections) {
+        const relevant = sections.filter(s =>
+            /^Drugs?\/Alcohol$/.test(s.label) &&
+            (/alcohol|audit-?c/i.test(s.subtype) || /alcohol|drink/i.test(s.content))
+        );
+        if (!relevant.length) return null;
+
+        const combined = relevant.map(s => s.content).join(' ');
+
+        // Alcohol Screen / AUDIT-C always attach a scored interpretation —
+        // trust that over any keyword guessing whenever it's present.
+        const interp = combined.match(/Interpretation\s*:?\s+(Negative|Positive)\b/i);
+        if (interp) return /negative/i.test(interp[1]);
+
+        const scoredInterp = combined.match(/Interpretation of Score\s*:?\s*(No[nz]e|Low|Minimal|Mild|Moderate|Substantial|Severe|High)/i);
+        if (scoredInterp) return /no[nz]e|low|minimal/i.test(scoredInterp[1]);
+
+        // No scored interpretation at all — fall back to the plain intake
+        // question ("Did you have a drink containing alcohol ... ?: No").
+        const drinkQuestion = combined.match(/drink[^:]*?:\s*(Yes|No)\b/i);
+        if (drinkQuestion) return /no/i.test(drinkQuestion[1]);
+
+        return null;
+    }
+
+    // Social screening ("SCN" chip): a completed Social Determinants
+    // (PRAPARE) questionnaire — Bronx's version of the social-needs
+    // screen — or, for other clients sharing this same engine, the
+    // "SCN Screening"/"Social Needs Screening" phrasing they use instead.
+    function evaluateSocialScreening(sections, fullText) {
+        const hasPrapare = sections.some(s =>
+            (s.label === 'Social Determinants' || s.label === 'PRAPARE') &&
+            /PRAPARE Score|housing situation|work situation/i.test(s.content)
+        );
+        return hasPrapare || /Social Needs Screening|SCN\s*Screening/i.test(fullText);
     }
 
     // ====================== SHARED CLINICAL FLAG EXTRACTION ======================
     // Used by both the visual snapshot chips AND the auto-coding analysis
     // engine, so the two never disagree about what's "green" vs "red".
     function extractClinicalFlags(text) {
-        const socialHistoryMatch = text.match(/Social History\s*[:\*]?([\s\S]*?)(?=\n\s*(?:Family History|Medical History|Surgical History|Review of Systems|Objective|Assessment|Plan|HPI|Subjective)\b|$)/i);
-        const socText = socialHistoryMatch ? socialHistoryMatch[1] : "";
         const hpiText = text;
 
         const depPresent = /Depression Screening|PHQ-?\d/i.test(hpiText);
@@ -1014,41 +1158,28 @@
         const depScores = depScoreMatches.map(m => Number(m[1]));
         const hasDep = depPresent ? (depScores.length ? depScores.every(s => s === 0) : null) : null;
 
-        const tobPresent = /Tobacco Use:/i.test(socText);
-        const hasTob = tobPresent ? isConfirmedNonSmoker(socText) : null;
+        // Prefer the structured screening-widget text (freetext narrative
+        // stripped out) whenever it's available — see
+        // extractStructuredScreeningText() above. Falls back to a plain
+        // scan of the raw note for charts that don't use these widgets at
+        // all (e.g. a manually dictated "Social History:" paragraph).
+        const structuredText = getScreeningText();
+        const sections = extractScreeningSections(structuredText);
 
-        const drugsAlcMatch = text.match(/Drugs?\/Alcohol:([\s\S]*?)(?=\n\s*\*[A-Za-z]|\n\s*(?:Screening:|ROS:|Social History Verified)|$)/i);
-        const drugsAlcText = drugsAlcMatch ? drugsAlcMatch[1] : "";
-        // The "Drugs/Alcohol:" heading covers both topics, but a given
-        // encounter may only have answered the drug questions with no
-        // alcohol content at all — only treat it as alcohol data if the
-        // word "alcohol" or "drink" actually appears in this section.
-        const alcPresent = !!drugsAlcMatch && /alcohol|drink/i.test(drugsAlcText);
-        let hasAlc = null;
-        if (alcPresent) {
-            let officialResult = null;
-            const auditInterp = drugsAlcText.match(/Interpretation\s+(Negative|Positive)\b/i);
-            if (auditInterp) officialResult = /negative/i.test(auditInterp[1]);
-            const scoredInterp = drugsAlcText.match(/Interpretation of Score:\s*(No[nz]e|Low|Minimal|Mild|Moderate|Substantial|Severe|High)/i);
-            if (scoredInterp) {
-                const level = scoredInterp[1].toLowerCase();
-                const isLow = /no[nz]e|low|minimal/.test(level);
-                officialResult = officialResult === false ? false : isLow;
-            }
-            if (officialResult !== null) {
-                hasAlc = officialResult;
-            } else {
-                const positiveUse = /\bAdmits\b|\byes\b(?!\s*no)|\bcurrent(ly)?\s+(drink|use)|drinks?\s+per\s+(week|day)|\bAUDIT\b.*(?:[1-9]\d*\s*$|positive)/i.test(drugsAlcText);
-                const explicitNegative = /\bNo\b/i.test(drugsAlcText);
-                hasAlc = !positiveUse && explicitNegative;
-            }
+        let hasTob = evaluateTobacco(sections);
+        let hasAlc = evaluateAlcohol(sections);
+        let hasSocialNeeds = evaluateSocialScreening(sections, hpiText);
+
+        if (!structuredText) {
+            const socialHistoryMatch = text.match(/Social History\s*[:\*]?([\s\S]{0,1500}?)(?=\n\s*(?:Family History|Medical History|Surgical History|Review of Systems|Objective|Assessment|Plan|HPI|Subjective)\b|$)/i);
+            const socText = socialHistoryMatch ? socialHistoryMatch[1] : "";
+            const fallbackSections = extractScreeningSections(socText);
+            hasTob = evaluateTobacco(fallbackSections);
+            hasAlc = evaluateAlcohol(fallbackSections);
+            hasSocialNeeds = evaluateSocialScreening(fallbackSections, hpiText);
         }
 
-        // Hasan Sheikh's notes use "SCN Screening" (e.g. "SCN Screening
-        // Composite"), not "Social Needs Screening" — detect both.
-        const hasSocialNeeds = /Social Needs Screening|SCN\s*Screening/i.test(socText);
-
-        return { hasDep, hasTob, hasAlc, hasSocialNeeds, hpiText, socText };
+        return { hasDep, hasTob, hasAlc, hasSocialNeeds, hpiText };
     }
 
     // ====================== AUTO-CODING ANALYSIS ENGINE ======================
@@ -4883,11 +5014,32 @@
             : "";
         if (key !== cachedEncounterKey) {
             cachedEncounterText = "";
+            cachedStructuredScreeningText = "";
             cachedEncounterKey = key;
         }
-        if (hasSoapText) cachedEncounterText = liveText;
+        if (hasSoapText) {
+            cachedEncounterText = liveText;
+            // The readOnlyCategory widgets are only in the DOM while the
+            // note tab is actually showing (same reason cachedEncounterText
+            // exists at all) — capture the structured screening text here
+            // too, wrapped defensively since it's a DOM walk that must
+            // never be what breaks chart detection.
+            try {
+                const structured = extractStructuredScreeningText();
+                if (structured) cachedStructuredScreeningText = structured;
+            } catch (e) {}
+        }
 
         return hasSoapText || hasBillingGrid;
+    }
+
+    // The cached structured screening-widget text (Tobacco Use/Drug-
+    // Alcohol/Social Determinants answers, freetext stripped) from the
+    // last time the note tab was visible for this patient/encounter.
+    // Empty string means either no such widgets exist on this note, or
+    // the note hasn't been visited yet this session.
+    function getScreeningText() {
+        return cachedStructuredScreeningText;
     }
 
     // The stable "what does the note say" text: the cached copy from the
