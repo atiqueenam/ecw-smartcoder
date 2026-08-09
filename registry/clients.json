@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-09T10:28:39.265Z",
+  "generatedAt": "2026-08-09T10:44:31.231Z",
   "clients": [
     {
       "id": "bronx",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "5.21",
+      "version": "5.24",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "996d58abd27a01cf718cc58eb732dabf93084292e390e874bbbb2f4d112bbe50"
+      "sha256": "3128aea2b6547126d72e14efbe49a154af6960c1b946dc3c455cdc4aa966930a"
     },
     {
       "id": "hasan-sheikh",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.53",
+      "version": "1.60",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "91ab190a1e257860bca4b2cfbca0c1cb79f8a842291144b404ff61ad5fac25ff"
+      "sha256": "48c57e64783764e8c59f01a798098d023e0b11dae4a5b89a4d7b710c52c82232"
     }
   ]
 }
