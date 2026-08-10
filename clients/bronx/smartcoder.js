@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.37
+// @name         Bronx Health SmartCoder v1.38
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,38 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.38 (2026-08-10) - New client rule-sheet update:
+//   1) CANCER SCREENING — auto-detect/auto-add/auto-delete removed
+//      (getCancerScreeningDates() deleted, was unused dead code anyway).
+//      Auto Link/Claim Link ICD-linking for 3014F/3015F/3017F is
+//      UNCHANGED — linking stays universal, so if the practice adds one
+//      of these codes themselves it still links correctly.
+//   2) EMPIRE PLAN alcohol/tobacco screening code removal now only applies
+//      to televisits (isTelevisitNote) — for in-person visits, any Empire-
+//      named plan (Empire BCBS, etc.) uses these codes normally.
+//   3) 99204/99205/99215 are now protected from the office-visit "wrong
+//      code for this visit type" auto-delete — never removed if the
+//      practice put one of these on the chart directly.
+//   4) Medicare/VNS Choice/Clover Health G0438(new)/G0439(established)
+//      annual-visit logic reviewed — already correct, no change needed.
+//   5) NEW: modifier 59 auto-applied (Auto Link + Claim Link) to G0444,
+//      G0442, 96127, 96372, Q0091 whenever present — skipped if a modifier
+//      is already there ("if already applied then ok").
+//   6) Fixed a bug: the 90686/90688→90656 vaccine replacement rule had a
+//      typo (was checking "96686" instead of "90686") — now correctly
+//      matches 90686.
+//   7) BLOOD PRESSURE — removed the once-per-year "already billed this
+//      year" gate; the systolic/diastolic BP code is now proposed
+//      whenever "Controlling BP" + a BP value + I10 are present,
+//      regardless of prior use. Already-present codes are still never
+//      deleted outright.
+//   8) Televisit med-refill E&M rule tightened: 99212 now requires the CC
+//      to be EXCLUSIVELY a med/medication refill mention with nothing else
+//      of substance — if the CC has other content alongside the refill
+//      mention, 99213 is used instead (more time spent).
+//   9) NEW: modifier QW auto-applied (Auto Link + Claim Link) to a fixed
+//      list of ~90 lab CPT/HCPCS codes (80048...G0567) whenever present.
+//      No other existing modifier rules were touched.
 // 1.37 (2026-08-09) - Two corrections from user feedback on 1.36:
 //   1) Removed the Healthfirst/MetroPlus/Fidelis 93-modifier carve-out for
 //      the televisit Auto Link rule — Bronx does not follow that special
@@ -962,18 +994,12 @@
         return pastDate.getFullYear() === dosDate.getFullYear();
     }
 
-    function getCancerScreeningDates(text) {
-        const hpText = getHealthPromotionSectionText(text);
-        const cervical = hpText.match(/Cervical Cancer Screening[^:]*:\s*Last PAP Completed [Oo]n\s*(\d{2}\/\d{2}\/\d{4})/i);
-        // 3017F applies regardless of which colorectal test was done.
-        const colorectal = hpText.match(/Colorectal Cancer Screening[^:]*:\s*Last\s+(?:Colonoscopy|FIT|Sigmoidoscopy|Cologuard|FOBT|Fecal Occult Blood Test|CT Colonography)\s+Completed [Oo]n\s*(\d{2}\/\d{2}\/\d{4})/i);
-        const breast = hpText.match(/Breast Cancer Screening[^:]*:\s*Last Mammogram Completed [Oo]n\s*(\d{2}\/\d{2}\/\d{4})/i);
-        return {
-            cervical: cervical ? cervical[1] : null,
-            colorectal: colorectal ? colorectal[1] : null,
-            breast: breast ? breast[1] : null
-        };
-    }
+    // Cancer screening (cervical/colorectal/breast) date parsing removed —
+    // was unused dead code. Auto Link / Claim Link ICD-LINKING for
+    // 3014F/3015F/3017F is still intact (see AL/CL rule tables below) —
+    // if the practice adds one of these codes themselves, it still gets
+    // the correct ICD linked. Only auto-detect/auto-add/auto-delete of
+    // these codes stays off.
 
     // A1c extraction/control-CPT logic removed entirely (not used).
 
@@ -1792,7 +1818,7 @@
 
         // Raw CPT codes currently on the chart — read early so preventive
         // detection, the age-based correction-only codes, and the
-        // 96686/90688→90656 swap can all see what's already there.
+        // 90686/90688→90656 swap can all see what's already there.
         const rawCPTCodesNow = getCPTRows()
             .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
             .filter(Boolean);
@@ -1859,21 +1885,18 @@
         const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
         const ccText = ccRaw ? ccRaw[1] : '';
 
-        // ---- BP: CC must mention "Controlling BP". Add (or fix to the
-        // correct bucket) only once per calendar year per side — if a
-        // systolic/diastolic BP code was already billed earlier this year,
-        // no need to add again. An already-present BP code is NEVER simply
-        // deleted; if we can't confirm/compute the correct code (no
-        // "Controlling BP" in CC, no BP value this encounter, no I10, or
-        // already used this year) we leave whatever is currently on the
+        // ---- BP: CC must mention "Controlling BP". Whenever "Controlling
+        // BP" is present (plus a BP value this encounter and I10 on the
+        // chart), the corresponding code is used — no check against
+        // whether it was previously billed this year. An already-present
+        // BP code is NEVER simply deleted; if we can't confirm/compute the
+        // correct code (no "Controlling BP" in CC, no BP value this
+        // encounter, or no I10) we leave whatever is currently on the
         // chart untouched. ----
         {
             const ccHasControllingBP = /controlling\s*bp/i.test(ccText);
-            const dosYearBp = getCurrentDosYear();
             const sysCodes = ['3074F', '3075F'];
             const diaCodes = ['3078F', '3079F'];
-            const sysUsedThisYear = sysCodes.some(c => codeUsedInYear(c, dosYearBp));
-            const diaUsedThisYear = diaCodes.some(c => codeUsedInYear(c, dosYearBp));
             const existingCptCodesBp = getCPTRows().map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
             const existingSysCode = sysCodes.find(c => existingCptCodesBp.includes(c));
             const existingDiaCode = diaCodes.find(c => existingCptCodesBp.includes(c));
@@ -1888,13 +1911,13 @@
                 }
             }
 
-            if (sysTarget && !sysUsedThisYear) {
+            if (sysTarget) {
                 desired.set(sysTarget, `Systolic BP (Controlling BP)`);
             } else if (existingSysCode) {
                 desired.set(existingSysCode, 'Already on chart — BP code not removed');
             }
 
-            if (diaTarget && !diaUsedThisYear) {
+            if (diaTarget) {
                 desired.set(diaTarget, `Diastolic BP (Controlling BP)`);
             } else if (existingDiaCode) {
                 desired.set(existingDiaCode, 'Already on chart — BP code not removed');
@@ -1981,8 +2004,10 @@
 
         // A1c control-CPT logic removed.
 
-        // Cancer screening CPTs (3014F/3015F/3017F) not auto-added; not in
-        // MANAGED_CODES so any already present are never deleted either.
+        // Cancer screening (3014F/3015F/3017F) not auto-added and not in
+        // MANAGED_CODES (never auto-deleted either) — but Auto Link/Claim
+        // Link still link the correct ICD if the practice adds one of
+        // these codes themselves.
 
         // ---- Annual screening G-codes: G0444 (depression), G0442 (alcohol) ----
         // Only when a preventive visit is present on this chart.
@@ -2015,8 +2040,11 @@
 
         // Empire plan: alcohol/tobacco screening codes aren't used for this
         // payer — never propose adding them (existing ones get removed
-        // further below, alongside the ICD cleanup).
-        const isEmpire = isEmpireIns(insurance);
+        // further below, alongside the ICD cleanup). Only applies to
+        // televisits — isEmpireIns matches any "Empire ..." plan name (e.g.
+        // Empire BCBS), not just the literal "Empire Plan"; for in-person
+        // visits, Empire plans DO use these codes normally.
+        const isEmpire = isEmpireIns(insurance) && isTelevisitNote;
         const EMPIRE_ALCOHOL_CODES = ['G0442', 'G9622', '99408'];
         const EMPIRE_TOBACCO_CODES = ['99406', '1000F', '1036F', 'G9275', 'G9276'];
         if (isEmpire) {
@@ -2202,15 +2230,19 @@
                     ovCode = '99212';
                     ovReason = '99211 is never used for this provider — corrected to 99212';
                 } else if (isTelevisitNote) {
-                    // Televisit (appointment caption = CON): a med/
-                    // medication refill (in the CC, or e.g. a "Refill all
-                    // Rx" orders/plan line elsewhere on the note) uses
-                    // 99212, otherwise 99213.
+                    // Televisit (appointment caption = CON): 99212 only
+                    // when the CC's reason for the visit is essentially
+                    // JUST a med/medication refill (or closely related
+                    // phrase) with nothing else of substance — if the CC
+                    // has other content beyond the refill mention, more
+                    // time was spent, so bill 99213 instead.
                     const MED_REFILL_RE = /\b(?:med(?:ication)?\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?))\b/i;
-                    const isMedRefillCC = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
-                    ovCode = isMedRefillCC ? '99212' : '99213';
-                    ovReason = isMedRefillCC
-                        ? 'Televisit (CON), med refill — 99212'
+                    const hasMedRefillMention = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
+                    const ccWithoutRefill = ccText.replace(MED_REFILL_RE, ' ').replace(/[^a-z0-9]+/gi, ' ').trim();
+                    const isOnlyMedRefill = hasMedRefillMention && ccWithoutRefill.length === 0;
+                    ovCode = isOnlyMedRefill ? '99212' : '99213';
+                    ovReason = isOnlyMedRefill
+                        ? 'Televisit (CON), CC is med refill only — 99212'
                         : 'Televisit (CON) — 99213';
                 } else if (!isVitalsDocumented(text)) {
                     // rule 6.ii
@@ -2252,7 +2284,12 @@
                         emIsNewPatient: ovIsNewPatient
                     });
                 }
+                // 99204/99205/99215 given directly by the practice are
+                // never auto-removed here, even if they don't match the
+                // computed office-visit code for this visit type.
+                const PRACTICE_PROTECTED_OV_CODES = new Set(['99204', '99205', '99215']);
                 currentRows.forEach(r => {
+                    if (PRACTICE_PROTECTED_OV_CODES.has(r.code)) return;
                     if (OFFICE_VISIT_EM_CODES.includes(r.code) && r.code !== ovCode) {
                         toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Wrong office-visit code for this visit type (should be ${ovCode})` });
                     }
@@ -2296,15 +2333,15 @@
             }
         }
 
-        // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
-        ['96686', '90688'].forEach(oldCode => {
+        // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
+        ['90686', '90688'].forEach(oldCode => {
             const row = currentRows.find(r => r.code === oldCode);
             if (row && !toDelete.some(d => d.code === oldCode)) {
                 toDelete.push({ code: oldCode, row: row.row, kind: 'cpt', reason: 'Replaced with 90656' });
             }
         });
-        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '96686' || r.code === '90688')) {
-            toAdd.push({ code: '90656', reason: 'Replaces 96686/90688', kind: 'cpt' });
+        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '90686' || r.code === '90688')) {
+            toAdd.push({ code: '90656', reason: 'Replaces 90686/90688', kind: 'cpt' });
         }
 
         // ---- Vaccine administration coding ----
@@ -3541,6 +3578,80 @@
         });
     }
 
+    // ─── Modifier 59 on specific codes ──────────────────────────────────
+    // G0444, G0442, 96127, 96372, Q0091 always get modifier 59 on mod1.
+    // If a modifier is already present (59 or otherwise), leave it alone —
+    // "if already applied then ok", don't overwrite/duplicate.
+    const AL_MOD59_CODES = new Set(['G0444', 'G0442', '96127', '96372', 'Q0091']);
+
+    function al_applyModifier59() {
+        const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
+        cptRows.forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (!AL_MOD59_CODES.has(code)) return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope && scope.cpt) {
+                    if (scope.cpt.mod1 && scope.cpt.mod1.trim()) return; // already applied
+                    scope.$applyAsync(() => { scope.cpt.mod1 = '59'; });
+                    return;
+                }
+            } catch (e) { /* fall through to manual input path */ }
+            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                             row.querySelector('input[name="mod1"]') ||
+                             row.querySelector('input[id*="mod1"]');
+            if (modInput) {
+                if (modInput.value && modInput.value.trim()) return; // already applied
+                modInput.focus();
+                modInput.value = '59';
+                modInput.dispatchEvent(new Event('input', { bubbles: true }));
+                modInput.dispatchEvent(new Event('change', { bubbles: true }));
+                modInput.blur();
+            }
+        });
+    }
+
+    // ─── QW modifier on lab codes (Auto Link / Claim Link) ─────────────
+    // These CPT/HCPCS lab codes get modifier QW whenever present on the
+    // chart being auto-linked. Does not touch any other modifier rules.
+    const AL_QW_LAB_CODES = new Set([
+        '80048','80051','80053','80061','80069','80178','80305','81003','81007','82010','82040','82044',
+        '82120','82150','82247','82271','82274','82310','82374','82435','82465','82523','82550','82565',
+        '82570','82679','82947','82950','82951','82952','82977','82985','83001','83002','83036','83037',
+        '83516','83605','83655','83718','83721','83861','83880','83986','84075','84132','84155','84295',
+        '84450','84460','84478','84520','84550','84703','85014','85610','86308','86318','86386','86403',
+        '86780','86803','87210','87338','87400','87426','87428','87430','87449','87502','87635','87636',
+        '87637','87651','87801','87804','87807','87808','87809','87811','87812','87880','87899','87905',
+        '89300','89321','G0328','G0567'
+    ]);
+
+    function al_applyQWModifier() {
+        const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
+        cptRows.forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (!AL_QW_LAB_CODES.has(code)) return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope && scope.cpt) {
+                    if (scope.cpt.mod1 && scope.cpt.mod1.trim().toUpperCase() === 'QW') return; // already applied
+                    scope.$applyAsync(() => { scope.cpt.mod1 = 'QW'; });
+                    return;
+                }
+            } catch (e) { /* fall through to manual input path */ }
+            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                             row.querySelector('input[name="mod1"]') ||
+                             row.querySelector('input[id*="mod1"]');
+            if (modInput) {
+                if (modInput.value && modInput.value.trim().toUpperCase() === 'QW') return; // already applied
+                modInput.focus();
+                modInput.value = 'QW';
+                modInput.dispatchEvent(new Event('input', { bubbles: true }));
+                modInput.dispatchEvent(new Event('change', { bubbles: true }));
+                modInput.blur();
+            }
+        });
+    }
+
     // ─── 99214 eligibility reminder (informational only — Link button) ──
     // Purely a notification/reminder shown on Link click; does not touch
     // any codes. The Analyze function's own 99214 logic (with the 30-day
@@ -3599,6 +3710,8 @@
             al_handleUnlistedCPTs(cptRows);
             al_applySLModifierForPedsVaccines();
             al_applyTelevisitModifier();
+            al_applyModifier59();
+            al_applyQWModifier();
             al_alertDuplicateICDStart(icdRows);
             al_alertDuplicateCPT(cptRows);
             al_validatePreventiveCPT(cptRows);
@@ -4479,6 +4592,48 @@
         });
     }
 
+    // ─── Modifier 59 on specific codes ──────────────────────────────────
+    // G0444, G0442, 96127, 96372, Q0091 always get modifier 59 on MOD1. If
+    // a modifier is already present (59 or otherwise), leave it alone —
+    // "if already applied then ok", don't overwrite/duplicate.
+    const cl_MOD59_CODES = new Set(['G0444', 'G0442', '96127', '96372', 'Q0091']);
+
+    function cl_applyModifier59(cptRows) {
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row).toUpperCase();
+            if (!cl_MOD59_CODES.has(code)) return;
+            const modInput = cl_getCPTMod1Input(row);
+            if (modInput && !modInput.value.trim()) {
+                cl_setInputValue(modInput, '59');
+            }
+        });
+    }
+
+    // ─── QW modifier on lab codes (Auto Link / Claim Link) ─────────────
+    // These CPT/HCPCS lab codes get modifier QW whenever present on the
+    // claim being linked. Does not touch any other modifier rules.
+    const cl_QW_LAB_CODES = new Set([
+        '80048','80051','80053','80061','80069','80178','80305','81003','81007','82010','82040','82044',
+        '82120','82150','82247','82271','82274','82310','82374','82435','82465','82523','82550','82565',
+        '82570','82679','82947','82950','82951','82952','82977','82985','83001','83002','83036','83037',
+        '83516','83605','83655','83718','83721','83861','83880','83986','84075','84132','84155','84295',
+        '84450','84460','84478','84520','84550','84703','85014','85610','86308','86318','86386','86403',
+        '86780','86803','87210','87338','87400','87426','87428','87430','87449','87502','87635','87636',
+        '87637','87651','87801','87804','87807','87808','87809','87811','87812','87880','87899','87905',
+        '89300','89321','G0328','G0567'
+    ]);
+
+    function cl_applyQWModifier(cptRows) {
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row).toUpperCase();
+            if (!cl_QW_LAB_CODES.has(code)) return;
+            const modInput = cl_getCPTMod1Input(row);
+            if (modInput && modInput.value.trim().toUpperCase() !== 'QW') {
+                cl_setInputValue(modInput, 'QW');
+            }
+        });
+    }
+
     // ─── Main Flow ─────────────────────────────────────────────────────
     function cl_mainFlow() {
         const icdRows = cl_getICDRows();
@@ -4499,6 +4654,8 @@
         cl_applyMedicaidTelehealthPOS(cptRows);
         cl_applyOtherInsuranceTelehealthPOS(cptRows);
         cl_fillBlankTOS(cptRows);
+        cl_applyModifier59(cptRows);
+        cl_applyQWModifier(cptRows);
     }
 
 
