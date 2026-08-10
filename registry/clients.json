@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.37",
+      "version": "1.38",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "d41be7febb24449083c15c8775ac325b5c4102315933657f8cd6ef094c1a93dd"
+      "sha256": "ef016fc3483d87a8c50b89fd68223df3d0450f5d526456b11c2c27dbd4f10121"
     },
     {
       "id": "getwell",
