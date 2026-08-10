@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.26
+// @name         Getwell SmartCoder by ATQ v5.27
 // @namespace    http://tampermonkey.net/
-// @version      5.26
+// @version      5.27
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,20 @@
 
 
 // CHANGELOG
+// 5.27 (2026-08-10) - P/C (Preventive Counseling) quick-action button now
+//   also fades when the CURRENT encounter has no chronic disease ICD coded
+//   — Preventive Counseling requires a chronic condition to counsel on, and
+//   this gate was missing (computeQuickActionGating() previously only
+//   checked recent billing, blocked insurance, and televisit for P/C).
+//   Reuses the existing CHRONIC_DISEASE_ICD_CODES list (already used for
+//   the 99213-vs-99214 complexity rule) and getICDRows() (the current
+//   encounter's billing ICD table) — checked via
+//   hasChronicDiseaseThisEncounter = getICDRows().some(r =>
+//   CHRONIC_DISEASE_ICD_CODES.has(r.code.toUpperCase())). Same fix already
+//   applied to Hasan Sheikh (v1.64). runPreventiveCounselAction()'s
+//   existing defense-in-depth re-check of computeQuickActionGating() picks
+//   this up automatically, so a race between render and click is still
+//   covered with no separate change needed there.
 // 5.26 (2026-08-10) - Patient History: fixed blank Visit Code/Procedure
 //   Codes for encounters printed with an alternate template ("exception"
 //   encounters use a merged single-cell layout — a plain
@@ -4809,12 +4823,19 @@
         }
 
         // ---- P/C: Preventive Counseling ----
+        // P/C also requires at least one chronic disease ICD coded on the
+        // CURRENT encounter (checked against the same CHRONIC_DISEASE_ICD_CODES
+        // list used for the 99213-vs-99214 complexity rule) — without a
+        // chronic condition to counsel on, Preventive Counseling doesn't apply.
+        const hasChronicDiseaseThisEncounter = getICDRows().some(r => CHRONIC_DISEASE_ICD_CODES.has((r.code || '').toUpperCase()));
         let pc = { disabled: false, title: 'Preventive Counseling' };
         const pcBlockedInsurance = getPreventiveCounselBlockedInsurance(insurance);
         if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
             pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
         } else if (pcBlockedInsurance) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${pcBlockedInsurance}` };
+        } else if (!hasChronicDiseaseThisEncounter) {
+            pc = { disabled: true, title: 'Preventive Counseling requires at least one chronic disease diagnosis in this encounter' };
         } else if (isTelevisit) {
             pc = { disabled: true, title: 'Preventive Counseling not applicable for a televisit' };
         }
