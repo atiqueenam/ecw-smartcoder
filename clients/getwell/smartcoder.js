@@ -11,477 +11,104 @@
 // ==/UserScript==
 
 
-// CHANGELOG
-// 5.31 (2026-08-10) - Fixed Obesity Counseling (OB) quick-action being
-//   wrongly blocked for pediatric patients (under 18) who ARE obese by
-//   pediatric standards. Both places that gate OB on BMI were comparing a
-//   pediatric patient's raw BMI number against the ADULT threshold
-//   (BMI < 30 = blocked), which is meaningless for a child — a raw BMI of
-//   e.g. 22 can be the 95th+ percentile (obese) for a young child while
-//   reading as "normal" on the adult scale, so OB was incorrectly fading/
-//   skipping for genuinely obese children:
-//   (1) computeQuickActionGating()'s OB gate (button fade/title) now
-//   branches on age: under 18 uses the documented "BMI %:" PERCENTILE
-//   against the 95th-percentile threshold (CDC pediatric BMI-for-age
-//   classification) instead of raw BMI<30; 18+ keeps the existing raw-
-//   BMI<30 rule unchanged. If a pediatric patient has no percentile
-//   documented, BMI no longer blocks OB at all (falls through to the
-//   other conditions) rather than wrongly falling back to the adult scale.
-//   (2) runObesityAction()'s own defense-in-depth BMI check (the same
-//   skip logic re-verified right before the action actually runs) gets
-//   the identical age-based branch.
-//   Same fix already applied to Hasan Sheikh (v1.68).
-//   Scope note: this only fixes the BLOCKING/applicability check. The
-//   obesity ICD code selection itself (E66.9/E66.01/E66.09 by raw BMI
-//   threshold) and the Z68.xx code added alongside it were already
-//   adult-only elsewhere in this file (mapBMIToZ68() already returns null
-//   under 18) and were not touched — out of scope for this fix.
-//   Verified both changes against the actual extracted code (not hand
-//   copies) across 5 scenarios each, same as Hasan Sheikh's v1.68 test
-//   matrix: pediatric with high percentile (now applies — previously the
-//   bug), pediatric with low percentile (still blocks), pediatric with no
-//   percentile documented (no longer blocks), adult above/below 30 (both
-//   unchanged).
-// 5.30 (2026-08-10) - Analyze/Start Action now auto-cleans up two
-//   Preventive/P-C ICD "bundles" when their trigger CPT is absent — this
-//   previously only happened when a quick-action button was clicked
-//   (clearOtherQuickActionBundles), never during the regular Analyze flow:
-//   (1) Preventive bundle (Z00.01/Z00.121): deleted whenever no Preventive
-//   E&M/AWV code (993xx or G0438/G0439) is on the chart.
-//   (2) Preventive/P-C counseling bundle (Z71.3, Z71.82/89): these three
-//   ICDs are shared between Preventive and Preventive Counseling (99401) —
-//   deleted only when NEITHER is on the chart; when either is present, the
-//   existing Z71.82-vs-89 correction-if-wrong logic runs exactly as before.
-//   Same fix already applied to Hasan Sheikh (v1.67) and Bronx (v1.44), with
-//   ONE deliberate difference: Getwell does NOT get the BMI (Z68.xx)
-//   delete-when-unused rule those two clients got. BMI is used on every
-//   Getwell encounter regardless of Preventive/Obesity status (already
-//   documented in the existing BMI block as "isn't gated on preventive-visit
-//   status"), so BMI stays fully correction-only here, unchanged. Both
-//   changes are additive to the existing toDelete/Proposed-Changes flow —
-//   nothing about the add/correct behavior when a bundle IS still needed
-//   was changed. Verified the branch logic (minus the BMI case, which
-//   intentionally doesn't apply here) with a standalone simulation.
-// 5.28 (2026-08-10) - Widened isUHCInsurance() to correctly detect the full
-//   United Healthcare family of payer names, not just plans literally named
-//   "United Health Care"/"UHC". Two changes:
-//   (1) Any insurance name starting with "united" (any spacing/hyphenation —
-//   "United Health Care", "United-Health-Care", "UnitedHealthcare",
-//   "UnitedHealthOne", "United Health One", etc.) is now treated as UHC.
-//   This covers every UnitedHealthcare Community Plan variant (NJ/MO/NM/OH/
-//   TN/MI/KS/AZ), UnitedHealthcare Student Resources, UnitedHealthcare All
-//   Savers Insurance, UnitedHealthcare Neighborhood Health Partnership,
-//   UnitedHealthcare Oxford, UnitedHealthcare Global, and UnitedHealthOne.
-//   (2) Added explicit brand patterns for UHC-owned/underwritten payers that
-//   do NOT start with "United" in the name: Surest, AARP Supplemental Health
-//   Plans, Golden Rule, UMR, Preferred Care Partners, Health Plan of NV/
-//   Sierra Health and Life, Medica Health Plans, All Savers, Neighborhood
-//   Health Partnership, Oxford, FlexWork, USNAS.
-//   The name is normalized first (trim, lowercase, strip periods/commas,
-//   collapse whitespace/hyphens to single spaces) so spacing/hyphenation
-//   variance in how the payer name is written never causes a miss.
-//   Same fix already applied to Hasan Sheikh (v1.65). Verified against all
-//   20+ listed brand variants (all return true) and against known non-UHC
-//   payers — Aetna, Cigna, BCBS, Medicaid, Medicare, MetroPlus, Healthfirst,
-//   Nyce PPO, VNS Choice, empty/null/undefined (all correctly return false)
-//   — using the actual extracted function before applying.
-//   isUHCInsurance() is used by annualGCodesEligible() (G0444/G0442 now
-//   correctly excluded for the full UHC family) and
-//   getPreventiveCounselBlockedInsurance() (P/C now correctly blocked for
-//   the full UHC family too).
-//   NOTE: at the time of this entry, the separate, independent UHC regex
-//   used only for the weekend 99051 rule (isUHCFamilyForWeekend, further
-//   down) was deliberately left untouched, since it was kept apart from
-//   isUHCInsurance() by design. See the 5.29 entry below — the weekend rule
-//   was subsequently switched to reuse isUHCInsurance() directly.
-// 5.29 (2026-08-10) - Weekend rule (CPT 99051) now also uses the widened
-//   isUHCInsurance() (see 5.28 above) instead of its own separate, narrower
-//   inline regex (which only covered UMR/Oxford). isUHCFamilyForWeekend is
-//   now just `isUHCInsurance(insurance)`.
-//   Coverage: every real-world insurance NAME that used to block Weekend
-//   under the old regex (one literally named/starting with UHC, United
-//   Health Care, UnitedHealthcare, UMR, or Oxford) still blocks it, and the
-//   full brand list from 5.28 (Surest, AARP Supplemental, Golden Rule,
-//   UnitedHealthOne, all the UnitedHealthcare Community Plan state variants,
-//   etc.) now blocks it too.
-//   One deliberate behavior change: the old regex was UNANCHORED, so it
-//   would also match "uhc"/"umr"/"oxford" as a bare substring anywhere in
-//   an insurance name, even mid-string. isUHCInsurance() anchors to the
-//   START of the (normalized) name, matching this file's existing
-//   convention for payer detection (see isMedicaidOrMedicareIns() above,
-//   which anchors the same way). This was a deliberate tightening, not an
-//   oversight — matching an abbreviation like "umr" anywhere in a name
-//   risks false positives on unrelated payers that happen to contain those
-//   letters. Every realistic payer name from the original brand list (where
-//   UHC/UMR/Oxford/etc. IS the start of the name, not a buried substring)
-//   is unaffected. Same fix already applied to Hasan Sheikh (v1.66).
-// 5.27 (2026-08-10) - P/C (Preventive Counseling) quick-action button now
-//   also fades when the CURRENT encounter has no chronic disease ICD coded
-//   — Preventive Counseling requires a chronic condition to counsel on, and
-//   this gate was missing (computeQuickActionGating() previously only
-//   checked recent billing, blocked insurance, and televisit for P/C).
-//   Reuses the existing CHRONIC_DISEASE_ICD_CODES list (already used for
-//   the 99213-vs-99214 complexity rule) and getICDRows() (the current
-//   encounter's billing ICD table) — checked via
-//   hasChronicDiseaseThisEncounter = getICDRows().some(r =>
-//   CHRONIC_DISEASE_ICD_CODES.has(r.code.toUpperCase())). Same fix already
-//   applied to Hasan Sheikh (v1.64). runPreventiveCounselAction()'s
-//   existing defense-in-depth re-check of computeQuickActionGating() picks
-//   this up automatically, so a race between render and click is still
-//   covered with no separate change needed there.
-// 5.26 (2026-08-10) - Patient History: fixed blank Visit Code/Procedure
-//   Codes for encounters printed with an alternate template ("exception"
-//   encounters use a merged single-cell layout — a plain
-//   "<span><b>Visit Code:</b></span>" label followed by <br>-separated
-//   codes in the SAME cell — instead of the usual separate heading row
-//   + <ul><li> bullet list). Neither existing extraction path recognized
-//   this layout (no rightPaneHeading/leftPaneHeading row to match, and
-//   no matching prisma-section table — a differently-shaped
-//   prisma-section="Procedure Codes" table does exist from the embedded
-//   SOAP note text, but its codes are comma-joined in one cell and are
-//   deliberately NOT matched by this fix, via the
-//   cell.closest('table[prisma-section]') exclusion, to avoid producing
-//   one bogus merged "code"). Added a third fallback in
-//   parseCodeContainer(): scans <td> cells whose text starts with
-//   "Visit Code(s):"/"Procedure Code(s):", splits that cell's innerHTML
-//   on <br> tags, and parses each resulting line the same way the other
-//   two paths already do. This is the same fix already applied to Hasan
-//   Sheikh (v1.63) — the parser module is byte-identical across clients.
-//   Verified against both a working encounter and a real "exception"
-//   encounter sample — the working encounter's output is byte-for-byte
-//   unchanged (it still resolves via the existing first path), and the
-//   exception encounter now correctly extracts its visit codes (99213,
-//   99395) and all 13 procedure codes instead of an empty array.
-// 5.25 (2026-08-10) - Ported the Hasan Sheikh quick-action gating and
-//   vaccine push-code fix over to Getwell:
-//   - Quick-action buttons (PV/P/C/SM/OB) now fade and become unclickable
-//     per business rule, computed fresh on every render
-//     (computeQuickActionGating()) instead of only reflecting the
-//     "action in progress" state:
-//     - PV: faded if any preventive/AWV code was already billed this
-//       calendar year, or if the visit is a televisit (this client
-//       detects televisit from the appointment caption via
-//       classifyVisitType()/getVisitType(), not CPT 98012).
-//     - P/C: faded if preventive OR preventive counseling was billed in
-//       the last 30 days; if insurance is blocked per the existing
-//       getPreventiveCounselBlockedInsurance() (MetroPlus/Medicaid/
-//       straight Medicare/UHC/NYCE PPO); or televisit.
-//     - SM: faded if not a confirmed smoker, if 99406 was billed in the
-//       last 30 days, or if televisit.
-//     - OB: faded if BMI < 30, if G0447 was billed in the last 30 days,
-//       if Medicaid (new gate — runObesityAction() now also enforces
-//       this explicitly, matching Hasan Sheikh), or if televisit.
-//     - New patient (no prior encounter): P/C, SM, and OB are always
-//       faded regardless of their own conditions — only Preventive
-//       applies.
-//     Each action function also re-checks the same gating as a
-//     defense-in-depth guard, in case a click races the next render.
-//   - Vaccine admin/"push" code cleanup no longer deletes an admin code
-//     (90460/90461/90471/90472/90473/90474/G0008/G0009/G0010/90480) just
-//     because no vaccine PRODUCT code is on the chart — a patient may
-//     bring their own vaccine with the doctor only pushing the
-//     administration code. The cleanup now only runs when at least one
-//     product code IS present.
-// 5.24 (2026-08-09) - Fixed a smoking-status false positive: eCW's own
-//   "Ex-cigar smoker" (and similarly worded "Ex-<something> smoker")
-//   phrasing means former/past use, but isConfirmedNonSmoker()'s
-//   affirmative-"smoker" check only excluded "non-" and "former-"
-//   prefixes right before the word, so "Ex-cigar smoker" matched as a
-//   bare affirmative "smoker" and the Tobacco flag showed positive
-//   (red) even though the chart's actual "Tobacco use: Nonsmoker" and
-//   "Current nonsmoker" answers were negative. Added a negative
-//   lookbehind for the "Ex-" prefix (optionally with one descriptor
-//   word in between, e.g. "cigar") so it now falls through to the
-//   existing non/former-smoker negative match and correctly reports
-//   Nonsmoker. Getwell-specific fix — Hasan Sheikh's file uses the
-//   older tobacco-flag logic and was not touched.
+// CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.31 (2026-08-10) - Fixed pediatric OB gating in both button and action
+//   guards. Under 18 uses documented BMI percentile >=95; missing percentile
+//   does not block. Adults still use BMI >=30. Obesity ICD selection and adult-
+//   only Z68 behavior unchanged. Five age/BMI scenarios tested. Same fix:
+//   Hasan 1.68.
+//
+// 5.30 (2026-08-10) - Analyze removes orphaned Z00.01/Z00.121 when no
+//   preventive/AWV and Z71.3/Z71.82/Z71.89 when neither preventive nor 99401
+//   exists. Add/correction behavior unchanged. Unlike Hasan/Bronx, Getwell does
+//   NOT remove unused Z68 because BMI applies on every encounter.
+//
+// 5.29 (2026-08-10) - Weekend/99051 now reuses widened isUHCInsurance(). Full
+//   UHC family blocks 99051. Matching is intentionally anchored to normalized
+//   name start instead of arbitrary substring. Same fix: Hasan 1.66.
+//
+// 5.28 (2026-08-10) - Expanded normalized UHC payer matching: names beginning
+//   with "United" plus Surest, AARP Supplemental, Golden Rule, UMR, Preferred
+//   Care Partners, HPN/Sierra, Medica, All Savers, NHP, Oxford, FlexWork and
+//   USNAS. Affects annual G-code eligibility and P/C blocking. Verified against
+//   20+ UHC variants and non-UHC controls. Weekend integration completed in 5.29.
+//
+// 5.27 (2026-08-10) - P/C quick action now requires a chronic ICD on the current
+//   encounter using CHRONIC_DISEASE_ICD_CODES. Click-time recheck inherits it.
+//
+// 5.26 (2026-08-10) - Patient History again supports alternate merged-cell
+//   Visit/Procedure Code templates using <br>-split parsing; prisma-section SOAP
+//   tables are excluded. Standard output unchanged; exception sample returns
+//   99213, 99395 and 13 procedure codes. This is the active parser fix after the
+//   broader Module 1 rollback in 5.21.
+//
+// 5.25 (2026-08-10) - Added render/click quick-action gating: PV (annual use or
+//   televisit); P/C (30-day use, blocked payer or televisit); SM (not smoker,
+//   30-day 99406 or televisit); OB (BMI, 30-day G0447, Medicaid or televisit).
+//   New patients allow PV only. Vaccine-admin cleanup now runs only when a
+//   vaccine product code is present, preserving patient-supplied vaccine admin.
+//
+// 5.24 (2026-08-09) - Fixed "Ex-cigar smoker" and similar former-use phrases
+//   being classified as active smoking. Getwell-specific.
+//
+// 5.23 (2026-08-09) - Added chronic-disease highlighting to the current Patient
+//   History encounter.
+//
+// 5.22 (2026-08-03) - AUDIT-C Points >0 now overrides a contradictory
+//   "Interpretation: Negative" label and counts as a positive alcohol screen.
+//
+// 5.21 (2026-08-03) - Reverted Patient History Module 1 exactly to 5.12,
+//   removing 5.13-5.16 parser/button/visibility/Snapshot coupling changes.
+//   Coding Snapshot and coding rules remained intact. Note: alternate-template
+//   parsing was later restored independently in 5.26.
+//
+// 5.20 (2026-08-03) - Added G0010 to Z23 linking in Auto Link and Claim Link.
+//
+// 5.19 (2026-08-03) - Added vaccine-admin coding: 90460/90461 for under 18 by
+//   component count; 90471/90472 for adults by vaccine count; Medicare overrides
+//   G0008/G0009/G0010/90480. Corrects units and stale admin codes; applied in
+//   initial and recheck passes.
+//
+// 5.18 (2026-08-03) - P/C blocks only payer names starting with "Medicare";
+//   Medicare Advantage names such as Healthfirst Medicare are not treated as
+//   straight Medicare. Supersedes the broader Medicare check in 5.10.
+//
+// 5.17 (2026-08-03) - Restored final modifier-25 rule: only 99211 always gets
+//   modifier 25. Removed 5.11/5.12 cleanup/application for G0402/G0438/G0439 and
+//   99212-99215/99203 to avoid clearing provider-entered modifiers.
+//
+// 5.16 (2026-08-03) - Added visible-patient check for History-button display.
+//   SUPERSEDED by Module 1 rollback in 5.21.
+//
+// 5.15 (2026-08-03) - Coupled History-button visibility to Snapshot open/close.
+//   SUPERSEDED by Module 1 rollback in 5.21.
+//
+// 5.14 (2026-08-03) - Added History-button cleanup heartbeat for same-URL eCW
+//   navigation. SUPERSEDED by Module 1 rollback in 5.21.
+//
+// 5.13 (2026-08-03) - Added plain-cell Visit/Procedure Code fallback.
+//   SUPERSEDED by 5.21; a safer alternate-template parser was restored in 5.26.
+//
+// 5.12 (2026-08-03) - Extended modifier 25 to office E&M with preventive codes.
+//   SUPERSEDED by 5.17.
+//
+// 5.11 (2026-08-03) - Cleared manually entered modifier 25 from G0402/G0438/
+//   G0439. SUPERSEDED by 5.17.
+//
+// 5.10 (2026-08-03) - Allowed VNS Choice through P/C Medicare block.
+//   Medicare matching was further tightened in 5.18.
+//
+// 5.9 (2026-08-03) - Claim Link changes blank/0.00 fee to 0.01. Added P/C payer
+//   block for Medicaid, MetroPlus, Medicare, UHC and NYCE PPO. Verified G0402/
+//   G0438/G0439 did not receive modifier 25.
+//
+// 5.8 (2026-08-03) - 99211 always receives modifier 25 in Auto/Claim Link;
+//   G0402/G0438/G0439 remain untouched. This is retained by final rule 5.17.
+//
+// 5.7 (2026-08-03) - 96372 always receives modifier 59 in Auto/Claim Link.
 
-// CHANGELOG
-// 5.23 (2026-08-09) - patient history highlighted
-//chronic disease for the currnet encounter.
 
-// CHANGELOG
-// 5.22 (2026-08-03) - Fixed alcohol screening interpretation: some notes
-//   (AUDIT-C) show "Points 3 ... Interpretation Negative" together, and
-//   the old logic took the literal "Interpretation:" label at face
-//   value, ignoring the nonzero point total. Any Points value > 0 now
-//   takes priority and is treated as a positive screen regardless of
-//   what the Interpretation label says. Same fix already applied to
-//   Hasan Sheikh's file.
-
-// CHANGELOG
-// 5.21 (2026-08-03) - Reverted Module 1 (Patient History) back to the
-//   exact v5.12 version — byte-for-byte confirmed identical. This undoes
-//   the parseCodeContainer fallback, the ensurePatientHistoryButton/
-//   startButtonHeartbeat button-cleanup fix, the hasVisiblePatientOpen
-//   stricter check, and the hideButton/showButton bridge + Snapshot-panel
-//   coupling (also removed the two now-dead calls to those from
-//   openPanel/closePanelToTab in Module 2). Module 2 (Coding Snapshot) —
-//   weekend rule, modifier rules, vaccine admin coding, G0010 linking,
-//   Preventive Counsel Medicare fix, everything else — is completely
-//   untouched and confirmed still present.
-
-// CHANGELOG
-// 5.20 (2026-08-03) - Added G0010 (HepB, Medicare) to the Z23 linking
-//   config on both Auto Link and Claim Link. This was a pre-existing gap
-//   in the original Hasan Sheikh script (inherited when the Vaccine
-//   Administration Coding feature was ported), not something specific
-//   to Getwell — same fix applied to both files.
-
-// CHANGELOG
-// 5.19 (2026-08-03) - Ported the Vaccine Administration Coding feature
-//   from Hasan Sheikh's file (it didn't exist in Getwell at all). Works
-//   out 90460/90461 (under 18, component-count based) or 90471/90472
-//   (18+, per-vaccine) from whatever vaccine product codes are on the
-//   chart, plus Medicare-only overrides (G0008 flu, G0009 pneumococcal,
-//   G0010 HepB, 90480 COVID — no age limit for any of these). Also
-//   corrects the Units field on an existing admin code and removes a
-//   stale/inapplicable one. New kind:'vaxadmin' item type wired into
-//   both the main and recheck Apply passes. Ported verbatim — no
-//   Getwell-specific rule changes, since this logic is payer/age based,
-//   not client-specific.
-
-// CHANGELOG
-// 5.18 (2026-08-03) - Fixed the Preventive Counsel Medicare block: it used
-//   isAnyMedicareIns(), which matches "medicare" anywhere in the string,
-//   so "Healthfirst Medicare Plan" was wrongly blocked even though
-//   Medicare isn't the first word (not straight Medicare). Now requires
-//   the name to START with "Medicare" (/^medicare\b/i). Regression-tested
-//   against 10 cases including this exact one.
-
-// CHANGELOG
-// 5.17 (2026-08-03) - Reverted the modifier-25 rule back to the v5.10
-//   behavior: only 99211 gets modifier 25, always, unconditionally.
-//   Removed the v5.11/v5.12 additions entirely — G0402/G0438/G0439 and
-//   the rest of the office-visit family (99212-99215/99203) are no
-//   longer touched at all by this rule (no add, no clear). Those
-//   additions were clearing a "25" that a provider had legitimately set
-//   for an unrelated reason. All other modifier rules (SL, 95/93
-//   televisit, 59 for 96372) were not touched and remain exactly as-is.
-
-// CHANGELOG
-// 5.16 (2026-08-03) - The v5.14/v1.47 fix wasn't enough — the button was
-//   still showing on Schedule. Root cause: getPidAndEncDate()'s
-//   detection paths only check DOM presence, not visibility, and eCW
-//   appears to leave a closed patient's DOM elements in place (just
-//   hidden) when switching to Schedule, so it kept reporting a pid even
-//   with no patient actually open. Added hasVisiblePatientOpen() — a
-//   stricter check (offsetParent !== null) used only for the History
-//   button decision; getPidAndEncDate() itself is untouched since other
-//   code relies on its broader matching. ensurePatientHistoryButton now
-//   uses this stricter check instead.
-
-// CHANGELOG
-// 5.15 (2026-08-03) - The History button now hides when the Coding
-//   Snapshot panel closes (minimizes to tab) and reappears when it
-//   opens. Added hideButton/showButton to the Module 1 -> Module 2
-//   bridge (window.__ecwPatientHistory) — hideButton just sets display:
-//   none, showButton restores it and calls the existing
-//   ensurePatientHistoryButton so it still respects normal
-//   patient-presence logic. Doesn't touch loaded history state or the
-//   button's own default visibility on page load — only fires on the
-//   Snapshot panel's own open/close actions.
-
-// CHANGELOG
-// 5.14 (2026-08-03) - Fixed the Patient History button sticking around on
-//   Schedule after closing a patient tab. Root cause: the only function
-//   that removed the button (resetPatientHistoryUi) was only called from
-//   checkPageState, which is gated on location.href actually changing —
-//   but eCW's dashboard tabs (patient chart vs Schedule) apparently stay
-//   under the same dashboard.jsp URL, so nothing ever fired. Two fixes:
-//   (1) ensurePatientHistoryButton now removes the button/modal when no
-//   patient is open (getPidAndEncDate returns no pid), instead of just
-//   returning; (2) startButtonHeartbeat now calls
-//   ensurePatientHistoryButton unconditionally every 3s instead of only
-//   when the button is missing, so it can actually detect and clean up
-//   a button stuck open with no patient present.
-
-// CHANGELOG
-// 5.13 (2026-08-03) - Module 1 (Patient History): parseCodeContainer was
-//   missing a third extraction fallback — if Visit Codes/Procedure Codes
-//   weren't in the structured section container or a prisma-section
-//   table, it returned nothing for that encounter. Added the missing
-//   fallback (from the ECW Patient History v3.4 reference script):
-//   scans plain <td> cells for a label match (e.g. "Visit Codes:"),
-//   splits <br>-separated lines, and further splits comma-packed codes
-//   within a line. Verified byte-for-byte identical to the reference
-//   function after the fix. Nothing else in Module 1 or Module 2 touched.
-
-// CHANGELOG
-// 5.12 (2026-08-03) - Extended the modifier-25 rule to the whole
-//   office-visit family (previously only 99211 got it, on Claim Link —
-//   Auto Link had already been updated). 99211 keeps its unconditional
-//   25. The rest (99212-99215/99203) now get modifier 25 only when a
-//   preventive code is also present (99381-99397 OR G0402/G0438/G0439);
-//   otherwise an existing 25 on one of those rows is cleared. G0402/
-//   G0438/G0439 themselves are still never given modifier 25.
-
-// CHANGELOG
-// 5.11 (2026-08-03) - al_apply25ModifierFor99211/cl_apply25ModifierFor99211
-//   correctly never ADDED modifier 25 to G0402/G0438/G0439, but also
-//   never cleaned one up if a provider mistakenly typed "25" into one of
-//   those rows by hand. Both now also check the G0402/G0438/G0439 rows
-//   and clear modifier 25 if found there, on Auto Link and Claim Link.
-
-// CHANGELOG
-// 5.10 (2026-08-03) - Fixed the Preventive Counsel insurance block: the
-//   v5.9 regex matched "medicare" broadly, which incorrectly blocked VNS
-//   Choice too (it's a Medicare Advantage plan, not straight Medicare).
-//   Rewritten to match Hasan Sheikh's existing (correct) logic —
-//   isAnyMedicareIns(name) && !isVNSChoiceIns(name) — so VNS Choice can
-//   have Preventive Counsel. Regression-tested against 9 cases.
-
-// CHANGELOG
-// 5.9 (2026-08-03) - Three fixes: (1) Claim Link now bumps any 0.00 (or
-//   blank) Billed Fee to 0.01, since a $0.00 fee causes claim rejection
-//   for most payers; (2) Preventive Counsel now blocks with a popup
-//   ("Preventive counseling cannot be applied for <insurance>") when
-//   insurance is Medicaid/Metroplus/Medicare/UHC/United Healthcare/NYCE
-//   PPO — this rule didn't exist in Getwell before; (3) verified modifier
-//   25 is never applied to G0402/G0438/G0439 — it already wasn't
-//   (al_apply25ModifierFor99211/cl_apply25ModifierFor99211 only ever
-//   match CPT 99211 exactly), no change needed there.
-
-// CHANGELOG
-// 5.8 (2026-08-03) - CPT 99211 now always gets modifier 25 set on it, on
-//   both Auto Link and Claim Link, no matter what else is on the chart —
-//   G0402/G0438/G0439 are explicitly never touched by this. Getwell's
-//   G0402/G0438/G0439 preventive-bundle ICD linking was already correct
-//   in both modules (verified — no fix needed here).
-
-// CHANGELOG
-// 5.7 (2026-08-03) - CPT 96372 now always gets modifier 59 set on it,
-//   both on Auto Link (billing tab, Angular-scope write with a DOM-input
-//   fallback) and Claim Link (Claim tab, via the existing
-//   cl_getCPTMod1Input/cl_setInputValue helpers).
-
-// CHANGELOG
-// 5.6 (2026-08-03) - The BMI-30/40/50 obesity code rule (E66.9/E66.01/
-//   E66.09) already existed in Analyze's correction logic, but the OB
-//   quick-action button was still hardcoded to always add E66.9
-//   regardless of BMI. It now picks the same threshold-correct code on
-//   first add (with the same E66.09 double-check alert), and skips with
-//   a notice if BMI is under 30 instead of adding an inapplicable code.
-
-// CHANGELOG
-// 5.5 (2026-08-03) - Fixed smoking detection: an affirmative "smoker"
-//   statement (e.g. "Heavy tobacco smoker") was losing to a trailing
-//   contradicting "Additional Findings: ... Current nonsmoker" summary
-//   from a DIFFERENT question in the same note, because explicitNegative
-//   ("nonsmoker" match anywhere in the text) was checked before the bare
-//   "smoker" word check. Reordered so the affirmative check runs first,
-//   with a widened negation lookbehind (allows one filler word, e.g.
-//   "denies current smoker", "not a smoker") so real negatives still
-//   correctly return non-smoker. Regression-tested against 9 cases.
-//   Getwell only, per request — Hasan Sheikh's file left untouched.
-// 5.4 (2026-08-03) - Added an auto-dismiss watcher for the "Associated CPT
-//   Codes" popup eCW sometimes shows mid-way through an ICD add/delete.
-//   It could interrupt any of this script's add/delete sequences; a
-//   MutationObserver on document.body now clicks its close button
-//   (ng-click="assocCPTCancle()") the instant it appears, so the rest of
-//   the sequence continues uninterrupted.
-// 5.3 (2026-08-03) - computeComplexVisitCode() (99213 vs 99214) now has a
-//   second qualifying path: exactly 3 qualifying dx codes where all 3 are
-//   chronic (CHRONIC_DISEASE_ICD_CODES) also qualifies for 99214, in
-//   addition to the existing 4+ total / 2+ chronic path. Still subject to
-//   the same 15-day 99214-reuse downgrade to 99213.
-
-// CHANGELOG
-// 5.2 (2026-08-03) - G0444/G0442 are excluded from MANAGED_CODES on
-//   purpose, so the existing Medicaid/Medicare/UHC eligibility gate only
-//   ever stopped adding them — it never cleaned up either one if it was
-//   already wrongly on the chart (e.g. left from a prior insurance).
-//   Analyze now actively deletes G0444/G0442 when insurance is Medicaid
-//   or Medicare specifically (UHC's add-gate is unchanged, no new
-//   deletion behavior added for UHC).
-
-// CHANGELOG
-// 5.1 (2026-08-03) - Claim tab: when primary insurance is Healthfirst,
-//   clicking Claim Link now unchecks the "Bill to Ins" checkbox for
-//   whichever medication-reconciliation code is present (1159F or
-//   1160F), via a real click on the checkbox so Angular's own
-//   updateBillToIns($index) handler runs. Getwell only.
-
-// CHANGELOG
-// 5.0 (2026-08-03) - Added modifier 95 auto-apply for televisit encounters:
-//   clicking Auto Link now sets modifier 95 on whichever office-visit E&M
-//   code (OFFICE_VISIT_EM_CODES) is on the chart, but only when the visit
-//   is classified as a televisit. Mirrors the existing SL-modifier pattern
-//   for pediatric vaccines (Angular scope write with a DOM-input
-//   fallback). Getwell only.
-
-// CHANGELOG
-// 4.9 (2026-08-03) - Added high-level code exclusions for Pap smear
-//   (Q0091/G0101), Advance Care (99497), and TCM/Post-Hospitalization
-//   (99495/99496): (1) any of these now also blocks Weekend/99051, same
-//   as the other blocking conditions; (2) clicking Preventive Counsel,
-//   Smoking, or Obesity while one is present now shows a popup and does
-//   nothing instead of applying — Preventive (PV) is unaffected; (3)
-//   Analyze now proposes deleting any existing counseling code
-//   (99401/99406/G0447) when one of these is present on the chart.
-// 4.8 (2026-08-03) - Weekend/99051 is now also blocked whenever the
-//   insurance is UHC/United Healthcare/UMR/Oxford (UMR and Oxford are both
-//   UnitedHealthcare-owned brands), regardless of what else is on the
-//   chart. Doesn't touch the existing separate isUHCInsurance() used for
-//   G0444/G0442 eligibility or the telehealth POS rule — this is its own
-//   check scoped only to the weekend rule.
-// 4.7 (2026-08-03) - Fixed 99051 self-blocking: after being added, 99051
-//   itself matched the "any 9-series CPT blocks" check (it starts with 9,
-//   isn't 99000, isn't an office-visit code) — so the recheck pass right
-//   after Apply saw 99051 already on the chart and immediately proposed
-//   deleting it. 99051 is now also exempt from that check, same as 99000.
-// 4.6 (2026-08-03) - Diagnostic fix: Analyze had a try/catch that silently
-//   swallowed any error inside computeAnalysis() and fell back to an empty
-//   "Nothing to add / Nothing to remove" with no indication anything went
-//   wrong — reported as 99051 never being proposed even when it should
-//   qualify. Now logs the error to the browser console and shows an
-//   "Analyze failed: <message>" notice in the panel instead of a blank
-//   Proposed Changes list, so the actual failure is visible and fixable.
-// 4.5 (2026-08-03) - Fixed the Weekend/99051 blocking rule: the "any 9-series
-//   CPT blocks except 99000" check was also catching the regular
-//   office-visit E&M codes (99211-99215/99203, OFFICE_VISIT_EM_CODES),
-//   which exist on nearly every encounter — so 99051 almost never got
-//   suggested. Those are now exempt from the block, same as 99000.
-// 4.4 (2026-08-03) - EKG-in-CC detection wasn't firing even with the
-//   tracked-change <li> present. Broadened the DOM selector to be
-//   case-insensitive/substring-tolerant on the section attribute, and
-//   added a fallback that also matches any <li> nested under the
-//   containing <ul class="pn-sections-Chief Complaint(s):">, instead of
-//   requiring an exact attribute-value match. Still add-only (93000 is
-//   not in MANAGED_CODES). Getwell only — Hasan Sheikh untouched.
-// 4.3 (2026-08-03) - Added EKG-in-CC detection: mentioning EKG/ECG in the
-//   Chief Complaint now proposes 93000 in Analyze. Add-only — 93000 is not
-//   in MANAGED_CODES, so it's never proposed for deletion. Reads both the
-//   plain-text CC block and tracked-change <li section="Chief
-//   Complaint(s):"> elements directly, since the latter don't always show
-//   up in a plain-text scan.
-// 4.2 (2026-08-03) - Broadened the Weekend/99051 blocking rule in Analyze:
-//   now blocked by ANY 9-series CPT code already on the chart except 99000
-//   (blood draw never blocks), not just the Preventive/P-C bundle; still
-//   blocked by the Medicare AWV G-codes and G0447 (Obesity); and now also
-//   blocked by a televisit, using Getwell's own visit-type detection
-//   (appointment caption via getVisitType/classifyVisitType).
-// 4.1 (2026-08-03) - BMI codes are now never blanket-deleted: removed
-//   3008F/G8417/G8418/G8420 from MANAGED_CODES, removed the
-//   hasPreventiveVisit gate on Z68.xx correction, and stopped quick actions
-//   from ever touching BMI Z68 codes (was clearing them on P/C and SM).
-//   BMI codes are only ever added (if missing) or corrected (wrong sibling
-//   swapped for the right one), never removed outright. Note: the existing
-//   United Healthcare rule that strips all G-codes for that payer still
-//   applies to BMI G-codes too — that's a separate payer-specific rule.
-//   Also added age-based Z00.01/Z00.121/Z00.129 detection to Analyze
-//   (Z00.129 is never used) and to the Preventive quick action, so adding
-//   the age-correct code now also removes whichever wrong sibling was
-//   already present.
-// 4.0 (2026-08-03) - Fixed a regression from the "bmi, obesity correction" dev
-//   commit: BMI CPT codes (3008F/G8417/G8418/G8420) had been gated on
-//   hasPreventiveVisit, so Analyze proposed deleting a correct BMI code on
-//   any non-preventive visit. BMI codes are desired whenever BMI is
-//   documented again, regardless of visit type — matches main's original rule.
-// 3.9 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
-//   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
-//   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
-//   Obesity is on the chart (Smoking is still allowed alongside 99051).
 
 /* ============================================================
    MODULE 1 — PATIENT HISTORY
