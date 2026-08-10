@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-10T07:30:34.773Z",
+  "generatedAt": "2026-08-10T08:30:57.357Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.40",
+      "version": "1.41",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "d553e6a7ed9ecb71b4bafc0642b63f5a1285ccb9530ccd429c787766e3f7392c"
+      "sha256": "a971a03f49b3dde12a06df1a22488dc5b401fb3e08d26c4d39e354c7ddbfaf7a"
     },
     {
       "id": "getwell",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "5.25",
+      "version": "5.26",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "8a79286ad1891dcc89c2865c1efad4650d5697d0285e8b90d71eaccb87164e9e"
+      "sha256": "f8d3b4b8c45307b12e5f8af8446ea4da8462165b691653961bb42899c79b190b"
     },
     {
       "id": "hasan-sheikh",
