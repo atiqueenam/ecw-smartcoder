@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.30
+// @name         Getwell SmartCoder by ATQ v5.31
 // @namespace    http://tampermonkey.net/
-// @version      5.30
+// @version      5.31
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,36 @@
 
 
 // CHANGELOG
+// 5.31 (2026-08-10) - Fixed Obesity Counseling (OB) quick-action being
+//   wrongly blocked for pediatric patients (under 18) who ARE obese by
+//   pediatric standards. Both places that gate OB on BMI were comparing a
+//   pediatric patient's raw BMI number against the ADULT threshold
+//   (BMI < 30 = blocked), which is meaningless for a child — a raw BMI of
+//   e.g. 22 can be the 95th+ percentile (obese) for a young child while
+//   reading as "normal" on the adult scale, so OB was incorrectly fading/
+//   skipping for genuinely obese children:
+//   (1) computeQuickActionGating()'s OB gate (button fade/title) now
+//   branches on age: under 18 uses the documented "BMI %:" PERCENTILE
+//   against the 95th-percentile threshold (CDC pediatric BMI-for-age
+//   classification) instead of raw BMI<30; 18+ keeps the existing raw-
+//   BMI<30 rule unchanged. If a pediatric patient has no percentile
+//   documented, BMI no longer blocks OB at all (falls through to the
+//   other conditions) rather than wrongly falling back to the adult scale.
+//   (2) runObesityAction()'s own defense-in-depth BMI check (the same
+//   skip logic re-verified right before the action actually runs) gets
+//   the identical age-based branch.
+//   Same fix already applied to Hasan Sheikh (v1.68).
+//   Scope note: this only fixes the BLOCKING/applicability check. The
+//   obesity ICD code selection itself (E66.9/E66.01/E66.09 by raw BMI
+//   threshold) and the Z68.xx code added alongside it were already
+//   adult-only elsewhere in this file (mapBMIToZ68() already returns null
+//   under 18) and were not touched — out of scope for this fix.
+//   Verified both changes against the actual extracted code (not hand
+//   copies) across 5 scenarios each, same as Hasan Sheikh's v1.68 test
+//   matrix: pediatric with high percentile (now applies — previously the
+//   bug), pediatric with low percentile (still blocks), pediatric with no
+//   percentile documented (no longer blocks), adult above/below 30 (both
+//   unchanged).
 // 5.30 (2026-08-10) - Analyze/Start Action now auto-cleans up two
 //   Preventive/P-C ICD "bundles" when their trigger CPT is absent — this
 //   previously only happened when a quick-action button was clicked
@@ -5013,10 +5043,30 @@
         }
 
         // ---- OB: Obesity Counseling ----
+        // Pediatric (under 18) uses BMI-for-age PERCENTILE, not raw adult
+        // BMI — a raw BMI number is meaningless on the adult 30-cutoff
+        // scale for a child (e.g. a raw BMI of 22 can be the 95th
+        // percentile — obese — for a young child, while reading as
+        // "normal" if wrongly compared to the adult threshold). This was
+        // wrongly blocking Obesity Counseling for pediatric patients who
+        // ARE obese by pediatric standards. Applies at the 95th percentile
+        // per CDC pediatric BMI-for-age classification. If a pediatric
+        // patient has no BMI percentile documented, BMI doesn't block OB
+        // here at all (falls through to the other conditions below)
+        // rather than wrongly falling back to the adult scale. Adults keep
+        // the existing raw-BMI<30 rule, unchanged.
+        const obAge = getAgeAtDOS(text) ?? 0;
         const obBmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
+        const obBmiPercentile = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i)) || null;
+        const obBmiBlocked = obAge < 18
+            ? (obBmiPercentile != null && obBmiPercentile < 95)
+            : (obBmi != null && obBmi < 30);
+        const obBmiBlockTitle = obAge < 18
+            ? `Obesity Counseling not applicable — BMI percentile ${obBmiPercentile}% is under the 95th percentile`
+            : `Obesity Counseling not applicable — BMI ${obBmi} is under 30`;
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmi != null && obBmi < 30) {
-            ob = { disabled: true, title: `Obesity Counseling not applicable — BMI ${obBmi} is under 30` };
+        if (obBmiBlocked) {
+            ob = { disabled: true, title: obBmiBlockTitle };
         } else if (codeUsedInLastDays('G0447', 30)) {
             ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
         } else if (insurance && /medicaid/i.test(insurance.trim())) {
@@ -5212,10 +5262,22 @@
         quickActionRunning = true;
         try {
             const text = getEncounterText();
-            const bmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
-            if (bmi == null) { showQuickNotice("Obesity: BMI not found on this page — skipped."); return; }
-            if (bmi < 30) { showQuickNotice(`Obesity: BMI ${bmi} is under 30 — obesity code not applicable, skipped.`); return; }
             const age = getAgeAtDOS(text);
+            const bmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
+            // Same defense-in-depth check as computeQuickActionGating's OB
+            // gate: pediatric (under 18) uses BMI-for-age PERCENTILE, not
+            // raw adult BMI — a raw BMI reading "normal" on the adult scale
+            // can still be the 95th percentile (obese) for a child. Applies
+            // at the 95th percentile per CDC pediatric BMI-for-age
+            // classification. Adults keep the existing raw-BMI<30 rule.
+            if (age != null && age < 18) {
+                const bmiPercentile = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i)) || null;
+                if (bmiPercentile == null) { showQuickNotice("Obesity: BMI percentile not found on this page — skipped."); return; }
+                if (bmiPercentile < 95) { showQuickNotice(`Obesity: BMI percentile ${bmiPercentile}% is under the 95th percentile — obesity code not applicable, skipped.`); return; }
+            } else {
+                if (bmi == null) { showQuickNotice("Obesity: BMI not found on this page — skipped."); return; }
+                if (bmi < 30) { showQuickNotice(`Obesity: BMI ${bmi} is under 30 — obesity code not applicable, skipped.`); return; }
+            }
 
             // Same BMI-threshold rule Analyze uses to correct an existing
             // obesity code: 30-39.9 -> E66.9, 40-49.9 -> E66.01, 50+ -> E66.09.
