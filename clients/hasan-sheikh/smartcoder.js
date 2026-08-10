@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.60
+// @name         Hasan Sheikh SmartCoder v1.62
 // @namespace    http://tampermonkey.net/
-// @version      1.60
+// @version      1.62
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,39 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.62 (2026-08-10) - OB quick-action button also fades when BMI < 30
+//   (checked first, ahead of the other OB gating conditions) — matches
+//   runObesityAction()'s own "BMI under 30 — skipped" rule, now reflected
+//   in the button's disabled/faded state instead of only surfacing as a
+//   notice after clicking.
+// 1.61 (2026-08-10) - Quick-action buttons (PV/P/C/SM/OB) now fade and
+//   become unclickable per business rule, computed fresh on every render
+//   (see computeQuickActionGating()) instead of only reflecting the
+//   "action in progress" state:
+//   - PV: faded if any preventive/AWV code was already billed this
+//     calendar year, or if the visit is a televisit (98012/"televisit").
+//   - P/C: faded if preventive OR preventive counseling was billed in the
+//     last 30 days; if insurance is MetroPlus/Medicaid/straight Medicare
+//     (not VNS Choice)/UHC/Nyce PPO (existing isPreventiveCounselBlockedIns
+//     logic, now also drives the button's own faded state); or televisit.
+//   - SM: faded if not a confirmed smoker, if 99406 was billed in the
+//     last 30 days, or if televisit.
+//   - OB: faded if G0447 was billed in the last 30 days, if Medicaid, or
+//     if televisit.
+//   - New patient (no prior encounter): P/C, SM, and OB are always faded
+//     regardless of their own conditions — only Preventive applies.
+//   Each action function (runPreventiveAction/runPreventiveCounselAction/
+//   runSmokingAction/runObesityAction) also re-checks the same gating as
+//   a defense-in-depth guard, in case a click races the next render.
+// 1.61 (2026-08-10) - Vaccine admin/"push" code cleanup no longer deletes
+//   an admin code (90460/90461/90471/90472/90473/90474/G0008/G0009/
+//   G0010/90480) just because no vaccine PRODUCT code is on the chart.
+//   A patient may bring their own vaccine with the doctor only pushing
+//   the administration code and never entering a product code — that's
+//   indistinguishable from "no vaccine given" without this change, and
+//   was getting the push code wrongly deleted. The cleanup now only runs
+//   when at least one product code IS present, so it can compare the
+//   existing admin code against a real computed plan.
 // 1.60 (2026-08-09) - BP once/year rule now applies to the whole qualifier
 //   set, not each code independently. Previously a prior visit billing
 //   3074F/3078F only blocked an exact repeat of 3074F this visit — a
@@ -2377,12 +2410,22 @@
             });
 
             // Any admin code from the managed universe that's present but
-            // not part of the current plan is stale — remove it.
-            currentRows.forEach(r => {
-                if (VACCINE_ADMIN_CODE_UNIVERSE.includes(r.code) && !plannedCodes.has(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Vaccine admin code not applicable for the vaccines currently on this chart' });
-                }
-            });
+            // not part of the current plan is stale — remove it. BUT only
+            // when at least one vaccine PRODUCT code is actually on the
+            // chart (vaccinePlan is non-empty) — if there's no product
+            // code at all, that doesn't necessarily mean no vaccine was
+            // given: the patient may have brought their own vaccine and
+            // the doctor only pushed the administration code, with no
+            // product code ever entered. In that case there's nothing to
+            // compare the admin code against, so it's left alone rather
+            // than deleted.
+            if (vaccinePlan.length) {
+                currentRows.forEach(r => {
+                    if (VACCINE_ADMIN_CODE_UNIVERSE.includes(r.code) && !plannedCodes.has(r.code) && !toDelete.some(d => d.code === r.code)) {
+                        toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Vaccine admin code not applicable for the vaccines currently on this chart' });
+                    }
+                });
+            }
         }
 
         return { toAdd, toDelete, insurance, bp, bmi, isHealthfirst, isMedicareInsurance };
@@ -4821,8 +4864,89 @@
         cl_mainFlow();
     }
 
+    // Same 98012/"televisit" detection computeAnalysis uses (see
+    // isTelevisitNote there) — re-derived here so the quick-action buttons
+    // can be gated at render time, before any action actually runs.
+    function isTelevisitNow(text) {
+        const hasCode = getCPTRows().some(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent || '').trim().toUpperCase();
+            return code === '98012';
+        });
+        return hasCode || /televisit/i.test(text || '');
+    }
+
+    // ── Quick-action button gating (PV / P/C / SM / OB) ─────────────────
+    // Computed fresh on every render so a faded/disabled button always
+    // reflects the CURRENT chart, insurance, and visit type — same cadence
+    // as renderSnapshotBlock() itself (2.5s poll + every action/grid
+    // change). Each entry is { disabled, title } — title doubles as the
+    // on-hover explanation for why a button is greyed out.
+    function computeQuickActionGating(insurance, flags, text) {
+        const isTelevisit = isTelevisitNow(text);
+        const established = isEstablishedPatient();
+        const dosYear = getCurrentDosYear();
+        const PREVENTIVE_ALL_CODES = [...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES];
+
+        // ---- PV: Preventive ----
+        let pv = { disabled: false, title: 'Preventive' };
+        if (PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
+            pv = { disabled: true, title: 'Preventive already billed this calendar year' };
+        } else if (isTelevisit) {
+            pv = { disabled: true, title: 'Preventive not applicable for a televisit' };
+        }
+
+        // ---- P/C: Preventive Counseling ----
+        let pc = { disabled: false, title: 'Preventive Counseling' };
+        if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
+            pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
+        } else if (isPreventiveCounselBlockedIns(insurance)) {
+            pc = { disabled: true, title: `Preventive Counseling not applicable for ${insurance || 'this insurance'}` };
+        } else if (isTelevisit) {
+            pc = { disabled: true, title: 'Preventive Counseling not applicable for a televisit' };
+        }
+
+        // ---- SM: Smoking Counseling ----
+        let sm = { disabled: false, title: 'Smoking Counseling' };
+        if (flags.hasTob !== false) {
+            sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
+        } else if (codeUsedInLastDays('99406', 30)) {
+            sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };
+        } else if (isTelevisit) {
+            sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
+        }
+
+        // ---- OB: Obesity Counseling ----
+        const obBmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
+        let ob = { disabled: false, title: 'Obesity Counseling' };
+        if (obBmi != null && obBmi < 30) {
+            ob = { disabled: true, title: `Obesity Counseling not applicable — BMI ${obBmi} is under 30` };
+        } else if (codeUsedInLastDays('G0447', 30)) {
+            ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
+        } else if (insurance && /medicaid/i.test(insurance.trim())) {
+            ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
+        } else if (isTelevisit) {
+            ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
+        }
+
+        // ---- New patient: only Preventive is relevant — force the other
+        // three faded regardless of what their own rules would say. ----
+        if (!established) {
+            const reason = 'New patient — only Preventive applies';
+            if (!pc.disabled) pc = { disabled: true, title: reason };
+            if (!sm.disabled) sm = { disabled: true, title: reason };
+            if (!ob.disabled) ob = { disabled: true, title: reason };
+        }
+
+        return { pv, pc, sm, ob };
+    }
+
     async function runPreventiveAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
+        {
+            const text0 = getEncounterText();
+            const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
+            if (gating.pv.disabled) { showQuickNotice(`Preventive: ${gating.pv.title}.`); return; }
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4910,6 +5034,11 @@
             showQuickNotice(`Preventive Counsel: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
             return;
         }
+        {
+            const text0 = getEncounterText();
+            const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
+            if (gating.pc.disabled) { showQuickNotice(`Preventive Counsel: ${gating.pc.title}.`); return; }
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4946,6 +5075,11 @@
             showQuickNotice(`Smoking: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
             return;
         }
+        {
+            const text0 = getEncounterText();
+            const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
+            if (gating.sm.disabled) { showQuickNotice(`Smoking: ${gating.sm.title}.`); return; }
+        }
         quickActionRunning = true;
         try {
             const text = getEncounterText();
@@ -4969,6 +5103,11 @@
         if (blockingCode) {
             showQuickNotice(`Obesity: ${blockingCode} is present — counseling codes can't be applied alongside it.`);
             return;
+        }
+        {
+            const text0 = getEncounterText();
+            const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
+            if (gating.ob.disabled) { showQuickNotice(`Obesity: ${gating.ob.title}.`); return; }
         }
         quickActionRunning = true;
         try {
@@ -5294,6 +5433,7 @@
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
 
         const historyBlock = renderHistoryIntegration(insurance);
+        const qaGating = computeQuickActionGating(insurance, flags, text);
 
         let html = `
             <div class="qa-row link-btn-row">
@@ -5329,10 +5469,10 @@
             </div>
             ${historyBlock}
             <div class="qa-row">
-                <button id="ecsPreventiveBtn" class="qa-btn qa-prev" title="Preventive" ${quickActionRunning ? 'disabled' : ''}>PV</button>
-                <button id="ecsPreventiveCounselBtn" class="qa-btn qa-counsel" title="Preventive Counseling" ${quickActionRunning ? 'disabled' : ''}>P/C</button>
-                <button id="ecsSmokingBtn" class="qa-btn qa-smoke" title="Smoking Counseling" ${quickActionRunning ? 'disabled' : ''}>SM</button>
-                <button id="ecsObesityBtn" class="qa-btn qa-obesity" title="Obesity Counseling" ${quickActionRunning ? 'disabled' : ''}>OB</button>
+                <button id="ecsPreventiveBtn" class="qa-btn qa-prev" title="${escapeHtml(qaGating.pv.title)}" ${(quickActionRunning || qaGating.pv.disabled) ? 'disabled' : ''}>PV</button>
+                <button id="ecsPreventiveCounselBtn" class="qa-btn qa-counsel" title="${escapeHtml(qaGating.pc.title)}" ${(quickActionRunning || qaGating.pc.disabled) ? 'disabled' : ''}>P/C</button>
+                <button id="ecsSmokingBtn" class="qa-btn qa-smoke" title="${escapeHtml(qaGating.sm.title)}" ${(quickActionRunning || qaGating.sm.disabled) ? 'disabled' : ''}>SM</button>
+                <button id="ecsObesityBtn" class="qa-btn qa-obesity" title="${escapeHtml(qaGating.ob.title)}" ${(quickActionRunning || qaGating.ob.disabled) ? 'disabled' : ''}>OB</button>
             </div>
             ${renderAnalysisSection()}
         `;
