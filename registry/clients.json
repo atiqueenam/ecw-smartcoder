@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-10T07:10:43.454Z",
+  "generatedAt": "2026-08-10T07:30:34.773Z",
   "clients": [
     {
       "id": "bronx",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.62",
+      "version": "1.63",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "2953c38181d148630681837f10adfc42bcd54d6ed42a9fabc17d3742139b4273"
+      "sha256": "a5d90ae0c190f606a28711e38ea64ab88ec7b24b969f72d3a93baca23d94e08b"
     }
   ]
 }
