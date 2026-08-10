@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.66
+// @name         Hasan Sheikh SmartCoder v1.67
 // @namespace    http://tampermonkey.net/
-// @version      1.66
+// @version      1.67
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,28 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.67 (2026-08-10) - Analyze/Start Action now auto-cleans up three
+//   Preventive/P-C ICD "bundles" when their trigger CPT is absent — this
+//   previously only happened when a quick-action button was clicked
+//   (clearOtherQuickActionBundles), never during the regular Analyze flow:
+//   (1) Preventive bundle (Z00.01/Z00.121): deleted whenever no Preventive
+//   E&M/AWV code (993xx or G0438/G0439) is on the chart.
+//   (2) BMI ICD (Z68.xx): now deleted when NEITHER a Preventive visit NOR
+//   Obesity Counseling (G0447) is on the chart — Obesity's own gating
+//   already depends on BMI (BMI<30 fade rule), so BMI is kept whenever
+//   Obesity is being billed even without Preventive. When either is
+//   present, the existing add/correct-if-wrong behavior is unchanged.
+//   (3) Preventive/P-C counseling bundle (Z71.3, Z71.82/89): these three
+//   ICDs are shared between Preventive and Preventive Counseling (99401) —
+//   deleted only when NEITHER is on the chart; when either is present, the
+//   existing Z71.82-vs-89 correction-if-wrong logic runs exactly as before.
+//   All three are additive to the existing toDelete/Proposed-Changes flow —
+//   nothing about the add/correct behavior when the bundle IS still needed
+//   was changed. Verified the branch logic with a standalone simulation
+//   covering: nothing present -> no-op; Obesity present but no Preventive
+//   -> Z00.01 and Z71 bundle deleted, Z68 kept; 99401 present but no
+//   Preventive -> Z00.01 and Z68 deleted, Z71 bundle kept; Preventive
+//   present -> nothing deleted.
 // 1.66 (2026-08-10) - Weekend rule (CPT 99051) now also uses the widened
 //   isUHCInsurance() (see 1.65 below) instead of its own separate, narrower
 //   inline regex (which only covered UMR/Oxford). isUHCFamilyForWeekend is
@@ -2264,17 +2286,44 @@
             });
         }
 
-        // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
+        // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
+        // isn't on the chart. These two are the age-split "well visit"
+        // diagnosis codes that only belong alongside a Preventive E&M/AWV
+        // code (993xx or G0438/G0439) — same pairing the quick-action
+        // buttons already enforce via clearOtherQuickActionBundles(), now
+        // also enforced here so it's caught by the regular Analyze/Start
+        // Action flow, not just when a quick-action button is clicked. ----
+        if (!hasPreventiveVisit) {
+            const preventiveBundleEntries = getICDRows().filter(e =>
+                e.code.toUpperCase() === 'Z00.01' || e.code.toUpperCase() === 'Z00.121');
+            preventiveBundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present this encounter — preventive bundle ICD not applicable' });
+            });
+        }
+
+        // ---- BMI Z68.xx ICD code: add if missing, fix if wrong, delete if
+        // no longer needed ----
         // The correct Z68.xx code is added if it's not already on the ICD
         // list, and any OTHER Z68.xx code (wrong value, including an
         // adult-format code like Z68.28 wrongly used on a pediatric
         // chart) gets proposed for removal — same Analyze/Start Action
         // flow as everything else, not just the quick-action buttons.
+        // BMI is only "needed" for this encounter if either a Preventive
+        // visit is present OR Obesity Counseling (G0447) is on the chart
+        // (Obesity's own gating already depends on BMI, per
+        // computeQuickActionGating's BMI<30 fade rule) — if neither
+        // applies, any existing Z68.xx is proposed for deletion instead of
+        // being corrected/kept.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
-        if (correctZ68) {
-            const icdEntriesForBMI = getICDRows();
-            const currentZ68Entries = icdEntriesForBMI.filter(e => /^Z68\./i.test(e.code));
+        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447');
+        const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
+        const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
+        if (!bmiZ68StillNeeded) {
+            currentZ68Entries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present and Obesity not billed — BMI code not needed' });
+            });
+        } else if (correctZ68) {
             const hasCorrectZ68 = currentZ68Entries.some(e => e.code.toUpperCase() === correctZ68.toUpperCase());
             // Rule 1: no Z68.xx present at all → don't add it, unless a
             // preventive visit is being applied this encounter. A WRONG
@@ -2326,25 +2375,42 @@
             }
         }
 
-        // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
-        // Only corrects this when one of the two is ALREADY on the chart
-        // (added earlier by Preventive/Preventive Counsel) — this doesn't
-        // introduce the code to charts that never had it, it just keeps an
-        // existing one in sync as the ICD list changes (e.g. asthma gets
-        // added later and Z71.82 should become Z71.89).
-        const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
-        if (z71Entries.length) {
-            const ccTextForZ71 = getChiefComplaintTextFast(text);
-            const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
-            const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
-            if (!hasCorrectZ71) {
-                toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
-            }
-            z71Entries.forEach(e => {
-                if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
-                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
-                }
+        // ---- Preventive/P-C counseling bundle (Z71.3, Z71.82/89): keep only
+        // if Preventive OR Preventive Counseling (99401) is on the chart;
+        // delete the whole bundle if NEITHER is present ----
+        // These three ICDs are shared between the Preventive (PV) and
+        // Preventive Counseling (P/C) bundles (see the quick-action
+        // clearOtherQuickActionBundles() comment above) — they only belong
+        // on the chart when one of those two is actually being billed.
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
+        if (!z71BundleNeeded) {
+            const z71BundleEntries = getICDRows().filter(e =>
+                ['Z71.3', 'Z71.82', 'Z71.89'].includes(e.code.toUpperCase()));
+            z71BundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Neither Preventive nor Preventive Counseling present — counseling bundle ICD not applicable' });
             });
+        } else {
+            // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
+            // Only corrects this when one of the two is ALREADY on the chart
+            // (added earlier by Preventive/Preventive Counsel) — this doesn't
+            // introduce the code to charts that never had it, it just keeps an
+            // existing one in sync as the ICD list changes (e.g. asthma gets
+            // added later and Z71.82 should become Z71.89).
+            const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
+            if (z71Entries.length) {
+                const ccTextForZ71 = getChiefComplaintTextFast(text);
+                const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
+                const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
+                if (!hasCorrectZ71) {
+                    toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
+                }
+                z71Entries.forEach(e => {
+                    if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
+                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
+                    }
+                });
+            }
         }
 
         // ---- Office Visit E&M code ----
@@ -3242,7 +3308,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "al_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "al_officeVisit" },
             "99211": { type: "al_officeVisit" },
@@ -4423,7 +4489,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "cl_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "cl_officeVisit" },
             "99211": { type: "cl_officeVisit" },

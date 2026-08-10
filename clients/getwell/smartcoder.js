@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.29
+// @name         Getwell SmartCoder by ATQ v5.30
 // @namespace    http://tampermonkey.net/
-// @version      5.29
+// @version      5.30
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,26 @@
 
 
 // CHANGELOG
+// 5.30 (2026-08-10) - Analyze/Start Action now auto-cleans up two
+//   Preventive/P-C ICD "bundles" when their trigger CPT is absent — this
+//   previously only happened when a quick-action button was clicked
+//   (clearOtherQuickActionBundles), never during the regular Analyze flow:
+//   (1) Preventive bundle (Z00.01/Z00.121): deleted whenever no Preventive
+//   E&M/AWV code (993xx or G0438/G0439) is on the chart.
+//   (2) Preventive/P-C counseling bundle (Z71.3, Z71.82/89): these three
+//   ICDs are shared between Preventive and Preventive Counseling (99401) —
+//   deleted only when NEITHER is on the chart; when either is present, the
+//   existing Z71.82-vs-89 correction-if-wrong logic runs exactly as before.
+//   Same fix already applied to Hasan Sheikh (v1.67) and Bronx (v1.44), with
+//   ONE deliberate difference: Getwell does NOT get the BMI (Z68.xx)
+//   delete-when-unused rule those two clients got. BMI is used on every
+//   Getwell encounter regardless of Preventive/Obesity status (already
+//   documented in the existing BMI block as "isn't gated on preventive-visit
+//   status"), so BMI stays fully correction-only here, unchanged. Both
+//   changes are additive to the existing toDelete/Proposed-Changes flow —
+//   nothing about the add/correct behavior when a bundle IS still needed
+//   was changed. Verified the branch logic (minus the BMI case, which
+//   intentionally doesn't apply here) with a standalone simulation.
 // 5.28 (2026-08-10) - Widened isUHCInsurance() to correctly detect the full
 //   United Healthcare family of payer names, not just plans literally named
 //   "United Health Care"/"UHC". Two changes:
@@ -2385,9 +2405,31 @@
             });
         }
 
+        // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
+        // isn't on the chart. These two are the age-split "well visit"
+        // diagnosis codes that only belong alongside a Preventive E&M/AWV
+        // code (993xx or G0438/G0439) — same pairing the quick-action
+        // buttons already enforce via clearOtherQuickActionBundles(), now
+        // also enforced here so it's caught by the regular Analyze/Start
+        // Action flow, not just when a quick-action button is clicked.
+        // NOTE: unlike the Preventive bundle, BMI (below) is intentionally
+        // NOT included in this delete-when-unused treatment for Getwell —
+        // see the BMI note right below. ----
+        if (!hasPreventiveVisit) {
+            const preventiveBundleEntries = getICDRows().filter(e =>
+                e.code.toUpperCase() === 'Z00.01' || e.code.toUpperCase() === 'Z00.121');
+            preventiveBundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present this encounter — preventive bundle ICD not applicable' });
+            });
+        }
+
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
         // Getwell always keeps a BMI code once BMI is documented — this
-        // isn't gated on preventive-visit status. The correct Z68.xx code
+        // isn't gated on preventive-visit status, and is deliberately left
+        // OUT of the Preventive/P-C bundle delete-when-unused rules above
+        // and below (BMI is used on every Getwell encounter, per how this
+        // client documents vitals, unlike Hasan Sheikh/Bronx where BMI is
+        // only relevant for Preventive/Obesity). The correct Z68.xx code
         // is added if missing, and any OTHER Z68.xx code (wrong value for
         // the current BMI) gets swapped out — never a blanket deletion.
         const bmiNum = parseFloat(bmi) || null;
@@ -2439,25 +2481,42 @@
             }
         }
 
-        // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
-        // Only corrects this when one of the two is ALREADY on the chart
-        // (added earlier by Preventive/Preventive Counsel) — this doesn't
-        // introduce the code to charts that never had it, it just keeps an
-        // existing one in sync as the ICD list changes (e.g. asthma gets
-        // added later and Z71.82 should become Z71.89).
-        const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
-        if (z71Entries.length) {
-            const ccTextForZ71 = getChiefComplaintTextFast(text);
-            const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
-            const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
-            if (!hasCorrectZ71) {
-                toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
-            }
-            z71Entries.forEach(e => {
-                if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
-                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
-                }
+        // ---- Preventive/P-C counseling bundle (Z71.3, Z71.82/89): keep only
+        // if Preventive OR Preventive Counseling (99401) is on the chart;
+        // delete the whole bundle if NEITHER is present ----
+        // These three ICDs are shared between the Preventive (PV) and
+        // Preventive Counseling (P/C) bundles (see the quick-action
+        // clearOtherQuickActionBundles() comment above) — they only belong
+        // on the chart when one of those two is actually being billed.
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
+        if (!z71BundleNeeded) {
+            const z71BundleEntries = getICDRows().filter(e =>
+                ['Z71.3', 'Z71.82', 'Z71.89'].includes(e.code.toUpperCase()));
+            z71BundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Neither Preventive nor Preventive Counseling present — counseling bundle ICD not applicable' });
             });
+        } else {
+            // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
+            // Only corrects this when one of the two is ALREADY on the chart
+            // (added earlier by Preventive/Preventive Counsel) — this doesn't
+            // introduce the code to charts that never had it, it just keeps an
+            // existing one in sync as the ICD list changes (e.g. asthma gets
+            // added later and Z71.82 should become Z71.89).
+            const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
+            if (z71Entries.length) {
+                const ccTextForZ71 = getChiefComplaintTextFast(text);
+                const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
+                const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
+                if (!hasCorrectZ71) {
+                    toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
+                }
+                z71Entries.forEach(e => {
+                    if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
+                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
+                    }
+                });
+            }
         }
 
         // ---- Z00.01 vs Z00.121 vs Z00.129 (preventive visit code, age-
@@ -3299,7 +3358,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "al_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "al_officeVisit" },
             "99211": { type: "al_officeVisit" },
@@ -4298,7 +4357,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "cl_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "cl_officeVisit" },
             "99211": { type: "cl_officeVisit" },
