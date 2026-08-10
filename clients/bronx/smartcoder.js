@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.42
+// @name         Bronx Health SmartCoder v1.43
 // @namespace    http://tampermonkey.net/
-// @version      1.42
+// @version      1.43
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,38 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.43 (2026-08-10) - Widened isUHCInsurance() to correctly detect the full
+//   United Healthcare family of payer names, not just plans literally named
+//   "United Health Care"/"UHC". Two changes:
+//   (1) Any insurance name starting with "united" (any spacing/hyphenation —
+//   "United Health Care", "United-Health-Care", "UnitedHealthcare",
+//   "UnitedHealthOne", "United Health One", etc.) is now treated as UHC.
+//   This covers every UnitedHealthcare Community Plan variant (NJ/MO/NM/OH/
+//   TN/MI/KS/AZ), UnitedHealthcare Student Resources, UnitedHealthcare All
+//   Savers Insurance, UnitedHealthcare Neighborhood Health Partnership,
+//   UnitedHealthcare Oxford, UnitedHealthcare Global, and UnitedHealthOne.
+//   (2) Added explicit brand patterns for UHC-owned/underwritten payers that
+//   do NOT start with "United" in the name: Surest, AARP Supplemental Health
+//   Plans, Golden Rule, UMR, Preferred Care Partners, Health Plan of NV/
+//   Sierra Health and Life, Medica Health Plans, All Savers, Neighborhood
+//   Health Partnership, Oxford, FlexWork, USNAS.
+//   The name is normalized first (trim, lowercase, strip periods/commas,
+//   collapse whitespace/hyphens to single spaces) so spacing/hyphenation
+//   variance in how the payer name is written never causes a miss.
+//   Same fix already applied to Hasan Sheikh (v1.65/1.66) and Getwell
+//   (v5.28/5.29). Verified against all 20+ listed brand variants (all
+//   return true) and against known non-UHC payers — Aetna, Cigna, BCBS,
+//   Medicaid, Medicare, MetroPlus, Healthfirst, Nyce PPO, VNS Choice, empty/
+//   null/undefined (all correctly return false) — using the actual
+//   extracted function before applying.
+//   isUHCInsurance() is used by annualGCodesEligible() (G0444/G0442) and
+//   the Preventive Counseling blocking logic, both of which now correctly
+//   exclude/block the full UHC family instead of just literal "United
+//   Health Care"/"UHC".
+//   NOTE: unlike Hasan Sheikh and Getwell, Bronx has no Weekend/99051 rule
+//   at all — it was fully removed in an earlier version (see the note near
+//   the top of this changelog about the Weekend/Holiday rule removal) — so
+//   there is no separate weekend UHC regex to reconcile with this change.
 // 1.42 (2026-08-10) - P/C (Preventive Counseling) quick-action button now
 //   also fades when the CURRENT encounter has no chronic disease ICD coded
 //   — Preventive Counseling requires a chronic condition to counsel on, and
@@ -1164,7 +1196,54 @@
     }
 
     function isUHCInsurance(insurance) {
-        return !!insurance && /^\s*(united[\s-]*health[\s-]*care|uhc)\b/i.test(insurance.trim());
+        if (!insurance) return false;
+        // Normalize: trim, lowercase, drop periods/commas, collapse whitespace/
+        // hyphens to single spaces — so "United-Health Care", "United  Health
+        // One", "UnitedHealthcare", "UnitedHealthOne" etc. all normalize the
+        // same way, and a spacing/hyphenation quirk in the payer name never
+        // causes a miss.
+        const name = insurance.trim().toLowerCase()
+            .replace(/[.,]/g, '')
+            .replace(/[\s-]+/g, ' ')
+            .trim();
+
+        // Core rule: ANY insurance name starting with "united" is treated as
+        // United Healthcare family — covers UnitedHealthcare, United Health
+        // Care, United-Health-Care, UnitedHealthOne, United Health One,
+        // UnitedHealthcare Community Plan of NJ/MO/NM/OH/TN/MI/KS/AZ,
+        // UnitedHealthcare Student Resources, UnitedHealthcare All Savers
+        // Insurance, UnitedHealthcare Neighborhood Health Partnership,
+        // UnitedHealthcare Oxford, UnitedHealthcare Global, etc. — every
+        // "United..." branded plan, regardless of spacing.
+        // NOTE: deliberately NOT using \b after "united" — once normalized,
+        // "UnitedHealthcare" becomes one continuous word ("unitedhealthcare"),
+        // and \b never fires between "united" and "healthcare" in that case,
+        // so a word-boundary anchor here would silently miss every no-space
+        // brand name.
+        if (/^united/.test(name)) return true;
+
+        // Plain "UHC" abbreviation.
+        if (/^uhc\b/.test(name)) return true;
+
+        // UHC-owned/underwritten brands that do NOT start with "United" in
+        // the payer name, so the rule above can't catch them.
+        const UHC_BRAND_PATTERNS = [
+            /^surest\b/,
+            /^aarp\s+supplemental\s+health\b/,
+            /^golden\s+rule\b/,
+            /^umr\b/,
+            /^preferred\s+care\s+partners\b/,
+            /^health\s+plan\s+of\s+nv\b/,
+            /^sierra\s+health\s+and\s+life\b/,
+            /^medica\s+health\s+plans\b/,
+            /^all\s+savers\b/,
+            /^neighborhood\s+health\s+partnership\b/,
+            /^oxford\b/,
+            /^flexwork\b/,
+            /\busnas\b/
+        ];
+
+        return UHC_BRAND_PATTERNS.some(re => re.test(name));
     }
 
     // Empire plan: alcohol/tobacco screening codes aren't used for this

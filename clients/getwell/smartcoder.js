@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.27
+// @name         Getwell SmartCoder by ATQ v5.29
 // @namespace    http://tampermonkey.net/
-// @version      5.27
+// @version      5.29
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,59 @@
 
 
 // CHANGELOG
+// 5.28 (2026-08-10) - Widened isUHCInsurance() to correctly detect the full
+//   United Healthcare family of payer names, not just plans literally named
+//   "United Health Care"/"UHC". Two changes:
+//   (1) Any insurance name starting with "united" (any spacing/hyphenation —
+//   "United Health Care", "United-Health-Care", "UnitedHealthcare",
+//   "UnitedHealthOne", "United Health One", etc.) is now treated as UHC.
+//   This covers every UnitedHealthcare Community Plan variant (NJ/MO/NM/OH/
+//   TN/MI/KS/AZ), UnitedHealthcare Student Resources, UnitedHealthcare All
+//   Savers Insurance, UnitedHealthcare Neighborhood Health Partnership,
+//   UnitedHealthcare Oxford, UnitedHealthcare Global, and UnitedHealthOne.
+//   (2) Added explicit brand patterns for UHC-owned/underwritten payers that
+//   do NOT start with "United" in the name: Surest, AARP Supplemental Health
+//   Plans, Golden Rule, UMR, Preferred Care Partners, Health Plan of NV/
+//   Sierra Health and Life, Medica Health Plans, All Savers, Neighborhood
+//   Health Partnership, Oxford, FlexWork, USNAS.
+//   The name is normalized first (trim, lowercase, strip periods/commas,
+//   collapse whitespace/hyphens to single spaces) so spacing/hyphenation
+//   variance in how the payer name is written never causes a miss.
+//   Same fix already applied to Hasan Sheikh (v1.65). Verified against all
+//   20+ listed brand variants (all return true) and against known non-UHC
+//   payers — Aetna, Cigna, BCBS, Medicaid, Medicare, MetroPlus, Healthfirst,
+//   Nyce PPO, VNS Choice, empty/null/undefined (all correctly return false)
+//   — using the actual extracted function before applying.
+//   isUHCInsurance() is used by annualGCodesEligible() (G0444/G0442 now
+//   correctly excluded for the full UHC family) and
+//   getPreventiveCounselBlockedInsurance() (P/C now correctly blocked for
+//   the full UHC family too).
+//   NOTE: at the time of this entry, the separate, independent UHC regex
+//   used only for the weekend 99051 rule (isUHCFamilyForWeekend, further
+//   down) was deliberately left untouched, since it was kept apart from
+//   isUHCInsurance() by design. See the 5.29 entry below — the weekend rule
+//   was subsequently switched to reuse isUHCInsurance() directly.
+// 5.29 (2026-08-10) - Weekend rule (CPT 99051) now also uses the widened
+//   isUHCInsurance() (see 5.28 above) instead of its own separate, narrower
+//   inline regex (which only covered UMR/Oxford). isUHCFamilyForWeekend is
+//   now just `isUHCInsurance(insurance)`.
+//   Coverage: every real-world insurance NAME that used to block Weekend
+//   under the old regex (one literally named/starting with UHC, United
+//   Health Care, UnitedHealthcare, UMR, or Oxford) still blocks it, and the
+//   full brand list from 5.28 (Surest, AARP Supplemental, Golden Rule,
+//   UnitedHealthOne, all the UnitedHealthcare Community Plan state variants,
+//   etc.) now blocks it too.
+//   One deliberate behavior change: the old regex was UNANCHORED, so it
+//   would also match "uhc"/"umr"/"oxford" as a bare substring anywhere in
+//   an insurance name, even mid-string. isUHCInsurance() anchors to the
+//   START of the (normalized) name, matching this file's existing
+//   convention for payer detection (see isMedicaidOrMedicareIns() above,
+//   which anchors the same way). This was a deliberate tightening, not an
+//   oversight — matching an abbreviation like "umr" anywhere in a name
+//   risks false positives on unrelated payers that happen to contain those
+//   letters. Every realistic payer name from the original brand list (where
+//   UHC/UMR/Oxford/etc. IS the start of the name, not a buried substring)
+//   is unaffected. Same fix already applied to Hasan Sheikh (v1.66).
 // 5.27 (2026-08-10) - P/C (Preventive Counseling) quick-action button now
 //   also fades when the CURRENT encounter has no chronic disease ICD coded
 //   — Preventive Counseling requires a chronic condition to counsel on, and
@@ -1277,7 +1330,54 @@
     }
 
     function isUHCInsurance(insurance) {
-        return !!insurance && /^\s*(united[\s-]*health[\s-]*care|uhc)\b/i.test(insurance.trim());
+        if (!insurance) return false;
+        // Normalize: trim, lowercase, drop periods/commas, collapse whitespace/
+        // hyphens to single spaces — so "United-Health Care", "United  Health
+        // One", "UnitedHealthcare", "UnitedHealthOne" etc. all normalize the
+        // same way, and a spacing/hyphenation quirk in the payer name never
+        // causes a miss.
+        const name = insurance.trim().toLowerCase()
+            .replace(/[.,]/g, '')
+            .replace(/[\s-]+/g, ' ')
+            .trim();
+
+        // Core rule: ANY insurance name starting with "united" is treated as
+        // United Healthcare family — covers UnitedHealthcare, United Health
+        // Care, United-Health-Care, UnitedHealthOne, United Health One,
+        // UnitedHealthcare Community Plan of NJ/MO/NM/OH/TN/MI/KS/AZ,
+        // UnitedHealthcare Student Resources, UnitedHealthcare All Savers
+        // Insurance, UnitedHealthcare Neighborhood Health Partnership,
+        // UnitedHealthcare Oxford, UnitedHealthcare Global, etc. — every
+        // "United..." branded plan, regardless of spacing.
+        // NOTE: deliberately NOT using \b after "united" — once normalized,
+        // "UnitedHealthcare" becomes one continuous word ("unitedhealthcare"),
+        // and \b never fires between "united" and "healthcare" in that case,
+        // so a word-boundary anchor here would silently miss every no-space
+        // brand name.
+        if (/^united/.test(name)) return true;
+
+        // Plain "UHC" abbreviation.
+        if (/^uhc\b/.test(name)) return true;
+
+        // UHC-owned/underwritten brands that do NOT start with "United" in
+        // the payer name, so the rule above can't catch them.
+        const UHC_BRAND_PATTERNS = [
+            /^surest\b/,
+            /^aarp\s+supplemental\s+health\b/,
+            /^golden\s+rule\b/,
+            /^umr\b/,
+            /^preferred\s+care\s+partners\b/,
+            /^health\s+plan\s+of\s+nv\b/,
+            /^sierra\s+health\s+and\s+life\b/,
+            /^medica\s+health\s+plans\b/,
+            /^all\s+savers\b/,
+            /^neighborhood\s+health\s+partnership\b/,
+            /^oxford\b/,
+            /^flexwork\b/,
+            /\busnas\b/
+        ];
+
+        return UHC_BRAND_PATTERNS.some(re => re.test(name));
     }
 
     // Eligible unless insurance starts with Medicaid/Medicare or is
@@ -1951,13 +2051,16 @@
         // the Medicare AWV G-codes; G0447 (Obesity); a televisit — using
         // Getwell's own visit-type detection (appointment caption via
         // getVisitType/classifyVisitType, same as the office-visit E&M
-        // rule below uses); the insurance being UHC/United Healthcare/
-        // UMR/Oxford (UMR and Oxford are both UnitedHealthcare-owned
-        // brands); or one of the high-level codes above being present.
+        // rule below uses); the insurance being part of the full United
+        // Healthcare family (now via isUHCInsurance() — see its v5.28
+        // changelog entry; previously this rule used its own narrower
+        // inline regex covering only UMR/Oxford, kept separate by design,
+        // but isUHCInsurance() is now a strict start-anchored superset of
+        // every realistic payer name that regex matched); or one of the
+        // high-level codes above being present.
         // Analyze/Apply decides this, not the toggle itself — flipping the
         // toggle just changes what the next Analyze run will propose. ----
-        const isUHCFamilyForWeekend = !!insurance &&
-            /(united\s*health\s*care|unitedhealthcare|\buhc\b|\bumr\b|\boxford\b)/i.test(insurance);
+        const isUHCFamilyForWeekend = isUHCInsurance(insurance);
         if (isWeekendEnabled()) {
             const isTelevisitForWeekend = classifyVisitType(getVisitType()) === 'televisit';
             const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
