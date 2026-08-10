@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.38
+// @name         Bronx Health SmartCoder v1.39
 // @namespace    http://tampermonkey.net/
-// @version      1.38
+// @version      1.39
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,21 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.39 (2026-08-10) - Broadened the televisit med-refill 99212-vs-99213
+//   detection with real-chart examples from the client:
+//   "med refill of calcium and vit d", "rx refill", "medication refill",
+//   "meds renewal", "medication review, and refill",
+//   "CFOA (medication review)", "refill all rx",
+//   "refill allergy rx and vitamins", "all medication refill". Added
+//   "renewal" and "medication/med review" as trigger phrases alongside
+//   "refill". Switched the "is this ONLY a refill" check from a single
+//   whole-CC comparison to a per-segment one: the CC is split on commas/
+//   semicolons, and 99212 applies only if EVERY segment is refill/
+//   renewal/review-related (a descriptor like "of calcium and vit d" or
+//   "allergy rx and vitamins" isn't a separate complaint, so it doesn't
+//   block 99212) — but a genuine unrelated complaint in any segment
+//   (e.g. "Medication refill, cough for 3 days") still falls through to
+//   99213.
 // 1.38 (2026-08-10) - New client rule-sheet update:
 //   1) CANCER SCREENING — auto-detect/auto-add/auto-delete removed
 //      (getCancerScreeningDates() deleted, was unused dead code anyway).
@@ -2231,18 +2246,26 @@
                     ovReason = '99211 is never used for this provider — corrected to 99212';
                 } else if (isTelevisitNote) {
                     // Televisit (appointment caption = CON): 99212 only
-                    // when the CC's reason for the visit is essentially
-                    // JUST a med/medication refill (or closely related
-                    // phrase) with nothing else of substance — if the CC
-                    // has other content beyond the refill mention, more
-                    // time was spent, so bill 99213 instead.
-                    const MED_REFILL_RE = /\b(?:med(?:ication)?\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?))\b/i;
+                    // when EVERY comma/semicolon-separated part of the CC
+                    // is refill/renewal/medication-review-related — e.g.
+                    // "med refill of calcium and vit d", "rx refill",
+                    // "medication refill", "meds renewal", "medication
+                    // review, and refill", "CFOA (medication review)",
+                    // "refill all rx", "refill allergy rx and vitamins",
+                    // "all medication refill". A descriptor of WHAT is
+                    // being refilled/reviewed (e.g. "of calcium and vit
+                    // d", "allergy rx and vitamins") doesn't count as a
+                    // separate complaint. If any comma-separated part is
+                    // an unrelated complaint instead, more time was spent
+                    // discussing it, so bill 99213.
+                    const MED_REFILL_RE = /\b(?:rx\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?)|med(?:ication)?s?\s*(?:refill|renewal|review)|refill|renewal)\b/i;
                     const hasMedRefillMention = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
-                    const ccWithoutRefill = ccText.replace(MED_REFILL_RE, ' ').replace(/[^a-z0-9]+/gi, ' ').trim();
-                    const isOnlyMedRefill = hasMedRefillMention && ccWithoutRefill.length === 0;
+                    const ccSegments = ccText.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+                    const isOnlyMedRefill = hasMedRefillMention &&
+                        (ccSegments.length === 0 || ccSegments.every(seg => MED_REFILL_RE.test(seg)));
                     ovCode = isOnlyMedRefill ? '99212' : '99213';
                     ovReason = isOnlyMedRefill
-                        ? 'Televisit (CON), CC is med refill only — 99212'
+                        ? 'Televisit (CON), CC is med refill/renewal/review only — 99212'
                         : 'Televisit (CON) — 99213';
                 } else if (!isVitalsDocumented(text)) {
                     // rule 6.ii
