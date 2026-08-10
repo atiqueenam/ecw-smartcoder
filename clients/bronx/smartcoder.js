@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.43
+// @name         Bronx Health SmartCoder v1.45
 // @namespace    http://tampermonkey.net/
-// @version      1.43
+// @version      1.45
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -10,315 +10,92 @@
 // @grant        none
 // ==/UserScript==
 
-// CHANGELOG
-// 1.43 (2026-08-10) - Widened isUHCInsurance() to correctly detect the full
-//   United Healthcare family of payer names, not just plans literally named
-//   "United Health Care"/"UHC". Two changes:
-//   (1) Any insurance name starting with "united" (any spacing/hyphenation —
-//   "United Health Care", "United-Health-Care", "UnitedHealthcare",
-//   "UnitedHealthOne", "United Health One", etc.) is now treated as UHC.
-//   This covers every UnitedHealthcare Community Plan variant (NJ/MO/NM/OH/
-//   TN/MI/KS/AZ), UnitedHealthcare Student Resources, UnitedHealthcare All
-//   Savers Insurance, UnitedHealthcare Neighborhood Health Partnership,
-//   UnitedHealthcare Oxford, UnitedHealthcare Global, and UnitedHealthOne.
-//   (2) Added explicit brand patterns for UHC-owned/underwritten payers that
-//   do NOT start with "United" in the name: Surest, AARP Supplemental Health
-//   Plans, Golden Rule, UMR, Preferred Care Partners, Health Plan of NV/
-//   Sierra Health and Life, Medica Health Plans, All Savers, Neighborhood
-//   Health Partnership, Oxford, FlexWork, USNAS.
-//   The name is normalized first (trim, lowercase, strip periods/commas,
-//   collapse whitespace/hyphens to single spaces) so spacing/hyphenation
-//   variance in how the payer name is written never causes a miss.
-//   Same fix already applied to Hasan Sheikh (v1.65/1.66) and Getwell
-//   (v5.28/5.29). Verified against all 20+ listed brand variants (all
-//   return true) and against known non-UHC payers — Aetna, Cigna, BCBS,
-//   Medicaid, Medicare, MetroPlus, Healthfirst, Nyce PPO, VNS Choice, empty/
-//   null/undefined (all correctly return false) — using the actual
-//   extracted function before applying.
-//   isUHCInsurance() is used by annualGCodesEligible() (G0444/G0442) and
-//   the Preventive Counseling blocking logic, both of which now correctly
-//   exclude/block the full UHC family instead of just literal "United
-//   Health Care"/"UHC".
-//   NOTE: unlike Hasan Sheikh and Getwell, Bronx has no Weekend/99051 rule
-//   at all — it was fully removed in an earlier version (see the note near
-//   the top of this changelog about the Weekend/Holiday rule removal) — so
-//   there is no separate weekend UHC regex to reconcile with this change.
-// 1.42 (2026-08-10) - P/C (Preventive Counseling) quick-action button now
-//   also fades when the CURRENT encounter has no chronic disease ICD coded
-//   — Preventive Counseling requires a chronic condition to counsel on, and
-//   this gate was missing (computeQuickActionGating() previously only
-//   checked recent billing, blocked insurance, and televisit for P/C).
-//   Reuses the existing CHRONIC_DISEASE_ICD_CODES list (already used for
-//   the 99213-vs-99214 complexity rule) and getICDRows() (the current
-//   encounter's billing ICD table) — checked via
-//   hasChronicDiseaseThisEncounter = getICDRows().some(r =>
-//   CHRONIC_DISEASE_ICD_CODES.has(r.code.toUpperCase())). Same fix already
-//   applied to Hasan Sheikh (v1.64) and Getwell (v5.27).
-//   runPreventiveCounselAction()'s existing defense-in-depth re-check of
-//   computeQuickActionGating() picks this up automatically, so a race
-//   between render and click is still covered with no separate change
-//   needed there.
-// 1.41 (2026-08-10) - Patient History: fixed blank Visit Code/Procedure
-//   Codes for encounters printed with an alternate template ("exception"
-//   encounters use a merged single-cell layout — a plain
-//   "<span><b>Visit Code:</b></span>" label followed by <br>-separated
-//   codes in the SAME cell — instead of the usual separate heading row
-//   + <ul><li> bullet list). Neither existing extraction path recognized
-//   this layout (no rightPaneHeading/leftPaneHeading row to match, and
-//   no matching prisma-section table — a differently-shaped
-//   prisma-section="Procedure Codes" table does exist from the embedded
-//   SOAP note text, but its codes are comma-joined in one cell and are
-//   deliberately NOT matched by this fix, via the
-//   cell.closest('table[prisma-section]') exclusion, to avoid producing
-//   one bogus merged "code"). Added a third fallback in
-//   parseCodeContainer(): scans <td> cells whose text starts with
-//   "Visit Code(s):"/"Procedure Code(s):", splits that cell's innerHTML
-//   on <br> tags, and parses each resulting line the same way the other
-//   two paths already do. This is the same fix already applied to Hasan
-//   Sheikh (v1.63) and Getwell (v5.26) — the parser module is
-//   byte-identical across clients. Verified against both a working
-//   encounter and a real "exception" encounter sample — the working
-//   encounter's output is byte-for-byte unchanged (it still resolves via
-//   the existing first path), and the exception encounter now correctly
-//   extracts its visit codes (99213, 99395) and all 13 procedure codes
-//   instead of an empty array.
-// 1.40 (2026-08-10) - Ported the Hasan Sheikh/Getwell quick-action gating
-//   and vaccine push-code fix over to Bronx:
-//   - Quick-action buttons (PV/P/C/SM/OB) now fade and become unclickable
-//     per business rule, computed fresh on every render
-//     (computeQuickActionGating()) instead of only reflecting the
-//     "action in progress" state:
-//     - PV: faded if any preventive/AWV code was already billed this
-//       calendar year, or if the visit is a televisit (this client
-//       detects televisit from the appointment caption, CON, same as the
-//       existing isTelevisitNote convention — not CPT 98012).
-//     - P/C: faded if preventive OR preventive counseling was billed in
-//       the last 30 days; if insurance is blocked per the existing
-//       isPreventiveCounselBlockedIns() (MetroPlus/Medicaid/straight
-//       Medicare/UHC/Nyce PPO/Molina); or televisit.
-//     - SM: faded if not a confirmed smoker, if 99406 was billed in the
-//       last 30 days, or if televisit.
-//     - OB: faded if BMI < 30, if G0447 was billed in the last 30 days,
-//       if Medicaid, or if televisit.
-//     - New patient (no prior encounter): P/C, SM, and OB are always
-//       faded regardless of their own conditions — only Preventive
-//       applies.
-//     Each action function also re-checks the same gating as a
-//     defense-in-depth guard, in case a click races the next render.
-//   - Added normalizeInsuranceForMatch(): collapses double/irregular
-//     whitespace and non-breaking spaces in the insurance name before
-//     any of the new gating's payer checks run, so a spacing quirk
-//     (e.g. "Metro  Plus", a stray leading/trailing space) can't cause a
-//     payer match to be missed. Existing isXIns()/
-//     isPreventiveCounselBlockedIns() helpers and their own regexes are
-//     untouched — this only normalizes the input handed to them.
-//   - Vaccine admin/"push" code cleanup no longer deletes an admin code
-//     (90460/90461/90471/90472/90473/90474/G0008/G0009/G0010/90480) just
-//     because no vaccine PRODUCT code is on the chart — a patient may
-//     bring their own vaccine with the doctor only pushing the
-//     administration code. The cleanup now only runs when at least one
-//     product code IS present.
-// 1.39 (2026-08-10) - Broadened the televisit med-refill 99212-vs-99213
-//   detection with real-chart examples from the client:
-//   "med refill of calcium and vit d", "rx refill", "medication refill",
-//   "meds renewal", "medication review, and refill",
-//   "CFOA (medication review)", "refill all rx",
-//   "refill allergy rx and vitamins", "all medication refill". Added
-//   "renewal" and "medication/med review" as trigger phrases alongside
-//   "refill". Switched the "is this ONLY a refill" check from a single
-//   whole-CC comparison to a per-segment one: the CC is split on commas/
-//   semicolons, and 99212 applies only if EVERY segment is refill/
-//   renewal/review-related (a descriptor like "of calcium and vit d" or
-//   "allergy rx and vitamins" isn't a separate complaint, so it doesn't
-//   block 99212) — but a genuine unrelated complaint in any segment
-//   (e.g. "Medication refill, cough for 3 days") still falls through to
-//   99213.
-// 1.38 (2026-08-10) - New client rule-sheet update:
-//   1) CANCER SCREENING — auto-detect/auto-add/auto-delete removed
-//      (getCancerScreeningDates() deleted, was unused dead code anyway).
-//      Auto Link/Claim Link ICD-linking for 3014F/3015F/3017F is
-//      UNCHANGED — linking stays universal, so if the practice adds one
-//      of these codes themselves it still links correctly.
-//   2) EMPIRE PLAN alcohol/tobacco screening code removal now only applies
-//      to televisits (isTelevisitNote) — for in-person visits, any Empire-
-//      named plan (Empire BCBS, etc.) uses these codes normally.
-//   3) 99204/99205/99215 are now protected from the office-visit "wrong
-//      code for this visit type" auto-delete — never removed if the
-//      practice put one of these on the chart directly.
-//   4) Medicare/VNS Choice/Clover Health G0438(new)/G0439(established)
-//      annual-visit logic reviewed — already correct, no change needed.
-//   5) NEW: modifier 59 auto-applied (Auto Link + Claim Link) to G0444,
-//      G0442, 96127, 96372, Q0091 whenever present — skipped if a modifier
-//      is already there ("if already applied then ok").
-//   6) Fixed a bug: the 90686/90688→90656 vaccine replacement rule had a
-//      typo (was checking "96686" instead of "90686") — now correctly
-//      matches 90686.
-//   7) BLOOD PRESSURE — removed the once-per-year "already billed this
-//      year" gate; the systolic/diastolic BP code is now proposed
-//      whenever "Controlling BP" + a BP value + I10 are present,
-//      regardless of prior use. Already-present codes are still never
-//      deleted outright.
-//   8) Televisit med-refill E&M rule tightened: 99212 now requires the CC
-//      to be EXCLUSIVELY a med/medication refill mention with nothing else
-//      of substance — if the CC has other content alongside the refill
-//      mention, 99213 is used instead (more time spent).
-//   9) NEW: modifier QW auto-applied (Auto Link + Claim Link) to a fixed
-//      list of ~90 lab CPT/HCPCS codes (80048...G0567) whenever present.
-//      No other existing modifier rules were touched.
-// 1.37 (2026-08-09) - Two corrections from user feedback on 1.36:
-//   1) Removed the Healthfirst/MetroPlus/Fidelis 93-modifier carve-out for
-//      the televisit Auto Link rule — Bronx does not follow that special
-//      case. Every insurance now gets modifier 95 on the office-visit code
-//      for a televisit (CON), with mod2 = 25 added on top when CPT 95251
-//      is present (still 95/25, never 93/25).
-//   2) Broadened med-refill detection for the televisit 99212-vs-99213
-//      E&M rule: previously only matched "med refill"/"medication refill"
-//      in the Chief Complaint. Now also matches variants like "refill all
-//      Rx", "refill meds", "refill prescriptions", etc., and checks the
-//      whole encounter note (not just the CC) — covers e.g. a "Refill all
-//      Rx." line in the orders/plan section.
-// 1.36 (2026-08-09) - Fixed a real-chart miss reported right after 1.35:
-//   a CON (televisit) visit with CPT 95251 and no 98012 was resolving to
-//   99212 with no modifiers instead of 99213 + mod 95/25. Root cause:
-//   televisit detection (both the office-visit E&M rule and the Auto Link
-//   95/25 modifier rule) was keyed off CPT 98012 being present, but this
-//   client's schedule marks a televisit via the appointment caption's
-//   visit type (CON) instead — 98012 isn't used here at all. Both rules
-//   now read the visit type straight from the appointment caption
-//   (getVisitType() === 'CON') instead of checking for 98012.
-// 1.35 (2026-08-09) - Applied the 29-item client rule sheet. Items that
-//   required an actual code change:
-//   1) WEEKEND/HOLIDAY RULE — fully removed: CSS, the CPT 99051 desired-
-//      code logic, the whole WEEKEND_HOLIDAYS/isWeekendEnabled/override
-//      module, the toggle UI next to CURRENT ENCOUNTER, its change-event
-//      listener, and every 99051 reference in MANAGED_CODES / Auto Link /
-//      Claim Link. No leftover code paths remain.
-//   3) BLOOD PRESSURE — rewritten: 3074F/3075F/3078F/3079F now only get
-//      proposed when the CC contains "Controlling BP" AND a BP value AND
-//      I10 are present, and only once per calendar year per side
-//      (systolic/diastolic independently, via codeUsedInYear). An already-
-//      present BP code is never deleted outright when the conditions
-//      aren't met — it's left on the chart untouched; it's only replaced
-//      when we can compute a different, correct bucket for the same side.
-//   4) EKG/ECG — if CPT 93000 is present (existing or about to be added)
-//      and none of the ECG-linkable ICDs are already on the chart, Z13.6
-//      is now proposed so Auto Link/Claim Link (both already had Z13.6 in
-//      their ecgICDs linking list) have something to link 93000 to.
-//      EMPIRE PLAN — alcohol (G0442/G9622/99408/Z13.9) and tobacco
-//      (99406/1000F/1036F/G9275/G9276) screening codes are never proposed
-//      for Empire, and any of them already on the chart get removed.
-//   6) Added Clover Health alongside Medicare/VNS Choice for the
-//      G0438(new)/G0439(established) annual-visit-code quick action.
-//   7) Added Molina to the payers where Preventive Counseling (P/C) isn't
-//      applicable (already had MetroPlus/Medicaid/UHC/Medicare/NYCE PPO).
-//   8) Visit type "LAB" (if the appointment caption ever renders that way)
-//      now always resolves to 99212.
-//   9) Televisit office-visit code: CC mentioning "med refill"/
-//      "medication refill" now resolves to 99212; otherwise 99213
-//      (previously always 99213 regardless of CC). Also fixed in this
-//      same pass: televisit detection (both this rule and the 95/25
-//      modifier rule below) was keyed off CPT 98012, which this client
-//      doesn't use — it's now keyed off the appointment caption's visit
-//      type instead (CON = televisit), matching how Bronx's schedule
-//      actually marks a televisit. A CON visit with CPT 95251 and no
-//      98012 was previously missed entirely by both rules.
-//   10/15/16) CPT 99173 (visual acuity/vision) rule fully removed —
-//      Analyze's own 99173 add/delete logic, the Auto Link "eyeExam"
-//      linking type + its eye-ICD detector + preventive-Z-code list, the
-//      99173 entries in both the Auto Link and Claim Link rule tables, and
-//      the 8-prefix-deletion module's H53.8 companion add are all gone.
-//   11) "8 related codes" deletion removed — the CPT-code-starting-with-8
-//      auto-delete (and its Z13.88 auto-add) is gone from both Analyze and
-//      the Auto Link button; codes starting with '8' are no longer touched
-//      by this script at all.
-//   28) Televisit modifier rule: when CPT 95251 is present, the office-
-//      visit code's mod1 keeps its existing value (95, or 93 for
-//      Healthfirst/MetroPlus/Fidelis) and now also gets mod2 = 25. Without
-//      95251, only mod1 is set, same as before.
-//   29) Insurance name space-variant handling: the Claim Link telehealth-
-//      POS rule for Healthfirst/Fidelis/MetroPlus now matches "Health
-//      First" and "Metro Plus" (with a space) the same as the one-word
-//      spelling — it previously only matched the exact one-word form.
-//   Everything else on the rule sheet (BMI, Depression/Alcohol/Tobacco/
-//   Social/UHC screening shape, age-based correction rules, L21.0/L21.9,
-//   NP/99203, the F/U cascade, 99214 ICD exclusions, mismatch cleanup,
-//   vaccine admin, quick actions, the high-level blocker, mutual cleanup
-//   between buttons, Claim Link rules, and commercial-payer suppression)
-//   was reviewed against the sheet and left untouched — current behavior
-//   already matches, per the sheet's own "as is" / "probably already
-//   implemented" notes for those items.
-// 1.34 (2026-08-09) - Three changes:
-//   1) Alcohol screening: found the actual rule behind more reported
-//      mismatches — eCW's own "Interpretation: Negative/Positive" label on
-//      an Alcohol Screen/AUDIT-C is NOT what should drive the flag. Verified
-//      against real Bronx charts that "Points: 1, Interpretation: Negative"
-//      is treated as a POSITIVE screen (any reported use counts), while
-//      "Points: 0" is negative regardless of whether an Interpretation line
-//      is even present. New priority: an explicit "Did you have a drink...
-//      Yes/No" answer wins outright when present; otherwise the raw Points
-//      value (>0 = positive, 0 = negative); Interpretation is now only a
-//      last-resort fallback when neither of those exists. Also fixed a
-//      structured-text extraction bug where a blank single-category Tobacco
-//      widget immediately followed by a separate Social Determinants widget
-//      on the same note could glue that widget's header text onto the
-//      tobacco section and turn "no answer at all" into a false negative
-//      result — the ".cattablink" tab header is now stripped out for every
-//      category, same as the freetext narrative already was.
-//   2) Patient History module: added the chronic-disease ICD highlighting
-//      (amber, ⚠) on the CURRENT encounter's card only — same watch-list
-//      used by the 99214 rule below, so the two features can never
-//      disagree about what counts as chronic. Past-encounter cards are
-//      never highlighted, only today's.
-//   3) 99214 E&M rule rebuilt per updated criteria: now qualifies with as
-//      little as ONE chronic-disease diagnosis on the chart, no matter how
-//      many other (non-chronic) diagnoses are also present — the old 4+
-//      total-diagnosis-count requirement is removed — and the "already
-//      billed" lookback window is now 7 days (was 30).
-// 1.33 (2026-08-08) - Rebuilt Tobacco/Alcohol/Social-screening detection
-//   from real Bronx chart examples (Migrated Social History + PRAPARE +
-//   Alcohol Screen/AUDIT-C + Tobacco Control widgets). Found and fixed the
-//   actual bug behind the reported false positives: the smoker-detection
-//   regex's negation list was missing "never", so "Never smoker" — the
-//   single most common structured Tobacco Use answer in this data — was
-//   being read as a bare, unnegated "smoker" mention and flagged as an
-//   active smoker. Also fixed unbounded "Social History:"/"Drugs/Alcohol:"
-//   text extraction that had no real stop boundary in Bronx's flattened
-//   widget format and could run to the end of the note, picking up
-//   unrelated words. Detection now reads only the structured screening-
-//   widget answers (DOM-scoped, freetext "leftPaneData" narrative
-//   excluded — that freetext can restate or flatly contradict the actual
-//   screening result) and anchors each answer to the next known category
-//   label instead of a SOAP heading that doesn't exist in this format.
-//   Added Social Determinants/PRAPARE detection (Bronx's actual social-
-//   screening questionnaire; the old code only looked for "SCN Screening"
-//   phrasing, which never appears in Bronx's notes at all). Depression
-//   (PHQ-9) detection is unchanged — same shape held up fine against
-//   these examples. Falls back to a bounded plain-text scan only when no
-//   structured widgets are present on the note at all. Runs automatically,
-//   same as everything else in this module; wrapped so a bad parse can
-//   only fall back to "no data" (null/grey chip) rather than throw.
-// 1.32 (2026-08-08) - Added Module 3: automatic PN/coding modal resize
-//   (#mainPNDialog) for Bronx, folded in from the standalone "eCW PN Modal
-//   Resize" script. Bronx's coding modal renders bigger than our other
-//   client sites, which was the root cause of the blank space around the
-//   note/coding grid (and, downstream, the Coding Snapshot panel not
-//   having sane room to sit in). Shrinks the dialog to a fixed, readable
-//   size with a safe minimum and keeps the body height in sync, the
-//   moment the modal opens for any patient — fully automatic, no per-
-//   patient action needed. Debounced to one layout pass per animation
-//   frame (the original standalone script re-ran on every single DOM
-//   mutation, which is what caused lag on a big note) and wrapped
-//   defensively so it can never break the page or the update loop.
-// 1.31 (2026-08-08) - Fixed Coding Snapshot floating window sizing on Bronx's
-//   coding tab: the panel now auto-fits its content (flex layout + internal
-//   scroll on #ecsBody) instead of leaving blank space or overflowing off
-//   screen, and re-clamps itself into the viewport on every render and on
-//   window resize. Runs automatically whenever a patient is opened; wrapped
-//   defensively so a layout hiccup can never break the panel or the update loop.
-// 1.30 (2026-08-03) - Added Weekend toggle beside CURRENT ENCOUNTER. Auto-detects
-//   Sat/Sun or a 2026-2029 federal holiday from the DOS, manually overridable.
-//   When on, CPT 99051 is added unless Preventive, Preventive Counseling, or
-//   Obesity is on the chart (Smoking is still allowed alongside 99051).
+// CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.45 (2026-08-10) - Fixed pediatric Obesity Counseling gating. Patients
+//   under 18 now use documented BMI percentile >=95 instead of adult BMI >=30;
+//   missing pediatric percentile does not block OB. Adult behavior unchanged.
+//   Bronx has no secondary BMI<30 action guard. ICD behavior unchanged (E66.9;
+//   Z68 remains adult-only). Tested pediatric high/low/missing percentile and
+//   adults above/below BMI 30. Same core fix: Hasan 1.68, Getwell 5.31.
+//
+// 1.44 (2026-08-10) - Analyze now removes orphaned preventive bundles:
+//   Z00.01/Z00.121 without preventive/AWV; Z68.xx without preventive or G0447;
+//   Z71.3/Z71.82/Z71.89 without preventive or 99401. Existing add/correction
+//   behavior is unchanged. Branch scenarios tested. Same fix: Hasan 1.67.
+//
+// 1.43 (2026-08-10) - Expanded isUHCInsurance() using normalized payer names.
+//   Matches names starting with "United" plus Surest, AARP Supplemental,
+//   Golden Rule, UMR, Preferred Care Partners, HPN/Sierra, Medica, All Savers,
+//   NHP, Oxford, FlexWork and USNAS. Affects annual G-code eligibility and P/C
+//   blocking. Verified against 20+ UHC variants and non-UHC controls. Same core
+//   fix: Hasan 1.65/1.66, Getwell 5.28/5.29.
+//
+// 1.42 (2026-08-10) - P/C quick action now requires a chronic ICD on the current
+//   encounter, using CHRONIC_DISEASE_ICD_CODES. Click-time gating inherits the
+//   check. Same fix: Hasan 1.64, Getwell 5.27.
+//
+// 1.41 (2026-08-10) - Patient History now extracts Visit/Procedure Codes from
+//   alternate merged-cell templates by parsing <br>-separated values. Excludes
+//   prisma-section SOAP tables to avoid merged bogus codes. Standard-template
+//   output unchanged; exception sample now returns 99213, 99395 and 13 procedure
+//   codes. Same parser: Hasan 1.63, Getwell 5.26.
+//
+// 1.40 (2026-08-10) - Added render- and click-time quick-action gating:
+//   PV (annual preventive/AWV or televisit); P/C (30-day preventive/99401,
+//   blocked payer or televisit); SM (not smoker, 30-day 99406 or televisit);
+//   OB (BMI rule, 30-day G0447, Medicaid or televisit). New patients allow PV
+//   only. Normalized insurance whitespace. Vaccine admin codes are no longer
+//   removed when no vaccine product code exists; cleanup runs only when a
+//   product code is present.
+//
+// 1.39 (2026-08-10) - Broadened televisit refill detection (refill, renewal,
+//   medication/med review). CC is split by commas/semicolons; 99212 is used only
+//   when every segment is refill-related. Any unrelated complaint uses 99213.
+//
+// 1.38 (2026-08-10) - Rule-sheet update: removed cancer-screening add/delete
+//   (3014F/3015F/3017F linking retained); Empire alcohol/tobacco removal limited
+//   to televisits; protected 99204/99205/99215; added modifier 59 to G0444,
+//   G0442, 96127, 96372 and Q0091 when no modifier exists; fixed 90686 typo in
+//   90686/90688 -> 90656 replacement; removed annual BP-code gate; tightened
+//   refill-only 99212 logic; added QW to the fixed lab-code list.
+//
+// 1.37 (2026-08-09) - Corrected 1.36: removed payer-specific modifier 93.
+//   All Bronx televisits use modifier 95; with 95251, use 95 + 25. Expanded
+//   refill variants and full-note detection. This is the final modifier state.
+//
+// 1.36 (2026-08-09) - Fixed CON televisit detection: use appointment visit type
+//   instead of CPT 98012 for E&M and modifier logic. A CON visit with 95251 now
+//   resolves correctly. Modifier details were subsequently finalized in 1.37.
+//
+// 1.35 (2026-08-09) - Applied Bronx rule sheet: fully removed Weekend/Holiday
+//   and 99051 logic/UI; BP codes require "Controlling BP" + BP value + I10
+//   (annual gate later removed in 1.38); add Z13.6 for 93000 when no linkable ICD;
+//   added Clover to G0438/G0439 logic and Molina to P/C-blocked payers; LAB visit
+//   -> 99212; CON refill -> 99212, otherwise 99213; removed all 99173 logic;
+//   removed auto-delete of CPT codes starting with 8 and Z13.88 auto-add;
+//   added 95251 telehealth modifier 25; expanded spaced payer-name matching.
+//
+// 1.34 (2026-08-09) - Alcohol result priority is explicit Yes/No, then Points
+//   (>0 positive, 0 negative), then Interpretation. Prevented adjacent widget
+//   headers from contaminating tobacco parsing. Added current-encounter chronic
+//   ICD highlighting. 99214 now needs >=1 chronic ICD; lookback reduced 30 -> 7
+//   days.
+//
+// 1.33 (2026-08-08) - Rebuilt Tobacco/Alcohol/Social detection from structured
+//   Bronx widgets. Fixed "Never smoker" false positive and unbounded extraction;
+//   excluded contradictory freetext; added PRAPARE/Social Determinants parsing.
+//   Uses bounded text fallback only when structured widgets are absent.
+//
+// 1.32 (2026-08-08) - Added automatic #mainPNDialog resize with fixed/safe
+//   dimensions and synchronized body height. Debounced to one animation-frame
+//   layout pass and wrapped defensively.
+//
+// 1.31 (2026-08-08) - Coding Snapshot now auto-fits content, scrolls internally
+//   and re-clamps to the viewport on render/resize.
+//
+// 1.30 (2026-08-03) - Added Weekend/Holiday toggle and 99051 logic.
+//   SUPERSEDED: feature and all 99051 references were fully removed in 1.35.
 
 
 /* ============================================================
@@ -2284,17 +2061,44 @@
             }
         }
 
-        // ---- BMI Z68.xx ICD code: add if missing, fix if wrong ----
+        // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
+        // isn't on the chart. These two are the age-split "well visit"
+        // diagnosis codes that only belong alongside a Preventive E&M/AWV
+        // code (993xx or G0438/G0439) — same pairing the quick-action
+        // buttons already enforce via clearOtherQuickActionBundles(), now
+        // also enforced here so it's caught by the regular Analyze/Start
+        // Action flow, not just when a quick-action button is clicked. ----
+        if (!hasPreventiveVisit) {
+            const preventiveBundleEntries = getICDRows().filter(e =>
+                e.code.toUpperCase() === 'Z00.01' || e.code.toUpperCase() === 'Z00.121');
+            preventiveBundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present this encounter — preventive bundle ICD not applicable' });
+            });
+        }
+
+        // ---- BMI Z68.xx ICD code: add if missing, fix if wrong, delete if
+        // no longer needed ----
         // The correct Z68.xx code is added if it's not already on the ICD
         // list, and any OTHER Z68.xx code (wrong value, including an
         // adult-format code like Z68.28 wrongly used on a pediatric
         // chart) gets proposed for removal — same Analyze/Start Action
         // flow as everything else, not just the quick-action buttons.
+        // BMI is only "needed" for this encounter if either a Preventive
+        // visit is present OR Obesity Counseling (G0447) is on the chart
+        // (Obesity's own gating already depends on BMI, per
+        // computeQuickActionGating's BMI<30 fade rule) — if neither
+        // applies, any existing Z68.xx is proposed for deletion instead of
+        // being corrected/kept.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
-        if (correctZ68) {
-            const icdEntriesForBMI = getICDRows();
-            const currentZ68Entries = icdEntriesForBMI.filter(e => /^Z68\./i.test(e.code));
+        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447');
+        const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
+        const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
+        if (!bmiZ68StillNeeded) {
+            currentZ68Entries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present and Obesity not billed — BMI code not needed' });
+            });
+        } else if (correctZ68) {
             const hasCorrectZ68 = currentZ68Entries.some(e => e.code.toUpperCase() === correctZ68.toUpperCase());
             // Rule 1: no Z68.xx present at all → don't add it, unless a
             // preventive visit is being applied this encounter. A WRONG
@@ -2346,25 +2150,42 @@
             }
         }
 
-        // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
-        // Only corrects this when one of the two is ALREADY on the chart
-        // (added earlier by Preventive/Preventive Counsel) — this doesn't
-        // introduce the code to charts that never had it, it just keeps an
-        // existing one in sync as the ICD list changes (e.g. asthma gets
-        // added later and Z71.82 should become Z71.89).
-        const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
-        if (z71Entries.length) {
-            const ccTextForZ71 = getChiefComplaintTextFast(text);
-            const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
-            const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
-            if (!hasCorrectZ71) {
-                toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
-            }
-            z71Entries.forEach(e => {
-                if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
-                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
-                }
+        // ---- Preventive/P-C counseling bundle (Z71.3, Z71.82/89): keep only
+        // if Preventive OR Preventive Counseling (99401) is on the chart;
+        // delete the whole bundle if NEITHER is present ----
+        // These three ICDs are shared between the Preventive (PV) and
+        // Preventive Counseling (P/C) bundles (see the quick-action
+        // clearOtherQuickActionBundles() comment above) — they only belong
+        // on the chart when one of those two is actually being billed.
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
+        if (!z71BundleNeeded) {
+            const z71BundleEntries = getICDRows().filter(e =>
+                ['Z71.3', 'Z71.82', 'Z71.89'].includes(e.code.toUpperCase()));
+            z71BundleEntries.forEach(e => {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Neither Preventive nor Preventive Counseling present — counseling bundle ICD not applicable' });
             });
+        } else {
+            // ---- Z71.82 vs Z71.89 (exercise vs other counseling): fix if wrong ----
+            // Only corrects this when one of the two is ALREADY on the chart
+            // (added earlier by Preventive/Preventive Counsel) — this doesn't
+            // introduce the code to charts that never had it, it just keeps an
+            // existing one in sync as the ICD list changes (e.g. asthma gets
+            // added later and Z71.82 should become Z71.89).
+            const z71Entries = getICDRows().filter(e => e.code.toUpperCase() === 'Z71.82' || e.code.toUpperCase() === 'Z71.89');
+            if (z71Entries.length) {
+                const ccTextForZ71 = getChiefComplaintTextFast(text);
+                const correctZ71 = determineZ71CodeFast(age, gender, ccTextForZ71, getICDRows());
+                const hasCorrectZ71 = z71Entries.some(e => e.code.toUpperCase() === correctZ71.toUpperCase());
+                if (!hasCorrectZ71) {
+                    toAdd.push({ code: correctZ71, reason: 'Z71.82/89 correction based on current CC/ICD/age/gender criteria', kind: 'icd' });
+                }
+                z71Entries.forEach(e => {
+                    if (e.code.toUpperCase() !== correctZ71.toUpperCase()) {
+                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: `Wrong counseling code (should be ${correctZ71})` });
+                    }
+                });
+            }
         }
 
         // ---- Office Visit E&M code ----
@@ -3228,7 +3049,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "al_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "al_officeVisit" },
             "99211": { type: "al_officeVisit" },
@@ -4317,7 +4138,7 @@
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
-            "3014F": { type: "exact", icds: ["Z71.2"], fallback: "cl_officeVisit" },
+            "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
             "3017F": { type: "multiICD", icds: [["Z12.11","Z71.2"]], fallback: "cl_officeVisit" },
             "99211": { type: "cl_officeVisit" },
@@ -4932,10 +4753,30 @@
         }
 
         // ---- OB: Obesity Counseling ----
+        // Pediatric (under 18) uses BMI-for-age PERCENTILE, not raw adult
+        // BMI — a raw BMI number is meaningless on the adult 30-cutoff
+        // scale for a child (e.g. a raw BMI of 22 can be the 95th
+        // percentile — obese — for a young child, while reading as
+        // "normal" if wrongly compared to the adult threshold). This was
+        // wrongly blocking Obesity Counseling for pediatric patients who
+        // ARE obese by pediatric standards. Applies at the 95th percentile
+        // per CDC pediatric BMI-for-age classification. If a pediatric
+        // patient has no BMI percentile documented, BMI doesn't block OB
+        // here at all (falls through to the other conditions below)
+        // rather than wrongly falling back to the adult scale. Adults keep
+        // the existing raw-BMI<30 rule, unchanged.
+        const obAge = getAgeAtDOS(text) ?? 0;
         const obBmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
+        const obBmiPercentile = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i)) || null;
+        const obBmiBlocked = obAge < 18
+            ? (obBmiPercentile != null && obBmiPercentile < 95)
+            : (obBmi != null && obBmi < 30);
+        const obBmiBlockTitle = obAge < 18
+            ? `Obesity Counseling not applicable — BMI percentile ${obBmiPercentile}% is under the 95th percentile`
+            : `Obesity Counseling not applicable — BMI ${obBmi} is under 30`;
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmi != null && obBmi < 30) {
-            ob = { disabled: true, title: `Obesity Counseling not applicable — BMI ${obBmi} is under 30` };
+        if (obBmiBlocked) {
+            ob = { disabled: true, title: obBmiBlockTitle };
         } else if (codeUsedInLastDays('G0447', 30)) {
             ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
         } else if (insuranceNorm && /medicaid/i.test(insuranceNorm)) {
