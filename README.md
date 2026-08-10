@@ -22,7 +22,7 @@ Tampermonkey will show an installation page. Install only this common loader and
 - On first use, the loader automatically selects a client when the current eCW hostname matches that client's metadata. The dropdown remains available for manual changes.
 
 Current automatic site mappings:
-
+- `ynfexq7i5dh95jitbvapp.ecwcloud.com` → Bronx Health Wellness
 - `nyshpyapp.eclinicalweb.com` → Hasan Sheikh
 - `nygwmcapp.eclinicalweb.com` → Getwell
 
