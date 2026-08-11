@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.33
+// @name         Getwell SmartCoder by ATQ v5.34
 // @namespace    http://tampermonkey.net/
-// @version      5.33
+// @version      5.34
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.34 (2026-08-11) - G0444/G0442 (annual depression/alcohol screening):
+//   added the missing "already billed this year -> delete" half of the
+//   rule (ported from Hasan Sheikh 1.70). The add side was already correct
+//   (only added when NOT already billed this calendar year AND age/other
+//   eligibility met; otherwise never added) — but if one was already
+//   sitting on THIS chart while a PRIOR encounter this same year had
+//   already billed it, nothing ever removed it (both codes are
+//   deliberately excluded from MANAGED_CODES). Now that case gets deleted
+//   outright too.
 //
 // 5.33 (2026-08-11) - Age gates for depression/alcohol/smoking screening
 //   codes and their positive/negative result codes (ported from Hasan
@@ -2056,6 +2066,23 @@
                 const row = getCPTRowByCode('G0444');
                 if (row) toDelete.push({ code: 'G0444', row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
             }
+        }
+
+        // ---- G0444/G0442: already billed this calendar year -> delete ----
+        // The add gate above (annualGCodesEligible + !codeUsedInYear)
+        // already correctly prevents ADDING one that was already billed
+        // this year — but nothing ever DELETED one that's already sitting
+        // on the current chart from a prior encounter this same year (both
+        // are deliberately excluded from MANAGED_CODES). Closes that gap.
+        {
+            const dosYearForAnnualGCodes = getCurrentDosYear();
+            ['G0444', 'G0442'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code) &&
+                    codeUsedInYear(code, dosYearForAnnualGCodes)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} already billed this calendar year — can't bill again` });
+                }
+            });
         }
 
         // ---- Diff against current chart ----
