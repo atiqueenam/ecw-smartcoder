@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.68
+// @name         Hasan Sheikh SmartCoder v1.70
 // @namespace    http://tampermonkey.net/
-// @version      1.68
+// @version      1.70
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,32 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.70 (2026-08-11) - G0444/G0442 (annual depression/alcohol screening):
+//   added the missing "already billed this year -> delete" half of the
+//   rule. The add side was already correct (only added when NOT already
+//   billed this calendar year AND a preventive visit is present this
+//   encounter; otherwise never added) — but if one was already sitting on
+//   THIS chart while a PRIOR encounter this same year had already billed
+//   it, nothing ever removed it (both codes are deliberately excluded
+//   from MANAGED_CODES). Now that case gets deleted outright too,
+//   regardless of whether a preventive visit is present this encounter.
+//
+// 1.69 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
+//   cleanup, not just an add-guard. Whenever a quick-action button is
+//   faded — for ANY of its existing reasons (already billed this year/30
+//   days, wrong insurance, no chronic dx this encounter, not a confirmed
+//   smoker, BMI doesn't qualify, new patient, televisit, etc.) — that
+//   bundle's own CPT code is deleted if already on the chart: PV faded ->
+//   993xx/G0438/G0439 removed; PC faded -> 99401 removed; SM faded ->
+//   99406 removed; OB faded -> G0447 removed. A televisit disables all
+//   four buttons already (see computeQuickActionGating), so no Preventive
+//   or Preventive Counseling code can survive a televisit either.
+//   Existing hasPreventiveVisit/has99401ForZ71/hasObesityCPTForBMI logic
+//   now reads through this same gating, so the linked ICDs (Z00.01/
+//   Z00.121, Z71.3/Z71.82/Z71.89, BMI Z68.xx) cascade-delete automatically
+//   too — Z68.xx is only removed if neither the PV nor the (now-cleaned)
+//   OB bundle still needs it. Same fix ported from Bronx 1.47/Getwell 5.32.
 //
 // 1.68 (2026-08-10) - Fixed pediatric OB gating in both button and action
 //   guards. Under 18 uses documented BMI percentile >=95; missing percentile
@@ -1652,6 +1678,24 @@
             .filter(Boolean);
         const rawCPTCodeSet = new Set(rawCPTCodesNow);
 
+        // Televisit is determined the same way isTelevisitNow(text) does
+        // for the quick-action buttons (98012 CPT present, or "televisit"
+        // mentioned in the HPI). Computed early because it also gates
+        // whether any Preventive/Preventive-Counseling bundle (CPT +
+        // linked ICDs) is allowed to remain on the chart below.
+        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
+
+        // Single source of truth for whether each of the 4 quick-action
+        // buttons (PV/PC/SM/OB) is currently allowed to fire — same
+        // function that fades/enables them in the floating panel. Reusing
+        // it here means "button faded" and "code gets cleaned off the
+        // chart" can never drift apart: whatever reason disables a button
+        // (already billed this year/30 days, wrong insurance, no chronic
+        // dx, not a confirmed smoker, BMI doesn't qualify, new patient,
+        // televisit, etc.) also disqualifies that bundle's codes from
+        // staying on THIS chart.
+        const gating = computeQuickActionGating(insurance, flags, text);
+
         // Whether a preventive visit code is on this chart — several
         // other rules below (G0444/G0442, BMI CPTs) are gated on this.
         const PREVENTIVE_VISIT_CODES = new Set([
@@ -1659,7 +1703,44 @@
             '99391', '99392', '99393', '99394', '99395', '99396', '99397',
             'G0438', 'G0439'
         ]);
-        const hasPreventiveVisit = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        const hasPreventiveVisitRaw = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        // If the PV button is faded (for ANY reason — already billed this
+        // year, televisit, etc.) an already-present preventive code no
+        // longer counts for downstream bundle logic; the code itself is
+        // deleted below, right alongside its linked ICDs.
+        const hasPreventiveVisit = hasPreventiveVisitRaw && !gating.pv.disabled;
+
+        // ---- Quick-action gating cleanup ----
+        // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
+        // if it's already sitting on the chart. Linked ICDs (Z00.01/
+        // Z00.121, Z71.3/Z71.82/Z71.89, BMI Z68.xx) are handled further
+        // down by the existing hasPreventiveVisit/has99401ForZ71/
+        // hasObesityCPTForBMI-driven logic, which now folds this gating in
+        // too — so a faded button cascades into ICDs automatically without
+        // duplicating the "still needed?" rules here.
+        // Collected here (before `toDelete` exists yet below) and merged in
+        // once `toDelete` is declared.
+        const gatedBundleCPTDeletes = [];
+        function deleteBundleCPTIfPresent(codes, reason) {
+            getCPTRows().forEach(r => {
+                const code = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+                if (codes.includes(code) && !gatedBundleCPTDeletes.some(d => d.code === code)) {
+                    gatedBundleCPTDeletes.push({ code, row: r, kind: 'cpt', reason });
+                }
+            });
+        }
+        if (gating.pv.disabled) {
+            deleteBundleCPTIfPresent([...PREVENTIVE_VISIT_CODES], `Preventive not applicable — ${gating.pv.title}`);
+        }
+        if (gating.pc.disabled) {
+            deleteBundleCPTIfPresent(['99401'], `Preventive Counseling not applicable — ${gating.pc.title}`);
+        }
+        if (gating.sm.disabled) {
+            deleteBundleCPTIfPresent(['99406'], `Smoking Counseling not applicable — ${gating.sm.title}`);
+        }
+        if (gating.ob.disabled) {
+            deleteBundleCPTIfPresent(['G0447'], `Obesity Counseling not applicable — ${gating.ob.title}`);
+        }
 
         const desired = new Map(); // code -> reason
 
@@ -1926,9 +2007,9 @@
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
-        const toDelete = [];
+        const toDelete = [...gatedBundleCPTDeletes];
         currentRows.forEach(r => {
-            if (MANAGED_CODES.has(r.code) && !desired.has(r.code)) {
+            if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                 const reason = exclusionReasons.get(r.code) || 'Not applicable / wrong value for current chart';
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason });
             }
@@ -1991,7 +2072,7 @@
         // being corrected/kept.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
-        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447');
+        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
         const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
@@ -2057,7 +2138,7 @@
         // Preventive Counseling (P/C) bundles (see the quick-action
         // clearOtherQuickActionBundles() comment above) — they only belong
         // on the chart when one of those two is actually being billed.
-        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401') && !gating.pc.disabled;
         const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
         if (!z71BundleNeeded) {
             const z71BundleEntries = getICDRows().filter(e =>
@@ -2094,9 +2175,11 @@
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
 
-        // Used for rule 6.v below (televisit ESTPT visits always use 99213).
-        // No longer used for 1157F/1158F — those have no televisit rule.
-        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
+        // isTelevisitNote is computed earlier in this function (see above,
+        // right before hasPreventiveVisit) so it can also gate the
+        // Preventive/Preventive-Counseling bundle cleanup. Used for rule
+        // 6.v below (televisit ESTPT visits always use 99213). No longer
+        // used for 1157F/1158F — those have no televisit rule.
 
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
@@ -2247,6 +2330,26 @@
                 if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
                     const row = getCPTRowByCode(code);
                     if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
+                }
+            });
+        }
+
+        // ---- G0444/G0442: already billed this calendar year -> delete ----
+        // Mirrors the add rule above (only added when NOT already billed
+        // this year, per codeUsedInYear). If one is already on THIS chart
+        // but a PRIOR encounter this same calendar year already billed it,
+        // it can't be billed again — deleted outright regardless of
+        // whether a preventive visit is present this encounter. Excluded
+        // from MANAGED_CODES on purpose (see the age-cleanup comment
+        // above), so this is the only path that catches this specific
+        // case.
+        {
+            const dosYearForAnnualGCodes = getCurrentDosYear();
+            ['G0444', 'G0442'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code) &&
+                    codeUsedInYear(code, dosYearForAnnualGCodes)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} already billed this calendar year — can't bill again` });
                 }
             });
         }
