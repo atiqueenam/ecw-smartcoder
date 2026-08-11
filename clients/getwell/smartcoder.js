@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.34
+// @name         Getwell SmartCoder by ATQ v5.35
 // @namespace    http://tampermonkey.net/
-// @version      5.34
+// @version      5.35
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,23 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.35 (2026-08-11) - CRITICAL BUG FIX: "ANALYZE FAILED — Cannot access
+//   'toDelete' before initialization" for any Medicaid/Medicare-type payer
+//   (e.g. Metroplus). Root cause was PRE-EXISTING, from before any of this
+//   conversation's changes: the Medicaid/Medicare G0444/G0442 deletion
+//   block referenced `toDelete.push`/`toDelete.some`, but `const toDelete`
+//   wasn't declared until much further down in computeAnalysis — a
+//   temporal-dead-zone ReferenceError that fired on every single Analyze
+//   run for that payer type, 100% reproducible, not intermittent. The two
+//   blocks added in 5.34 (age cleanup, annual-billed-this-year cleanup)
+//   were written adjacent to that same pre-existing block and inherited
+//   the same bug, compounding it. Fixed by moving `const toDelete =
+//   [...gatedBundleCPTDeletes]` up to right after gatedBundleCPTDeletes is
+//   fully populated (before any of these three cleanup blocks run) and
+//   removing the now-duplicate later declaration. No behavior changes —
+//   this is purely a declaration-order fix. Verified no remaining
+//   toDelete usage precedes its declaration anywhere in the function.
 //
 // 5.34 (2026-08-11) - G0444/G0442 (annual depression/alcohol screening):
 //   added the missing "already billed this year -> delete" half of the
@@ -1810,6 +1827,16 @@
             deleteBundleCPTIfPresent(['G0447'], `Obesity Counseling not applicable — ${gating.ob.title}`);
         }
 
+        // Declared here (not further down where it conceptually "belongs")
+        // because several blocks below — the Medicaid/Medicare G0444/G0442
+        // block, the age-cleanup block, and the annual-billed-G-code block —
+        // all push onto toDelete before the main MANAGED_CODES diff runs.
+        // Declaring it later as `const toDelete = [...]` left those earlier
+        // blocks referencing it inside its temporal dead zone, throwing
+        // "Cannot access 'toDelete' before initialization" (ANALYZE FAILED)
+        // for any Medicaid/Medicare-type payer (e.g. Metroplus).
+        const toDelete = [...gatedBundleCPTDeletes];
+
         const desired = new Map(); // code -> reason
 
         // Pap smear (Q0091/G0101), Advance Care (99497), TCM/Post-Hosp
@@ -2118,7 +2145,6 @@
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
-        const toDelete = [...gatedBundleCPTDeletes];
         currentRows.forEach(r => {
             if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Not applicable / wrong value for current chart' });
