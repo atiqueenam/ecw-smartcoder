@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.70
+// @name         Hasan Sheikh SmartCoder v1.71
 // @namespace    http://tampermonkey.net/
-// @version      1.70
+// @version      1.71
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,23 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.71 (2026-08-11) - Manual-action popup non-interference (ported from
+//   Bronx 1.51/1.52): dismissEcwErrorPopup() and
+//   dismissAssociatedCPTModalIfPresent() ran on their own persistent
+//   setInterval(1800ms) completely independent of what the extension was
+//   doing, so a manual "Are you sure you want to remove this ICD?"
+//   confirmation (which reuses eCW's generic "eClinicalWorks" modal title)
+//   could get silently force-closed via its close/X button before the user
+//   could answer it. Added a new extensionBusy flag, set true only while
+//   al_mainFlow (Auto Link) or cl_mainFlow (Claim Link) is actively
+//   running, and gated BOTH dismiss helpers on
+//   (quickActionRunning || actionRunning || extensionBusy) so they now do
+//   nothing at all unless the extension itself triggered the popup. Also
+//   added a Yes/No-button check inside dismissEcwErrorPopup as a second,
+//   independent safeguard (matches Getwell's existing design) so a real
+//   confirmation dialog is left alone even if it happens to appear while
+//   extensionBusy is true.
 //
 // 1.70 (2026-08-11) - G0444/G0442 (annual depression/alcohol screening):
 //   added the missing "already billed this year -> delete" half of the
@@ -413,6 +430,11 @@
     let analysisState = null;   // { toAdd:[{code,reason}], toDelete:[{code,row,reason}] }
     let analysisRunning = false;
     let actionRunning = false;
+    // True only while Auto Link (al_mainFlow) or Claim Link (cl_mainFlow) is
+    // actively running. Used exclusively to gate the popup-dismiss helpers
+    // below so they never touch a dialog the user opened manually — only
+    // dialogs that pop up as a side effect of the extension's own actions.
+    let extensionBusy = false;
     let actionLog = [];         // [{code, action:'add'|'delete', status:'success'|'fail', message}]
 
     // Caches SOAP-note text from the last time it was visible (billing tab
@@ -3084,8 +3106,7 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
@@ -3777,20 +3798,32 @@
     }
 
     function al_mainFlow() {
+        extensionBusy = true;
+        // Hard safety net: the delete/add chain above is a long chain of
+        // setTimeout-spaced async steps, so if something throws or a step
+        // never calls its callback, don't leave extensionBusy stuck true
+        // forever (that would make the popup-dismiss helpers permanently
+        // deaf to the extension's own dialogs).
+        const extensionBusyFallback = setTimeout(() => { extensionBusy = false; }, 20000);
         al_deleteUnwantedCodes(() => {
-            const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
-            const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-            al_linkCPTGeneric(icdRows, cptRows);
-            al_handleUnlistedCPTs(cptRows);
-            al_applySLModifierForPedsVaccines();
-            al_applyTelevisitModifier();
-            al_apply59ModifierFor96372();
-            al_apply25ModifierFor99211();
-            al_alertDuplicateICDStart(icdRows);
-            al_alertDuplicateCPT(cptRows);
-            al_validatePreventiveCPT(cptRows);
-            al_checkChronicDiseaseCountFor99214(icdRows);
-            al_checkForL21(icdRows);
+            try {
+                const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
+                const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+                al_linkCPTGeneric(icdRows, cptRows);
+                al_handleUnlistedCPTs(cptRows);
+                al_applySLModifierForPedsVaccines();
+                al_applyTelevisitModifier();
+                al_apply59ModifierFor96372();
+                al_apply25ModifierFor99211();
+                al_alertDuplicateICDStart(icdRows);
+                al_alertDuplicateCPT(cptRows);
+                al_validatePreventiveCPT(cptRows);
+                al_checkChronicDiseaseCountFor99214(icdRows);
+                al_checkForL21(icdRows);
+            } finally {
+                clearTimeout(extensionBusyFallback);
+                extensionBusy = false;
+            }
         });
     }
 
@@ -4266,8 +4299,7 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
@@ -4750,29 +4782,34 @@
 
     // ─── Main Flow ─────────────────────────────────────────────────────
     function cl_mainFlow() {
-        const icdRows = cl_getICDRows();
-        const cptRows = cl_getCPTRows();
+        extensionBusy = true;
+        try {
+            const icdRows = cl_getICDRows();
+            const cptRows = cl_getCPTRows();
 
-        cl_linkCPTGeneric(icdRows, cptRows);
-        cl_handleUnlistedCPTs(cptRows);
-        cl_fixZeroBilledFee(cptRows);
-        cl_alertDuplicateICDStart(icdRows);
-        cl_checkICDOrderZBeforeDx(icdRows);
-        cl_alertDuplicateCPT(cptRows);
-        cl_validatePreventiveCPT(cptRows);
-        cl_checkChronicDiseaseCountFor99214(icdRows);
-        cl_checkForL21(icdRows);
-        cl_checkForFluVaccineCPTs(cptRows);
-        cl_checkMedicarePreventiveCPT(cptRows);
-        cl_checkMedicaidCPTCount(cptRows);
-        cl_apply59ModifierFor96372(cptRows);
-        cl_apply25ModifierFor99211(cptRows);
-        cl_applyTelevisitModifier(cptRows);
-        cl_applyHealthfirstTelehealthPOS(cptRows);
-        cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
-        cl_applyMedicaidTelehealthPOS(cptRows);
-        cl_applyOtherInsuranceTelehealthPOS(cptRows);
-        cl_fillBlankTOS(cptRows);
+            cl_linkCPTGeneric(icdRows, cptRows);
+            cl_handleUnlistedCPTs(cptRows);
+            cl_fixZeroBilledFee(cptRows);
+            cl_alertDuplicateICDStart(icdRows);
+            cl_checkICDOrderZBeforeDx(icdRows);
+            cl_alertDuplicateCPT(cptRows);
+            cl_validatePreventiveCPT(cptRows);
+            cl_checkChronicDiseaseCountFor99214(icdRows);
+            cl_checkForL21(icdRows);
+            cl_checkForFluVaccineCPTs(cptRows);
+            cl_checkMedicarePreventiveCPT(cptRows);
+            cl_checkMedicaidCPTCount(cptRows);
+            cl_apply59ModifierFor96372(cptRows);
+            cl_apply25ModifierFor99211(cptRows);
+            cl_applyTelevisitModifier(cptRows);
+            cl_applyHealthfirstTelehealthPOS(cptRows);
+            cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
+            cl_applyMedicaidTelehealthPOS(cptRows);
+            cl_applyOtherInsuranceTelehealthPOS(cptRows);
+            cl_fillBlankTOS(cptRows);
+        } finally {
+            extensionBusy = false;
+        }
     }
 
 
@@ -5777,6 +5814,12 @@
     // elsewhere in eCW's markup and clicking the wrong match was spam-firing
     // clicks on an unrelated element every cycle.
     function dismissAssociatedCPTModalIfPresent() {
+        // Only ever act while the extension itself is mid-action (Auto
+        // Link / Claim Link / a quick action / Start Action) — this modal
+        // is a side effect of OUR OWN ICD add/delete steps, so it must
+        // never fire while the user is doing something manually.
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && /Associated CPT Codes/i.test(el.textContent || ''));
         if (!title) return false;
@@ -5801,6 +5844,14 @@
     // failed add isn't silently swallowed.
     let lastEcwErrorShown = "";
     function dismissEcwErrorPopup() {
+        // Same reasoning as dismissAssociatedCPTModalIfPresent above — only
+        // act while the extension itself is mid-action. A manual delete
+        // confirmation (e.g. "Are you sure you want to remove this ICD?")
+        // reuses this exact same generic "eClinicalWorks" modal title, so
+        // without this guard a manual action could get its own confirm
+        // popup silently closed out from under it every ~1.8s.
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && el.textContent.trim() === 'eClinicalWorks');
         if (!title) return false;
@@ -5813,6 +5864,14 @@
         // in-progress code selection (this was closing the E&M tree every
         // ~1.8s before the user/script could finish picking a code).
         if (modal.querySelector('#billingBtn29')) return false;
+
+        // SAFETY (belt-and-suspenders on top of the extensionBusy gate
+        // above): never touch a real Yes/No confirmation dialog, even one
+        // that happens to appear while extensionBusy is true.
+        const hasYesNoButtons = Array.from(modal.querySelectorAll('button, a')).some(
+            b => b.offsetParent !== null && ['yes', 'no'].includes(b.textContent.trim().toLowerCase())
+        );
+        if (hasYesNoButtons) return false;
 
         const bodyText = (modal.textContent || '').replace(title.textContent, '').trim();
 
