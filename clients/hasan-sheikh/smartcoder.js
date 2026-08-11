@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.71
+// @name         Hasan Sheikh SmartCoder v1.73
 // @namespace    http://tampermonkey.net/
-// @version      1.71
+// @version      1.73
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,32 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.73 (2026-08-11) - Age gate for the positive/negative RESULT codes tied
+//   to the screening bundles, not just the screening G-codes themselves.
+//   Audited all three: depression result codes (G8510 negative/G8431
+//   positive) were already gated to age 12+, and alcohol result codes
+//   (G9622 negative/3016F positive) were already gated to age 18+ — both
+//   are in MANAGED_CODES, so an already-present one auto-deletes the
+//   moment the patient falls outside that age range, same as G0444/G0442.
+//   Tobacco/smoking result codes (G9275/G9276, or Healthfirst's 1036F/
+//   1000F) had NO age gate at all — added the same 18+ requirement used
+//   for 99406. Also in MANAGED_CODES, so this covers both directions:
+//   blocks adding them under 18, and deletes them if already present on a
+//   chart for a patient who no longer/doesn't qualify.
+//
+// 1.72 (2026-08-11) - Age gate for Smoking Counseling (99406): confirmed
+//   G0444 (depression, 12+) and G0442 (alcohol, 18+) already had correct
+//   age gates on both the add side (computeAnalysis) and the delete side
+//   (dedicated age-cleanup block deletes them if the patient no longer
+//   qualifies). Smoking Counseling (99406) had NO age gate at all — added
+//   one requiring 18+, wired into computeQuickActionGating's existing SM
+//   check (checked first, before the confirmed-smoker/30-day/televisit
+//   checks). Because the SM quick-action button's gating already doubles
+//   as cleanup (since 1.69's quick-action-gating refactor), this
+//   automatically covers both directions with no extra code: age<18 now
+//   fades the SM button (blocking new adds) AND deletes an already-present
+//   99406 if the chart's patient doesn't meet the 18+ requirement.
 //
 // 1.71 (2026-08-11) - Manual-action popup non-interference (ported from
 //   Bronx 1.51/1.52): dismissEcwErrorPopup() and
@@ -1965,10 +1991,17 @@
             else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
         }
 
-        if (hasTob === true) {
-            desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
-        } else if (hasTob === false) {
-            desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+        // Tobacco/smoking screening result codes share 99406's 18+ age
+        // requirement — same pattern as the depression (12+) and alcohol
+        // (18+) screening result codes above. Both are in MANAGED_CODES,
+        // so wrapping the add in this age check also makes an
+        // already-present one auto-delete for a now-too-young patient.
+        if (age >= 18) {
+            if (hasTob === true) {
+                desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
+            } else if (hasTob === false) {
+                desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+            }
         }
 
         // G0136 (social needs screening) can only be used once every 6
@@ -4931,8 +4964,13 @@
         }
 
         // ---- SM: Smoking Counseling ----
+        // 99406 requires the patient to be 18+ — same age-gate pattern as
+        // the G0444 (12+) / G0442 (18+) screening G-codes below.
+        const smAge = getAgeAtDOS(text);
         let sm = { disabled: false, title: 'Smoking Counseling' };
-        if (flags.hasTob !== false) {
+        if (smAge != null && smAge < 18) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
+        } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
         } else if (codeUsedInLastDays('99406', 30)) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };

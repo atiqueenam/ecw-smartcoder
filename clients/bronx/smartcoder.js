@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.52
+// @name         Bronx Health SmartCoder v1.53
 // @namespace    http://tampermonkey.net/
-// @version      1.52
+// @version      1.53
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,20 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.53 (2026-08-11) - Age gates for screening result codes and smoking
+//   counseling (ported from Getwell 5.33/Hasan Sheikh 1.71-1.73). Audit:
+//   G0444 (12+), G0442 (18+), and their result codes G8510/G8431 (12+)
+//   and G9622/3016F (18+) were ALREADY correctly gated, including the
+//   age-based cleanup block for G0444/G0442 (they're deliberately not in
+//   MANAGED_CODES). Two gaps found and fixed: (1) tobacco screening result
+//   codes G9275/G9276/1036F/1000F had no age gate — added the same 18+
+//   requirement as 99406; they're in MANAGED_CODES so an already-present
+//   one now auto-deletes for a too-young patient. (2) 99406 (Smoking
+//   Counseling) itself had no age gate anywhere — added an 18+ check to
+//   the SM quick-action gating (computeQuickActionGating), which already
+//   doubles as cleanup, so this also auto-deletes an existing 99406 for a
+//   patient under 18.
 //
 // 1.52 (2026-08-11) - Widened the 1.51 popup fix into a general rule: the
 //   background popup-dismiss helpers (dismissEcwErrorPopup,
@@ -2109,10 +2123,16 @@
             else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
         }
 
-        if (hasTob === true) {
-            desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
-        } else if (hasTob === false) {
-            desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+        // Tobacco/smoking screening result codes share 99406's 18+ age
+        // requirement — same pattern as depression (12+) and alcohol (18+)
+        // above. Both are in MANAGED_CODES, so gating the add here also
+        // makes an already-present one auto-delete for a too-young patient.
+        if (age >= 18) {
+            if (hasTob === true) {
+                desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
+            } else if (hasTob === false) {
+                desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+            }
         }
 
         // G0136 (social needs screening) can only be used once every 6
@@ -5051,8 +5071,13 @@
         }
 
         // ---- SM: Smoking Counseling ----
+        // 99406 requires the patient to be 18+ — same age-gate pattern as
+        // the G0444 (12+) / G0442 (18+) screening G-codes.
+        const smAge = getAgeAtDOS(text);
         let sm = { disabled: false, title: 'Smoking Counseling' };
-        if (flags.hasTob !== false) {
+        if (smAge != null && smAge < 18) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
+        } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
         } else if (codeUsedInLastDays('99406', 30)) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };

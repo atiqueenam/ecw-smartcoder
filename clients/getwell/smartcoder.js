@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.32
+// @name         Getwell SmartCoder by ATQ v5.33
 // @namespace    http://tampermonkey.net/
-// @version      5.32
+// @version      5.33
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,25 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.33 (2026-08-11) - Age gates for depression/alcohol/smoking screening
+//   codes and their positive/negative result codes (ported from Hasan
+//   Sheikh 1.71-1.73): depression screening (G0444 + result codes G8510/
+//   G8431) requires age 12+; alcohol screening (G0442 + result codes
+//   G9622/3016F) and smoking counseling (99406 + tobacco result codes
+//   G9275/G9276/1036F/1000F) require age 18+. None of these had ANY age
+//   gate before. The result codes (G8510/G8431/G9622/3016F/G9275/G9276/
+//   1036F/1000F) are all in MANAGED_CODES, so gating their `desired.set`
+//   calls on age also makes an already-present one auto-delete once the
+//   patient falls outside the age range — no extra cleanup code needed
+//   for those. G0444/G0442 are deliberately NOT in MANAGED_CODES (an
+//   already-billed one shouldn't be blanket-deleted just for being
+//   "undesired" this run), so added an explicit age-cleanup block next to
+//   the existing Medicaid/Medicare G0444/G0442 deletion block. Also added
+//   the same 18+ gate to the SM quick-action button (computeQuickActionGating)
+//   — since that gating already doubles as cleanup, this also covers
+//   auto-deleting an already-present 99406 for a too-young patient, and
+//   age-gated the Z13.31/Z13.9 screening-ICD suggestions to match.
 //
 // 5.32 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
 //   cleanup, not just an add-guard. Whenever a quick-action button is
@@ -1946,17 +1965,28 @@
             desired.set('1170F', 'Patient age 65+');
         }
 
-        // ---- Screenings ----
-        if (hasDep === true) desired.set('G8510', 'Depression screening negative');
-        else if (hasDep === false) desired.set('G8431', 'Depression screening positive');
+        // ---- Screenings: depression 12+, alcohol/tobacco 18+ ----
+        // Same age requirements as the annual G0444 (depression)/G0442
+        // (alcohol) codes and 99406 (smoking counseling) below — the
+        // positive/negative result codes for a screening shouldn't be used
+        // outside the age range the screening itself applies to. All of
+        // these are in MANAGED_CODES, so gating the add here also makes an
+        // already-present code auto-delete once the patient falls outside
+        // the age range.
+        if (age >= 12) {
+            if (hasDep === true) desired.set('G8510', 'Depression screening negative');
+            else if (hasDep === false) desired.set('G8431', 'Depression screening positive');
+        }
 
-        if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
-        else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
+        if (age >= 18) {
+            if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
+            else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
 
-        if (hasTob === true) {
-            desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
-        } else if (hasTob === false) {
-            desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+            if (hasTob === true) {
+                desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
+            } else if (hasTob === false) {
+                desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+            }
         }
 
         if (hasSocialNeeds && !codeUsedInLastDays('G0136', 180)) {
@@ -1989,10 +2019,10 @@
         // as the current DOS.
         if (annualGCodesEligible(insurance)) {
             const dosYear = getCurrentDosYear();
-            if (hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
+            if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
                 desired.set('G0444', 'Annual depression screening (once/year)');
             }
-            if (hasAlc !== null && !codeUsedInYear('G0442', dosYear)) {
+            if (age >= 18 && hasAlc !== null && !codeUsedInYear('G0442', dosYear)) {
                 desired.set('G0442', 'Annual alcohol screening (once/year)');
             }
         }
@@ -2009,6 +2039,23 @@
                     if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
                 }
             });
+        }
+
+        // ---- Age cleanup for G0442/G0444 ----
+        // Same reasoning as the Medicaid/Medicare block above — G0444/G0442
+        // are deliberately NOT in MANAGED_CODES, so this is the only path
+        // that removes one already on the chart for a patient who no
+        // longer/doesn't meet the age requirement (12+ for G0444, 18+ for
+        // G0442).
+        {
+            if (age < 18 && rawCPTCodesNow.includes('G0442') && !toDelete.some(d => d.code === 'G0442')) {
+                const row = getCPTRowByCode('G0442');
+                if (row) toDelete.push({ code: 'G0442', row, kind: 'cpt', reason: `Patient age ${age} — under 18, alcohol screening G-code not applicable` });
+            }
+            if (age < 12 && rawCPTCodesNow.includes('G0444') && !toDelete.some(d => d.code === 'G0444')) {
+                const row = getCPTRowByCode('G0444');
+                if (row) toDelete.push({ code: 'G0444', row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
+            }
         }
 
         // ---- Diff against current chart ----
@@ -2037,10 +2084,10 @@
         // Proposed-changes / Start-Action flow as everything else, not
         // added automatically.
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
-        if (hasDep !== null && !currentICDCodesForScreening.includes('Z13.31')) {
+        if (age >= 12 && hasDep !== null && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
         }
-        if (hasAlc !== null && !currentICDCodesForScreening.includes('Z13.9')) {
+        if (age >= 18 && hasAlc !== null && !currentICDCodesForScreening.includes('Z13.9')) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
@@ -3083,8 +3130,7 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
@@ -4083,8 +4129,7 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
@@ -4732,8 +4777,13 @@
         }
 
         // ---- SM: Smoking Counseling ----
+        // 99406 requires the patient to be 18+ — same age-gate pattern as
+        // the G0444 (12+) / G0442 (18+) screening G-codes.
+        const smAge = getAgeAtDOS(text);
         let sm = { disabled: false, title: 'Smoking Counseling' };
-        if (flags.hasTob !== false) {
+        if (smAge != null && smAge < 18) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
+        } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
         } else if (codeUsedInLastDays('99406', 30)) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };
