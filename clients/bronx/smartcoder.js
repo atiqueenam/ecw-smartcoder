@@ -3444,11 +3444,11 @@
             'G9903', '4000F', '1034F', '3080F', '3077F',
             '3050F', '3046F', '0521F',
             '3048F', '3061F', '3062F',
-            '3725F', 'H0049', ''
+            '3725F', 'H0049', 'G8783',''
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
+            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6','Z00.00'
         ]);
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
