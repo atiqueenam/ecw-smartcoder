@@ -3245,10 +3245,8 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
-            // 95250/95251 (CGM placement/interpretation) follow the same
-            // rule — both link to the diabetic ICD (E11.9).
-            "95250": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
-            "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
+            "95250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            "95251": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
@@ -4367,10 +4365,8 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
-            // 95250/95251 (CGM placement/interpretation) follow the same
-            // rule — both link to the diabetic ICD (E11.9).
-            "95250": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
-            "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
+            "95250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "95251": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
