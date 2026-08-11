@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.45
+// @name         Bronx Health SmartCoder v1.47
 // @namespace    http://tampermonkey.net/
-// @version      1.45
-// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
+// @version      1.47
+// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
@@ -11,6 +11,33 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.47 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
+//   cleanup, not just an add-guard. Whenever a quick-action button is
+//   faded — for ANY of its existing reasons (already billed this year/30
+//   days, wrong insurance, no chronic dx this encounter, not a confirmed
+//   smoker, BMI doesn't qualify, new patient, televisit, etc.) — that
+//   bundle's own CPT code is deleted if already on the chart: PV faded ->
+//   993xx/G0438/G0439 removed; PC faded -> 99401 removed; SM faded ->
+//   99406 removed; OB faded -> G0447 removed. Existing
+//   hasPreventiveVisit/has99401ForZ71/hasObesityCPTForBMI logic now reads
+//   through this same gating, so the linked ICDs (Z00.01/Z00.121,
+//   Z71.3/Z71.82/Z71.89, BMI Z68.xx) cascade-delete automatically too —
+//   Z68.xx specifically is only removed if NEITHER the PV nor the
+//   (now-cleaned) OB bundle still needs it. Superseded/generalized the
+//   1.46 televisit-only cleanup (televisit is just one of the gating
+//   reasons now, same as before).
+//
+// 1.46 (2026-08-11) - Removed the "commercial payer" office-visit exclusion:
+//   Bronx does not follow that rule, so an office-visit E&M code is now
+//   suggested for every visit (Aetna/Cigna/BCBS/UHC/UMR/Empire included).
+//   Added active cleanup for televisits (CON): any Preventive visit code
+//   (993xx/G0438/G0439) or Preventive Counseling (99401) already on the
+//   chart is now deleted outright, along with their linked ICDs
+//   (Z00.01/Z00.121, Z71.3/Z71.82/Z71.89, Z68.xx when no longer needed) —
+//   not just blocked from being newly added. Removed MODULE 3 (PN modal
+//   resize) entirely per Bronx's request; #mainPNDialog is left at eCW's
+//   own default size/behavior now.
 //
 // 1.45 (2026-08-10) - Fixed pediatric Obesity Counseling gating. Patients
 //   under 18 now use documented BMI percentile >=95 instead of adult BMI >=30;
@@ -1770,6 +1797,22 @@
             .filter(Boolean);
         const rawCPTCodeSet = new Set(rawCPTCodesNow);
 
+        // Televisit is determined from the appointment caption's visit type
+        // ("CON" = televisit for this provider) — not from CPT 98012, which
+        // this client doesn't use for that purpose.
+        const isTelevisitNote = getVisitType().toLowerCase().trim() === 'con';
+
+        // Single source of truth for whether each of the 4 quick-action
+        // buttons (PV/PC/SM/OB) is currently allowed to fire — same
+        // function that fades/enables them in the floating panel. Reusing
+        // it here means "button faded" and "code gets cleaned off the
+        // chart" can never drift apart: whatever reason disables a button
+        // (already billed this year/30 days, wrong insurance, no chronic
+        // dx, not a confirmed smoker, BMI doesn't qualify, new patient,
+        // televisit, etc.) also disqualifies that bundle's codes from
+        // staying on THIS chart.
+        const gating = computeQuickActionGating(insurance, flags, text);
+
         // Whether a preventive visit code is on this chart — several
         // other rules below (G0444/G0442, BMI CPTs) are gated on this.
         const PREVENTIVE_VISIT_CODES = new Set([
@@ -1777,7 +1820,44 @@
             '99391', '99392', '99393', '99394', '99395', '99396', '99397',
             'G0438', 'G0439'
         ]);
-        const hasPreventiveVisit = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        const hasPreventiveVisitRaw = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        // If the PV button is faded (for ANY reason — already billed this
+        // year, televisit, etc.) an already-present preventive code no
+        // longer counts for downstream bundle logic; the code itself is
+        // deleted below, right alongside its linked ICDs.
+        const hasPreventiveVisit = hasPreventiveVisitRaw && !gating.pv.disabled;
+
+        // ---- Quick-action gating cleanup ----
+        // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
+        // if it's already sitting on the chart. Linked ICDs (Z00.01/
+        // Z00.121, Z71.3/Z71.82/Z71.89, BMI Z68.xx) are handled further
+        // down by the existing hasPreventiveVisit/has99401ForZ71/
+        // hasObesityCPTForBMI-driven logic, which now folds this gating in
+        // too — so a faded button cascades into ICDs automatically without
+        // duplicating the "still needed?" rules here.
+        // Collected here (before `toDelete` exists yet below) and merged in
+        // once `toDelete` is declared.
+        const gatedBundleCPTDeletes = [];
+        function deleteBundleCPTIfPresent(codes, reason) {
+            getCPTRows().forEach(r => {
+                const code = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+                if (codes.includes(code) && !gatedBundleCPTDeletes.some(d => d.code === code)) {
+                    gatedBundleCPTDeletes.push({ code, row: r, kind: 'cpt', reason });
+                }
+            });
+        }
+        if (gating.pv.disabled) {
+            deleteBundleCPTIfPresent([...PREVENTIVE_VISIT_CODES], `Preventive not applicable — ${gating.pv.title}`);
+        }
+        if (gating.pc.disabled) {
+            deleteBundleCPTIfPresent(['99401'], `Preventive Counseling not applicable — ${gating.pc.title}`);
+        }
+        if (gating.sm.disabled) {
+            deleteBundleCPTIfPresent(['99406'], `Smoking Counseling not applicable — ${gating.sm.title}`);
+        }
+        if (gating.ob.disabled) {
+            deleteBundleCPTIfPresent(['G0447'], `Obesity Counseling not applicable — ${gating.ob.title}`);
+        }
 
         const desired = new Map(); // code -> reason
 
@@ -1880,10 +1960,9 @@
         // age 65+, never added fresh, only corrected/deleted.
         const icdRows = getICDRows();
         const hasPainOrM = icdRows.some(r => isPainRelatedICDEntry(r.code, r.name));
-        // Televisit is determined from the appointment caption's visit type
-        // ("CON" = televisit for this provider) — not from CPT 98012, which
-        // this client doesn't use for that purpose.
-        const isTelevisitNote = getVisitType().toLowerCase().trim() === 'con';
+        // isTelevisitNote is computed earlier in this function (see above,
+        // right before hasPreventiveVisit) so it can also gate the
+        // Preventive/Preventive-Counseling bundle cleanup.
 
         if (age >= 65) {
             const has1157or1158 = rawCPTCodeSet.has('1157F') || rawCPTCodeSet.has('1158F');
@@ -2026,9 +2105,9 @@
             toAdd.push({ code: 'Z13.6', reason: '93000 present, no ECG-related ICD on chart — added for linking', kind: 'icd' });
         }
 
-        const toDelete = [];
+        const toDelete = [...gatedBundleCPTDeletes];
         currentRows.forEach(r => {
-            if (MANAGED_CODES.has(r.code) && !desired.has(r.code)) {
+            if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                 const reason = exclusionReasons.get(r.code) || 'Not applicable / wrong value for current chart';
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason });
             }
@@ -2088,10 +2167,13 @@
         // (Obesity's own gating already depends on BMI, per
         // computeQuickActionGating's BMI<30 fade rule) — if neither
         // applies, any existing Z68.xx is proposed for deletion instead of
-        // being corrected/kept.
+        // being corrected/kept. If the OB button is faded (G0447 is being
+        // deleted above, for whatever reason), G0447 no longer counts
+        // toward "still needed" either — the BMI code is kept ONLY if the
+        // PV bundle still needs it.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
-        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447');
+        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
         const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
@@ -2157,7 +2239,7 @@
         // Preventive Counseling (P/C) bundles (see the quick-action
         // clearOtherQuickActionBundles() comment above) — they only belong
         // on the chart when one of those two is actually being billed.
-        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401') && !gating.pc.disabled;
         const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
         if (!z71BundleNeeded) {
             const z71BundleEntries = getICDRows().filter(e =>
@@ -2193,14 +2275,12 @@
         // below) exist for this provider. Suggested code goes to the TOP
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
-        // No office-visit code at all for: Aetna, Cigna, BCBS, UHC, UMR
-        // ("umk" in the original request), Empire.
-        const isCommercialNoOfficeVisitIns = isUHCInsurance(insurance) ||
-            (!!insurance && /aetna|cigna|\bbcbs\b|blue\s*cross|\bumr\b|empire/i.test(insurance.trim()));
-
+        // Bronx does not follow the "commercial payer" exclusion other
+        // clients use — every visit (regardless of insurance) gets an
+        // office-visit E&M code suggested.
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
-        if (visitCategory && !isCommercialNoOfficeVisitIns) {
+        if (visitCategory) {
             let ovCode;
             let ovIsNewPatient = false;
             let ovReason;
@@ -5696,129 +5776,4 @@
     // initial render, which is exactly when things already feel slow.
     setInterval(checkAndUpdate, 2500);
     setTimeout(checkAndUpdate, 3000);
-})();
-
-/* ============================================================
-   MODULE 3 — PN MODAL RESIZE (Bronx only)
-   Bronx's Progress Note / coding modal (#mainPNDialog) renders
-   at a different default size than eCW uses on our other client
-   sites. Left alone, that mismatch is what was producing the
-   blank space around the note/coding grid and, by extension,
-   throwing off where our own SmartCoder floating panel had room
-   to sit. This shrinks the dialog to a sane fixed size (with a
-   safe minimum) and keeps its body height in sync with the new
-   header/footer measurements, automatically, the moment the
-   modal is opened for any patient — no per-patient action needed.
-   Runs independently of Modules 1/2 and is fully self-contained;
-   a failure here never touches the Patient History or Coding
-   Snapshot features.
-   ============================================================ */
-(function () {
-    'use strict';
-
-    const CFG = {
-        dialogWidth: '60vw',
-        dialogHeight: '75vh',
-        minWidthPx: 980,
-        minHeightPx: 640,
-        margin: '10px auto'
-    };
-
-    function px(n) { return `${Math.round(n)}px`; }
-
-    function clampPx(v, minPx) { return Math.max(v, minPx); }
-
-    function parseSizeToPx(value) {
-        if (typeof value !== 'string') return null;
-        const s = value.trim().toLowerCase();
-        if (s.endsWith('px')) return parseFloat(s);
-        if (s.endsWith('vw')) return (window.innerWidth * parseFloat(s)) / 100;
-        if (s.endsWith('vh')) return (window.innerHeight * parseFloat(s)) / 100;
-        const n = parseFloat(s);
-        return Number.isFinite(n) ? n : null;
-    }
-
-    function isVisible(el) {
-        if (!el) return false;
-        const cs = getComputedStyle(el);
-        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-    }
-
-    function setImp(el, prop, value) {
-        if (!el) return;
-        el.style.setProperty(prop, value, 'important');
-    }
-
-    function getPnEls() {
-        const dialog = document.querySelector('#mainPNDialog');
-        const content = document.querySelector('#mainPNContent');
-        const header = document.querySelector('#pn-modal-header');
-        const footer = document.querySelector('#main-footer');
-        const body = dialog ? dialog.querySelector('.modal-body') : null;
-        return { dialog, content, header, footer, body };
-    }
-
-    function applyPnResize() {
-        try {
-            const { dialog, content, header, footer, body } = getPnEls();
-            if (!dialog || !content || !isVisible(dialog)) return;
-
-            let w = parseSizeToPx(CFG.dialogWidth);
-            let h = parseSizeToPx(CFG.dialogHeight);
-            if (!Number.isFinite(w) || !Number.isFinite(h)) return;
-
-            w = clampPx(w, CFG.minWidthPx);
-            h = clampPx(h, CFG.minHeightPx);
-
-            setImp(dialog, 'width', px(w));
-            setImp(dialog, 'height', px(h));
-            setImp(dialog, 'margin', CFG.margin);
-            setImp(content, 'height', '100%');
-
-            if (body) {
-                const headerH = header ? header.getBoundingClientRect().height : 0;
-                const footerH = footer ? footer.getBoundingClientRect().height : 0;
-                const bodyH = Math.max(0, h - headerH - footerH - 2);
-                setImp(body, 'height', px(bodyH));
-                setImp(body, 'maxHeight', px(bodyH));
-                setImp(body, 'overflowX', 'hidden');
-            }
-        } catch (e) {
-            // Never let a resize hiccup break the page or the modal.
-        }
-    }
-
-    // The modal's own DOM churns a lot while eCW builds it (rows/fields
-    // streaming in), so a MutationObserver firing applyPnResize on every
-    // single mutation — as the original standalone version of this script
-    // did — becomes a real source of lag on a big note. Debounce to one
-    // pass per animation frame instead: same responsiveness the moment
-    // anything actually changes, without redoing the layout math dozens
-    // of times per second.
-    let pnResizeScheduled = false;
-    function schedulePnResize() {
-        if (pnResizeScheduled) return;
-        pnResizeScheduled = true;
-        requestAnimationFrame(() => {
-            pnResizeScheduled = false;
-            applyPnResize();
-        });
-    }
-
-    const pnObserver = new MutationObserver(schedulePnResize);
-    pnObserver.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['style', 'class']
-    });
-
-    window.addEventListener('resize', schedulePnResize);
-    // Light safety-net poll in addition to the observer, in case the modal
-    // is swapped in via a path that doesn't trigger a matching mutation.
-    setInterval(schedulePnResize, 1000);
-
-    schedulePnResize();
 })();
