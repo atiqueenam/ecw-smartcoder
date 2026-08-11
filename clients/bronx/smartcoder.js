@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.50
+// @name         Bronx Health SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.50
+// @version      1.52
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,40 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.52 (2026-08-11) - Widened the 1.51 popup fix into a general rule: the
+//   background popup-dismiss helpers (dismissEcwErrorPopup,
+//   dismissAssociatedCPTModalIfPresent) now ONLY ever act while this
+//   extension is itself mid-action (quick action, Start Action, Auto
+//   Link, or Claim Link) — added a new extensionBusy flag, set for Auto
+//   Link/Claim Link's duration (they had no such tracking before; quick
+//   actions and Start Action already had quickActionRunning/
+//   actionRunning). Both helpers now bail out and touch nothing at all
+//   whenever quickActionRunning/actionRunning/extensionBusy are all
+//   false — i.e. whenever it's the user doing something manually, not
+//   this extension. Previously the "Associated CPT Codes" popup was
+//   auto-answered "No" and plain "eClinicalWorks" error alerts were
+//   auto-dismissed regardless of who triggered them, which could
+//   override a decision the user was mid-way through making by hand.
+//   extensionBusy is cleared in a finally block (so an unexpected error
+//   mid-flow can't leave it stuck true) plus a 20s hard-timeout safety
+//   net around Auto Link's async delete/confirm loop.
+//
+// 1.51 (2026-08-11) - BUG FIX: manually clicking Remove on an ICD/CPT in
+//   eCW's own Claim screen and confirming "Are you sure you want to
+//   remove this ICD?" was getting the dialog instantly force-closed
+//   before Yes/No could be clicked, silently cancelling the delete. Root
+//   cause: dismissEcwErrorPopup() (polls every 1.8s to auto-close eCW's
+//   plain "eClinicalWorks"-titled error alerts, e.g. "Could not add ICD:
+//   ...") matches on modal TITLE only — but eCW reuses that exact same
+//   titled modal for Yes/No confirmation dialogs too. Since a confirm
+//   dialog has no "OK" button to match, the old code fell through to the
+//   close/X button and force-dismissed it on every poll tick, faster than
+//   a person could click anything. Fixed by having the function bail out
+//   immediately (do nothing at all) whenever it detects a Yes/No button
+//   pair in the modal, leaving any such confirmation dialog fully alone
+//   for the user to answer. Plain OK-only error alerts are unaffected and
+//   still auto-dismiss as before.
 //
 // 1.50 (2026-08-11) - Two fixes. (1) New-patient office-visit E&M: if the
 //   practice already added 99204 or 99205 to a new-patient chart, we no
@@ -462,6 +496,16 @@
     let analysisRunning = false;
     let actionRunning = false;
     let actionLog = [];         // [{code, action:'add'|'delete', status:'success'|'fail', message}]
+
+    // True only while THIS extension is actively performing its own
+    // add/delete/link work (Auto Link, Claim Link — quick actions and
+    // Start Action have their own quickActionRunning/actionRunning flags
+    // already). Used exclusively to gate the background popup-dismiss
+    // helpers below: they should only ever act on a dialog that OUR OWN
+    // action just triggered, never on one raised by something the user
+    // is doing manually — see dismissEcwErrorPopup/
+    // dismissAssociatedCPTModalIfPresent.
+    let extensionBusy = false;
 
     // Caches SOAP-note text from the last time it was visible (billing tab
     // hides it from innerText), so analysis stays correct on either tab.
@@ -3245,8 +3289,10 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
@@ -3939,20 +3985,42 @@
     }
 
     function al_mainFlow() {
+        // extensionBusy stays true for this entire flow, including the
+        // async delete-then-confirm loop inside al_deleteUnwantedCodes —
+        // that's exactly the window where our OWN delete confirms need
+        // the popup helpers active. Cleared once every step below (all
+        // synchronous from here on) has run.
+        extensionBusy = true;
+        // Hard safety net: al_deleteUnwantedCodes's own delete/confirm
+        // loops are all individually time-bounded and always eventually
+        // call back, but if something truly unforeseen ever stalls it,
+        // this guarantees extensionBusy doesn't stay stuck true forever
+        // (which would otherwise leave the popup-dismiss helpers
+        // interfering with the user's later manual actions indefinitely).
+        const extensionBusyFallback = setTimeout(() => { extensionBusy = false; }, 20000);
         al_deleteUnwantedCodes(() => {
-            const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
-            const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-            al_linkCPTGeneric(icdRows, cptRows);
-            al_handleUnlistedCPTs(cptRows);
-            al_applySLModifierForPedsVaccines();
-            al_applyTelevisitModifier();
-            al_applyModifier59();
-            al_applyQWModifier();
-            al_alertDuplicateICDStart(icdRows);
-            al_alertDuplicateCPT(cptRows);
-            al_validatePreventiveCPT(cptRows);
-            al_checkChronicDiseaseCountFor99214(icdRows);
-            al_checkForL21(icdRows);
+            clearTimeout(extensionBusyFallback);
+            try {
+                const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
+                const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+                al_linkCPTGeneric(icdRows, cptRows);
+                al_handleUnlistedCPTs(cptRows);
+                al_applySLModifierForPedsVaccines();
+                al_applyTelevisitModifier();
+                al_applyModifier59();
+                al_applyQWModifier();
+                al_alertDuplicateICDStart(icdRows);
+                al_alertDuplicateCPT(cptRows);
+                al_validatePreventiveCPT(cptRows);
+                al_checkChronicDiseaseCountFor99214(icdRows);
+                al_checkForL21(icdRows);
+            } finally {
+                // Always clear, even if a step above throws — an
+                // unexpected error must never leave extensionBusy stuck
+                // true, which would make the popup-dismiss helpers keep
+                // acting on dialogs raised by later MANUAL actions.
+                extensionBusy = false;
+            }
         });
     }
 
@@ -4365,8 +4433,10 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
-            "95250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
-            "95251": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
+            "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
@@ -4874,26 +4944,34 @@
 
     // ─── Main Flow ─────────────────────────────────────────────────────
     function cl_mainFlow() {
-        const icdRows = cl_getICDRows();
-        const cptRows = cl_getCPTRows();
+        // Entirely synchronous, so a simple try/finally around it is
+        // enough to keep extensionBusy accurate (see al_mainFlow's fuller
+        // comment on why this flag exists).
+        extensionBusy = true;
+        try {
+            const icdRows = cl_getICDRows();
+            const cptRows = cl_getCPTRows();
 
-        cl_linkCPTGeneric(icdRows, cptRows);
-        cl_handleUnlistedCPTs(cptRows);
-        cl_alertDuplicateICDStart(icdRows);
-        cl_checkICDOrderZBeforeDx(icdRows);
-        cl_alertDuplicateCPT(cptRows);
-        cl_validatePreventiveCPT(cptRows);
-        cl_checkChronicDiseaseCountFor99214(icdRows);
-        cl_checkForL21(icdRows);
-        cl_checkForFluVaccineCPTs(cptRows);
-        cl_checkMedicarePreventiveCPT(cptRows);
-        cl_checkMedicaidCPTCount(cptRows);
-        cl_applyHealthfirstTelehealthPOS(cptRows);
-        cl_applyMedicaidTelehealthPOS(cptRows);
-        cl_applyOtherInsuranceTelehealthPOS(cptRows);
-        cl_fillBlankTOS(cptRows);
-        cl_applyModifier59(cptRows);
-        cl_applyQWModifier(cptRows);
+            cl_linkCPTGeneric(icdRows, cptRows);
+            cl_handleUnlistedCPTs(cptRows);
+            cl_alertDuplicateICDStart(icdRows);
+            cl_checkICDOrderZBeforeDx(icdRows);
+            cl_alertDuplicateCPT(cptRows);
+            cl_validatePreventiveCPT(cptRows);
+            cl_checkChronicDiseaseCountFor99214(icdRows);
+            cl_checkForL21(icdRows);
+            cl_checkForFluVaccineCPTs(cptRows);
+            cl_checkMedicarePreventiveCPT(cptRows);
+            cl_checkMedicaidCPTCount(cptRows);
+            cl_applyHealthfirstTelehealthPOS(cptRows);
+            cl_applyMedicaidTelehealthPOS(cptRows);
+            cl_applyOtherInsuranceTelehealthPOS(cptRows);
+            cl_fillBlankTOS(cptRows);
+            cl_applyModifier59(cptRows);
+            cl_applyQWModifier(cptRows);
+        } finally {
+            extensionBusy = false;
+        }
     }
 
 
@@ -5876,7 +5954,14 @@
     // the modal's title text, not by id — ids like billingLink29 get reused
     // elsewhere in eCW's markup and clicking the wrong match was spam-firing
     // clicks on an unrelated element every cycle.
+    //
+    // Only runs while WE are actively adding/linking a code (quick action,
+    // Start Action, Auto Link, or Claim Link). If the user manually added a
+    // CPT themselves and eCW asks them this, that's their call to make —
+    // this must never auto-answer "No" out from under a manual action.
     function dismissAssociatedCPTModalIfPresent() {
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && /Associated CPT Codes/i.test(el.textContent || ''));
         if (!title) return false;
@@ -5899,13 +5984,38 @@
     // backdrop blocks every click after it (that's what "stuck" looked
     // like) — dismiss it whenever it appears, and surface the message so a
     // failed add isn't silently swallowed.
+    //
+    // Same rule as dismissAssociatedCPTModalIfPresent above: only acts
+    // while WE are the one mid-action. A popup eCW raises in response to
+    // something the user did manually is left completely alone — they
+    // dismiss it themselves, on their own timing, exactly as if this
+    // extension weren't installed at all.
     let lastEcwErrorShown = "";
     function dismissEcwErrorPopup() {
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && el.textContent.trim() === 'eClinicalWorks');
         if (!title) return false;
 
         const modal = title.closest('.modal, .modal-content, [role="dialog"]') || document;
+
+        // eCW reuses this SAME "eClinicalWorks"-titled modal for both
+        // plain error alerts (OK only, e.g. "Could not add ICD: ...") and
+        // Yes/No confirmation dialogs (e.g. "Are you sure you want to
+        // remove this ICD?" when the user manually clicks Remove on the
+        // Claim screen). Only the former should ever be auto-dismissed —
+        // a Yes/No confirm is the user's own deliberate action waiting on
+        // THEIR decision. Since it has no "OK" button to match, the old
+        // code fell through to the close/X button and force-closed it
+        // every 1.8s before the user could ever click Yes or No,
+        // silently cancelling their delete. Bail out immediately whenever
+        // a Yes/No pair is present so this interval never touches it.
+        const hasYesNoButtons = Array.from(modal.querySelectorAll('a, button')).some(
+            b => b.offsetParent !== null && /^(yes|no)$/i.test(b.textContent.trim())
+        );
+        if (hasYesNoButtons) return false;
+
         const bodyText = (modal.textContent || '').replace(title.textContent, '').trim();
 
         if (bodyText && bodyText !== lastEcwErrorShown) {
