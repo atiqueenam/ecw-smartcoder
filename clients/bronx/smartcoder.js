@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.47
+// @name         Bronx Health SmartCoder v1.50
 // @namespace    http://tampermonkey.net/
-// @version      1.47
+// @version      1.50
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,56 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.50 (2026-08-11) - Two fixes. (1) New-patient office-visit E&M: if the
+//   practice already added 99204 or 99205 to a new-patient chart, we no
+//   longer also suggest/add our own 99203 alongside it (theirs is the
+//   deliberate call, keep it) — and if a stale 99203 from an earlier run
+//   is already sitting there next to their 99204/99205, it now gets
+//   flagged for deletion as redundant. If neither 99204 nor 99205 is
+//   present, behavior is unchanged: we still only ever add 99203. (2)
+//   Preventive E&M code selection: only STRAIGHT/plain Medicare (exact
+//   "Medicare"/"Medicare Part A"/"Medicare Part B", nothing else in the
+//   name) and VNS Choice get the G0438/G0439 Medicare AWV codes now.
+//   Clover Health — previously lumped in with Medicare for this — and
+//   every other insurance (including Medicare Advantage plans whose name
+//   merely mentions "Medicare") now correctly get the age-banded 993xx
+//   preventive E&M code instead. Added isStraightMedicareIns() for this;
+//   isAnyMedicareIns()'s other, unrelated uses (vaccine Medicare gating,
+//   Preventive-Counseling-blocked-payer check) are untouched.
+//
+// 1.49 (2026-08-11) - Two fixes. (1) 99402/99403/99404 (30/45/60-min
+//   Preventive Counseling) are never used by this provider — only 99401
+//   is. Removed their ICD-linking entries from both Auto Link and Claim
+//   Link's CPT rule tables (they were wrongly treated as valid/linkable
+//   like 99401) and added an unconditional Analyze-flow deletion: any of
+//   the three gets removed outright wherever found, independent of visit
+//   type/insurance/PC gating. (2) Office-visit E&M cleanup was silently
+//   ignoring 99204/99205 (new-patient level 4/5) because they weren't in
+//   OFFICE_VISIT_EM_CODES at all — a 99204 sitting on an ESTABLISHED
+//   visit's chart (wrong patient type) could never be flagged. Added both
+//   to OFFICE_VISIT_EM_CODES and made their PRACTICE_PROTECTED_OV_CODES
+//   protection conditional on ovIsNewPatient: on an actual new-patient
+//   visit a 99204/99205 next to the computed 99203 is still protected as
+//   a deliberate practice override (unchanged behavior); on an
+//   established visit it's now correctly recognized as a mismatched code
+//   and deleted. 99215's unconditional protection is unchanged.
+//
+// 1.48 (2026-08-11) - 95250 (CGM placement) now follows the exact same
+//   rule as 95251 (CGM interpretation): both link to the diabetic ICD
+//   E11.9 in Auto Link and Claim Link's CPT rule tables, and both trigger
+//   the same modifier logic (checked together as "9525x present").
+//   Televisit modifier rule unchanged: office-visit code gets mod1=95
+//   always, plus mod2=25 when either 9525x code is present. NEW: added a
+//   normal (non-televisit) visit rule — when 9525x is present, the
+//   office-visit code gets mod1=25 by default; but if a Preventive or
+//   Preventive Counseling code (993xx/G0438/G0439/99401) is ALSO on the
+//   chart alongside the office-visit code, the 25 goes on that
+//   preventive/counseling code's mod1 instead, and the office-visit
+//   code's own modifier is left completely untouched (not set, not
+//   cleared). Refactored al_applyTelevisitModifier's Angular-scope/manual-
+//   input modifier-setting into a shared al_setCPTModifier() helper used
+//   by both branches — no behavior change to the write mechanism itself.
 //
 // 1.47 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
 //   cleanup, not just an add-guard. Whenever a quick-action button is
@@ -2352,8 +2402,15 @@
                 }
             }
 
+            // New patient: if the practice already put 99204 or 99205 on
+            // the chart themselves, that's a deliberate higher-level call
+            // — don't also suggest/add 99203 alongside it. Only add 99203
+            // when neither of those is already present.
+            const practiceAddedHigherNewPatientCode = ovIsNewPatient &&
+                (currentCodes.has('99204') || currentCodes.has('99205'));
+
             if (ovCode) {
-                if (!currentCodes.has(ovCode)) {
+                if (!currentCodes.has(ovCode) && !practiceAddedHigherNewPatientCode) {
                     toAdd.unshift({
                         code: ovCode,
                         reason: ovReason,
@@ -2362,12 +2419,34 @@
                         emIsNewPatient: ovIsNewPatient
                     });
                 }
-                // 99204/99205/99215 given directly by the practice are
-                // never auto-removed here, even if they don't match the
-                // computed office-visit code for this visit type.
-                const PRACTICE_PROTECTED_OV_CODES = new Set(['99204', '99205', '99215']);
+                // 99215 given directly by the practice on an established
+                // visit is never auto-removed, even if it doesn't match
+                // the computed office-visit code for this visit type.
+                // 99204/99205 (new-patient level 4/5) get that SAME
+                // protection ONLY when this really is a new-patient visit
+                // (ovIsNewPatient) — this provider's own logic only ever
+                // computes 99203 for a new patient, so a 99204/99205 next
+                // to it is a deliberate practice override worth keeping.
+                // But if the visit is actually ESTABLISHED, a 99204/99205
+                // on the chart isn't an override at all — it's just the
+                // wrong patient-type code (e.g. left over from a mistaken
+                // add) and gets cleaned up like any other mismatched
+                // office-visit code, not protected.
+                const PRACTICE_PROTECTED_OV_CODES = new Set(
+                    ovIsNewPatient ? ['99204', '99205', '99215'] : ['99215']
+                );
                 currentRows.forEach(r => {
                     if (PRACTICE_PROTECTED_OV_CODES.has(r.code)) return;
+                    // When the practice already added 99204/99205 to a new-
+                    // patient chart, our own 99203 (if it's sitting there
+                    // too, e.g. added on an earlier run before theirs was
+                    // added) is now redundant — two office-visit E&M codes
+                    // on the same new-patient encounter is wrong, and
+                    // theirs is the one to keep.
+                    if (practiceAddedHigherNewPatientCode && r.code === '99203') {
+                        toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: 'Practice already added a higher-level new-patient code (99204/99205) — 99203 is redundant' });
+                        return;
+                    }
                     if (OFFICE_VISIT_EM_CODES.includes(r.code) && r.code !== ovCode) {
                         toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Wrong office-visit code for this visit type (should be ${ovCode})` });
                     }
@@ -2410,6 +2489,21 @@
                 toDelete.push({ code: 'G0444', row: g0444Row.row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
             }
         }
+
+        // ---- 99402/99403/99404 (30/45/60-min Preventive Counseling):
+        // unconditional deletion ----
+        // Bronx only ever bills 99401 for Preventive Counseling — these
+        // longer-duration siblings are never used by this provider, so
+        // unlike 99401 (whose removal depends on the PC quick-action
+        // gating above) any of these three is simply wrong wherever it's
+        // found and gets deleted outright, regardless of visit type,
+        // insurance, or anything else.
+        ['99402', '99403', '99404'].forEach(wrongCode => {
+            const row = currentRows.find(r => r.code === wrongCode);
+            if (row && !toDelete.some(d => d.code === wrongCode)) {
+                toDelete.push({ code: wrongCode, row: row.row, kind: 'cpt', reason: 'Only 99401 is used for Preventive Counseling — this code is never used' });
+            }
+        });
 
         // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
         ['90686', '90688'].forEach(oldCode => {
@@ -2679,6 +2773,19 @@
         return !!insurance && /medicare/i.test(insurance);
     }
 
+    // "Straight"/plain Medicare only — i.e. the insurance name IS Medicare
+    // (optionally "Part A"/"Part B"/"A"/"B"), start-to-end, with nothing
+    // else in the name. This deliberately does NOT match Medicare
+    // Advantage plans or any other payer that merely mentions "Medicare"
+    // somewhere in a longer branded name (those get age-banded 993xx
+    // preventive E&M codes instead, same as any other non-Medicare payer)
+    // — only this and VNS Choice get the G0438/G0439 Medicare AWV codes.
+    // Same regex the office-visit E&M rule already uses for its own
+    // Medicare check.
+    function isStraightMedicareIns(insurance) {
+        return !!insurance && /^\s*medicare(\s+part\s*[ab]|\s+[ab])?\s*$/i.test(insurance.trim());
+    }
+
     // Established = at least one PRIOR encounter exists in patient history
     // (i.e. more than just today's current visit). No history at all, or
     // only today's own encounter, means New Patient.
@@ -2796,7 +2903,13 @@
     }
 
     // ====================== OFFICE VISIT E&M (visit-type driven) ======================
-    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99203'];
+    // Includes 99204/99205 (new-patient level 4/5) even though this
+    // provider's own suggestion logic only ever computes 99203 for a new
+    // patient — they need to be in this family so a wrong-patient-type
+    // 99204/99205 sitting on an ESTABLISHED visit's chart is recognized as
+    // a mismatched office-visit code and can be cleaned up (see the
+    // ovIsNewPatient-gated PRACTICE_PROTECTED_OV_CODES check below).
+    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99203', '99204', '99205'];
 
     // Chronic disease ICD list used for the 99213-vs-99214 complexity check.
     const CHRONIC_DISEASE_ICD_CODES = new Set([
@@ -2980,7 +3093,12 @@
             "2010F": { type: "startsWith", icds: ["Z68"] },
             "0503F": { type: "exact", icds: ["Z39.2"], fallback: "al_officeVisit" },
             "99401": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
-            "99402": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
+            // 99402/99403/99404 (30/45/60-min Preventive Counseling) are
+            // deliberately NOT linked here — Bronx only ever uses 99401 for
+            // Preventive Counseling. If one of them shows up on the chart
+            // it's always wrong and gets deleted outright (see the
+            // "9940x other than 99401" cleanup in computeAnalysis), never
+            // treated as a valid code worth linking ICDs to.
             "99406": { type: "multiICD", icds: [["F17"], ["Z71.6"]] },
             "G0447": { type: "multiICD", icds: [["E66.9","E66.01","E66.09"], ["Z68"]] },
             "G8418": { type: "customICDCollector", icdList: bmiOnlyICDs, fallback: "al_officeVisit" },
@@ -3127,6 +3245,9 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
@@ -3444,11 +3565,11 @@
             'G9903', '4000F', '1034F', '3080F', '3077F',
             '3050F', '3046F', '0521F',
             '3048F', '3061F', '3062F',
-            '3725F', 'H0049', 'G8783',''
+            '3725F', 'H0049', ''
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6','Z00.00'
+            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
         ]);
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
@@ -3615,55 +3736,84 @@
     // signal.
     const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203']);
 
+    // 95250 (CGM placement) and 95251 (CGM interpretation) share the same
+    // modifier rules — wherever one applies, the other does too.
+    const CGM_9525X_CODES = new Set(['95250', '95251']);
+
+    // Preventive (993xx/G0438/G0439) and Preventive Counseling (99401) —
+    // used by the normal-visit 9525x modifier rule below to decide whether
+    // the 25 modifier belongs on the office-visit code or on this bundle
+    // instead.
+    const PREVENTIVE_OR_COUNSELING_CODES = new Set([...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES, '99401']);
+
+    // Sets a modifier field on a CPT row, trying the live Angular scope
+    // first (so eCW's own bindings update immediately) and falling back to
+    // a manual input event dispatch if the scope isn't reachable.
+    function al_setCPTModifier(row, field, value) {
+        try {
+            const scope = angular.element(row).scope();
+            if (scope && scope.cpt) {
+                scope.$applyAsync(() => { scope.cpt[field] = value; });
+                return;
+            }
+        } catch (e) { /* fall through to manual input path */ }
+        const input = row.querySelector(`input[data-fieldname="${field}"]`) ||
+                     row.querySelector(`input[name="${field}"]`) ||
+                     row.querySelector(`input[id*="${field}"]`);
+        if (input) {
+            input.focus();
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+        }
+    }
+
     function al_applyTelevisitModifier() {
         const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
         const codesPresent = cptRows
             .map(r => r.querySelector('td:nth-child(2)')?.textContent.trim().toUpperCase())
             .filter(Boolean);
-        if (getVisitType().toLowerCase().trim() !== 'con') return; // not a televisit — leave modifiers alone
+        const has9525x = codesPresent.some(c => CGM_9525X_CODES.has(c));
 
-        // Always 95 — no insurance-based 93 carve-out for this client.
-        const modifierValue = '95';
-        // 95251 present -> office visit code also gets mod2 = 25. Absent ->
-        // office visit code only gets the mod1 modifier above.
-        const has95251 = codesPresent.includes('95251');
+        if (getVisitType().toLowerCase().trim() === 'con') {
+            // ---- Televisit ----
+            // Always 95 on mod1 — no insurance-based 93 carve-out for this
+            // client. 95250/95251 present -> office visit code also gets
+            // mod2 = 25. Absent -> office visit code only gets mod1.
+            cptRows.forEach(row => {
+                const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+                if (!AL_OFFICE_VISIT_CODES.has(code)) return;
+                al_setCPTModifier(row, 'mod1', '95');
+                if (has9525x) al_setCPTModifier(row, 'mod2', '25');
+            });
+            return;
+        }
 
-        cptRows.forEach(row => {
+        // ---- Normal (non-televisit) visit ----
+        // 95250/95251 needs a 25 modifier to be billed alongside the same-
+        // day office visit. Default target is the office-visit code's
+        // mod1. But if a Preventive or Preventive Counseling code is ALSO
+        // on the chart alongside the office-visit code, the 25 goes on
+        // that preventive/counseling code's mod1 instead — the office-
+        // visit code's own modifier is left completely untouched (not
+        // set, not cleared) in that case.
+        if (!has9525x) return;
+
+        const officeVisitRow = cptRows.find(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
-            if (!AL_OFFICE_VISIT_CODES.has(code)) return;
-            try {
-                const scope = angular.element(row).scope();
-                if (scope && scope.cpt) {
-                    scope.$applyAsync(() => {
-                        scope.cpt.mod1 = modifierValue;
-                        if (has95251) scope.cpt.mod2 = '25';
-                    });
-                    return;
-                }
-            } catch (e) { /* fall through to manual input path */ }
-            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
-                             row.querySelector('input[name="mod1"]') ||
-                             row.querySelector('input[id*="mod1"]');
-            if (modInput) {
-                modInput.focus();
-                modInput.value = modifierValue;
-                modInput.dispatchEvent(new Event('input', { bubbles: true }));
-                modInput.dispatchEvent(new Event('change', { bubbles: true }));
-                modInput.blur();
-            }
-            if (has95251) {
-                const mod2Input = row.querySelector('input[data-fieldname="mod2"]') ||
-                                 row.querySelector('input[name="mod2"]') ||
-                                 row.querySelector('input[id*="mod2"]');
-                if (mod2Input) {
-                    mod2Input.focus();
-                    mod2Input.value = '25';
-                    mod2Input.dispatchEvent(new Event('input', { bubbles: true }));
-                    mod2Input.dispatchEvent(new Event('change', { bubbles: true }));
-                    mod2Input.blur();
-                }
-            }
+            return AL_OFFICE_VISIT_CODES.has(code);
         });
+        const preventiveRow = cptRows.find(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            return PREVENTIVE_OR_COUNSELING_CODES.has(code);
+        });
+
+        if (officeVisitRow && preventiveRow) {
+            al_setCPTModifier(preventiveRow, 'mod1', '25');
+        } else if (officeVisitRow) {
+            al_setCPTModifier(officeVisitRow, 'mod1', '25');
+        }
     }
 
     // ─── Modifier 59 on specific codes ──────────────────────────────────
@@ -4063,7 +4213,8 @@
             "2010F": { type: "bmiLink" },
             "0503F": { type: "exact", icds: ["Z39.2"], fallback: "cl_officeVisit" },
             "99401": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
-            "99402": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
+            // 99402/99403/99404 deliberately NOT linked — see the matching
+            // note in al_buildCPTRules; Bronx only ever uses 99401.
             "99406": { type: "multiICD", icds: [["F17"], ["Z71.6"]] },
             "G0447": { type: "multiICD", icds: [["E66.9","E66.01","E66.09"], ["Z68"]] },
             // G8418 / G8417 / G8420 / 2010F are handled by the dedicated
@@ -4216,6 +4367,9 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
@@ -4907,8 +5061,13 @@
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
-            const isMedicare = isAnyMedicareIns(insurance);
-            const isClover = isCloverHealthIns(insurance);
+            // Only STRAIGHT/plain Medicare and VNS Choice get the
+            // G0438/G0439 Medicare AWV codes. Every other insurance —
+            // Clover Health included, and any Medicare Advantage or other
+            // plan whose name merely mentions "Medicare" — gets the
+            // age-banded 993xx preventive E&M code instead, same as any
+            // other non-Medicare payer.
+            const isStraightMedicare = isStraightMedicareIns(insurance);
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
@@ -4916,15 +5075,14 @@
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
 
-            if (isVNS || isMedicare || isClover) {
-                // VNS Choice, Clover Health, and any other Medicare are
-                // treated the same: directly add G0438/G0439. Never G0402
-                // (retired).
+            if (isVNS || isStraightMedicare) {
+                // VNS Choice and straight Medicare are treated the same:
+                // directly add G0438/G0439. Never G0402 (retired).
                 const medicareAwvCode = established ? 'G0439' : 'G0438';
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
                 await deleteCPTCodesByCode(MEDICARE_AWV_CODES.filter(c => c !== medicareAwvCode));
                 const result = await addSingleCPT(medicareAwvCode);
-                const payerLabel = isVNS ? 'VNS Choice' : (isClover ? 'Clover Health' : 'Medicare');
+                const payerLabel = isVNS ? 'VNS Choice' : 'Medicare';
                 showQuickNotice(result.ok
                     ? `${payerLabel} — added ${medicareAwvCode} (${established ? 'Established' : 'New'} Patient).`
                     : `${payerLabel} — could not add ${medicareAwvCode} automatically (${result.message}).`);
