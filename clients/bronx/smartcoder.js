@@ -1908,9 +1908,9 @@
         const rawCPTCodeSet = new Set(rawCPTCodesNow);
 
         // Televisit is determined from the appointment caption's visit type
-        // ("CON" = televisit for this provider) — not from CPT 98012, which
+        // ("CON","TEL" = televisit for this provider) — not from CPT 98012, which
         // this client doesn't use for that purpose.
-        const isTelevisitNote = getVisitType().toLowerCase().trim() === 'con';
+        const isTelevisitNote = ['con', 'tel'].includes(getVisitType().toLowerCase().trim());
 
         // Single source of truth for whether each of the 4 quick-action
         // buttons (PV/PC/SM/OB) is currently allowed to fire — same

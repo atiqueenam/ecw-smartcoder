@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.35
+// @name         Getwell SmartCoder by ATQ v5.37
 // @namespace    http://tampermonkey.net/
-// @version      5.36
+// @version      5.37
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,25 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.37 (2026-08-12) - Fixed a regression from 5.36: that version's
+//   "former smoker" fix left a stale, unfixed copy of the
+//   affirmativeSmokerWordPresent check running FIRST against the raw
+//   socText (before explicitNegative/textForAffirmativeCheck existed),
+//   so a chart like "Tobacco use: Former smoker ... Additional
+//   Findings: Tobacco user Pipe smoker" still returned a confirmed
+//   CURRENT smoker (red) despite the explicit "Former smoker" answer.
+//   It also duplicate-declared `const affirmativeSmokerWordPresent` /
+//   `const explicitNegative` in the same scope, which is an outright
+//   SyntaxError ("Identifier has already been declared") and would
+//   have broken the whole script on load. Also restored the
+//   smokeless/chewing-tobacco/cigar-only fallback block (checks prior
+//   F17.210 in history) that 5.36 accidentally deleted. isConfirmedNonSmoker
+//   now has exactly one affirmativeSmokerWordPresent check, run against
+//   textForAffirmativeCheck (product-type "<word> smoker" phrases
+//   stripped out when an explicit former/non-smoker answer already
+//   exists), so "Pipe smoker"/"Cigar smoker"/etc. following a "Former
+//   smoker" answer no longer overrides it.
 //
 // 5.35 (2026-08-11) - CRITICAL BUG FIX: "ANALYZE FAILED — Cannot access
 //   'toDelete' before initialization" for any Medicaid/Medicare-type payer
@@ -1189,19 +1208,16 @@
         if (/(?<!(?:not|denies|no)\s)\bcurrent\s+smoker\b/i.test(socText)) return false;
 
         // Same idea, generalized: ANY affirmative "smoker" statement (e.g.
-        // "Heavy tobacco smoker", "Pipe smoker") must also win over a
-        // trailing contradicting "non-user"/"nonsmoker" summary from a
-        // DIFFERENT "Additional Findings" question appended after it.
-        // Excludes non-/former-prefixed and not/denies/no-negated
-        // occurrences, so "non-smoker" or "former smoker" don't
-        // false-positive here. Also excludes "Ex-" prefixed phrasing (e.g.
-        // "Ex-cigar smoker", "Ex-pipe smoker") which eCW uses as its own
-        // way of saying former/past use — without this, "Ex-cigar smoker"
-        // was matching the bare "smoker" word and flagging a documented
-        // nonsmoker as a confirmed current smoker.
-        const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)(?<!\bex[\s-](?:\w+[\s-])?)\bsmoker\b/i.test(socText);
-        if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
-
+        // "Heavy tobacco smoker") must also win over a trailing
+        // contradicting "non-user"/"nonsmoker" summary from a DIFFERENT
+        // "Additional Findings" question appended after it. Excludes
+        // non-/former-prefixed and not/denies/no-negated occurrences, so
+        // "non-smoker" or "former smoker" don't false-positive here. Also
+        // excludes "Ex-" prefixed phrasing (e.g. "Ex-cigar smoker",
+        // "Ex-pipe smoker") which eCW uses as its own way of saying
+        // former/past use — without this, "Ex-cigar smoker" was matching
+        // the bare "smoker" word and flagging a documented nonsmoker as a
+        // confirmed current smoker.
         const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
 
         // When an explicit "Former smoker" / "non-smoker" answer already
@@ -1210,7 +1226,11 @@
         // SEPARATE "Additional Findings: Tobacco user" sub-question is
         // just describing what type of tobacco they used/use — it is not
         // a fresh, independent affirmation of CURRENT smoking, and must
-        // not override the former/non-smoker answer.
+        // not override the former/non-smoker answer. Without this,
+        // "Tobacco use: Former smoker, ... Additional Findings: Tobacco
+        // user Pipe smoker" was being flagged as a confirmed CURRENT
+        // smoker even though the patient explicitly answered "Former
+        // smoker" and reported quitting >10 years ago.
         const textForAffirmativeCheck = explicitNegative
             ? socText.replace(/\b(?:pipe|cigar|cigarette|cigarillo|hookah|chew(?:ing)?)\s+smoker\b/gi, '')
             : socText;
@@ -1218,7 +1238,20 @@
         const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)(?<!\bex[\s-](?:\w+[\s-])?)\bsmoker\b/i.test(textForAffirmativeCheck);
         if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
 
-        if (explicitNegative) return true; // no positive indicators found
+        if (explicitNegative) return true;
+
+        const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(socText);
+        if (otherTobaccoUse) {
+            const api = window.__ecwPatientHistory;
+            const data = api && api.getData ? api.getData() : null;
+            const confirmedByHistory = !!data && data.some(enc =>
+                [...(enc.assessments || []), ...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
+                    .some(c => (c.code || "").toUpperCase().startsWith("F17.210"))
+            );
+            return !confirmedByHistory; // unconfirmed -> treat as not-a-confirmed-smoker
+        }
+
+        return true; // no positive indicators found
     }
 
     // ====================== SHARED CLINICAL FLAG EXTRACTION ======================
