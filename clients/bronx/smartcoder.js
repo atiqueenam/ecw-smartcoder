@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.55
+// @name         Bronx Health SmartCoder v1.56
 // @namespace    http://tampermonkey.net/
-// @version      1.55
+// @version      1.56
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,20 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.56 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
+//   "history still loading" notice if window.__ecwPatientHistory
+//   .isLoading() is true, instead of proceeding. isEstablishedPatient()
+//   can't distinguish "genuinely no prior encounters" from "history
+//   fetch hasn't finished yet" — both look like an empty getData(), and
+//   it silently defaulted to "New Patient" either way. Since this
+//   established/new call picks the actual CPT billed (99381-99387 vs
+//   99391-99397, or G0438 vs G0439 Medicare AWV), clicking Preventive
+//   right after opening/switching a chart — before the async,
+//   multi-request history fetch resolves — could bill a new-patient
+//   code (or a duplicate G0438) for a genuinely established patient.
+//   isLoading() already existed and was already used elsewhere (the
+//   "Loading visit history…" banner) but was never checked here.
+//
 // 1.55 (2026-08-12) - NEW RULE: insurance-change carve-out for the
 //   preventive/counseling timeline gates, ported from Getwell/Hasan
 //   Sheikh. codeUsedInYear (annual "billed this calendar year" checks)
@@ -5209,6 +5223,19 @@
     async function runPreventiveAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
         {
+            // isEstablishedPatient() can't tell "genuinely no history" apart
+            // from "history hasn't finished loading yet" — both look like
+            // an empty getData(). Since the established/new determination
+            // here picks the actual CPT billed (99381-99387 vs 99391-99397,
+            // or G0438 vs G0439), guessing "new" while history is still
+            // loading risks billing a wrong/duplicate code for a genuinely
+            // established patient. Block and ask the user to retry once
+            // loading finishes, rather than silently defaulting to "new".
+            const historyApi = window.__ecwPatientHistory;
+            if (historyApi && historyApi.isLoading && historyApi.isLoading()) {
+                showQuickNotice("Preventive: patient history is still loading — wait a moment for it to finish, then try again.");
+                return;
+            }
             const text0 = getEncounterText();
             const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
             if (gating.pv.disabled) { showQuickNotice(`Preventive: ${gating.pv.title}.`); return; }
