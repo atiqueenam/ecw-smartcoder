@@ -1161,7 +1161,7 @@
     // Empire plan: alcohol/tobacco screening codes aren't used for this
     // payer — any already on the chart get removed.
     function isEmpireIns(insurance) {
-        return !!insurance && /empire/i.test(insurance.trim());
+    return !!insurance && /^empire\b/i.test(insurance.trim());
     }
 
     // Eligible unless insurance starts with Medicaid/Medicare or is
