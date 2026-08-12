@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v1.53
 // @namespace    http://tampermonkey.net/
-// @version      1.53
+// @version      1.54
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.54 (2026-08-11) - 99401 is now allowed for MetroPlus (was blocked in 1.53). 
+//   Empire alcohol/tobacco removal is now limited to televisits only
 //
 // 1.53 (2026-08-11) - Age gates for screening result codes and smoking
 //   counseling (ported from Getwell 5.33/Hasan Sheikh 1.71-1.73). Audit:
@@ -5209,7 +5211,7 @@
     function isPreventiveCounselBlockedIns(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
-        if (/metro\s*plus/i.test(name)) return true;
+        //if (/metro\s*plus/i.test(name)) return true;
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
         if (/nyce/i.test(name) && /ppo/i.test(name)) return true;
