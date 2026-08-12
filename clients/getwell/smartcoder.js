@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.37
+// @name         Getwell SmartCoder by ATQ v5.38
 // @namespace    http://tampermonkey.net/
-// @version      5.37
+// @version      5.38
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,29 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.38 (2026-08-12) - NEW RULE: insurance-change carve-out for the
+//   preventive/counseling timeline gates. codeUsedInYear (annual
+//   G0444/G0442 depression/alcohol screening, "billed this calendar
+//   year" checks) and codeUsedInLastDays (30-day Preventive Counseling/
+//   Smoking/Obesity gates, 180-day social-needs gate) now skip any
+//   historical encounter that was billed under a DIFFERENT payer than
+//   the current encounter's insurance. Example: patient's insurance was
+//   MetroPlus and MetroPlus billed G0442 (alcohol screening) 10 days
+//   ago; patient is now on Healthfirst — Healthfirst can still bill
+//   G0442 today, since Healthfirst itself never used it, regardless of
+//   MetroPlus's history this year/month. Added getPayerBrand() (derives
+//   a payer "brand" key by stripping plan-variant words like PPO/HMO/
+//   Plan/Leaf/Premier/etc., so "Healthfirst" and "Healthfirst PPO"
+//   still count as the SAME payer — only a genuinely different payer
+//   like MetroPlus vs Healthfirst resets the timeline) and
+//   isDifferentPayerThanCurrent() (conservative: if either the current
+//   or historical insurance can't be parsed, treats them as the SAME
+//   payer so missing data never opens a duplicate-billing gap). This
+//   does NOT affect new-vs-established patient status — that stays
+//   based on the patient's full visit history regardless of insurance
+//   changes; an established patient on a new insurance is still
+//   established.
 //
 // 5.37 (2026-08-12) - Fixed a regression from 5.36: that version's
 //   "former smoker" fix left a stale, unfixed copy of the
@@ -1147,9 +1170,56 @@
         return !isMedicaidOrMedicareIns(insurance) && !isUHCInsurance(insurance);
     }
 
+    // Plan-variant words stripped out when deriving a payer "brand" key —
+    // used to tell a genuine insurance CHANGE (MetroPlus -> Healthfirst)
+    // apart from a same-payer plan-name variation (Healthfirst ->
+    // Healthfirst PPO / Healthfirst Leaf Premier). Only used for the
+    // insurance-change carve-out below; does not affect any other payer
+    // matching elsewhere in this file (isEmpireIns, isUHCInsurance, etc.).
+    const INSURANCE_PLAN_VARIANT_WORDS = new Set([
+        'ppo', 'hmo', 'epo', 'pos', 'hdhp', 'plan', 'choice', 'advantage',
+        'gold', 'silver', 'bronze', 'platinum', 'essential', 'elite',
+        'complete', 'premier', 'leaf', 'select', 'value', 'basic',
+        'standard', 'preferred', 'network', 'of', 'ny', 'nyc', 'the',
+        'insurance', 'health', 'care', 'plus'
+    ]);
+    function getPayerBrand(insuranceName) {
+        if (!insuranceName) return "";
+        const words = insuranceName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+        if (!words.length) return "";
+        const significant = words.filter(w => !INSURANCE_PLAN_VARIANT_WORDS.has(w));
+        // If every word got stripped (e.g. name was ALL plan-variant
+        // words), fall back to the unfiltered words rather than losing
+        // the brand entirely.
+        return (significant.length ? significant : words)[0];
+    }
+
+    // True if `pastInsuranceName` should be treated as a DIFFERENT payer
+    // than the current encounter's insurance, for the purpose of the
+    // preventive/counseling timeline carve-out below. Unknown/unparsed
+    // insurance on either side is treated conservatively as SAME payer
+    // (i.e. still counts against the timeline) so missing data never
+    // opens up a duplicate-billing gap.
+    function isDifferentPayerThanCurrent(pastInsuranceName) {
+        const currentInsurance = parseInsuranceFromPage(getEncounterText());
+        if (!currentInsurance || !pastInsuranceName) return false; // unknown -> treat as same, conservative
+        const currentBrand = getPayerBrand(currentInsurance);
+        const pastBrand = getPayerBrand(pastInsuranceName);
+        if (!currentBrand || !pastBrand) return false;
+        return currentBrand !== pastBrand;
+    }
+
     // Was `code` already billed in a PRIOR encounter this `year`? Excludes
     // the currently-open encounter's own date, so today's own claim doesn't
     // count against a genuinely new instance later in the year.
+    //
+    // Insurance-change carve-out: if that prior encounter was billed under
+    // a DIFFERENT payer than the current encounter's insurance, it does
+    // NOT count against this year's timeline — e.g. MetroPlus billed
+    // G0442 in 2026, patient's insurance is now Healthfirst -> Healthfirst
+    // can still bill G0442 this year, since it never used it. An
+    // established patient stays established regardless of this — that
+    // status isn't derived from this function.
     function codeUsedInYear(code, year) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1161,6 +1231,7 @@
             const ts = parseUSDateSnap(enc.encounter_date);
             if (!ts) return false;
             if (new Date(ts).getFullYear() !== year) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -1171,6 +1242,10 @@
 
     // Was `code` billed in any PRIOR encounter within the last `days` days
     // of the current DOS? Excludes the currently-open encounter's own date.
+    //
+    // Same insurance-change carve-out as codeUsedInYear above: a prior
+    // encounter billed under a different payer than the current
+    // encounter's insurance doesn't count against the 30/180-day window.
     function codeUsedInLastDays(code, days) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1185,6 +1260,7 @@
             if (!ts) return false;
             const diffDays = Math.abs(currentTs - ts) / 86400000;
             if (diffDays > days) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])

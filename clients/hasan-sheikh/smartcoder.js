@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.73
+// @name         Hasan Sheikh SmartCoder v1.74
 // @namespace    http://tampermonkey.net/
-// @version      1.73
+// @version      1.74
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,34 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.74 (2026-08-12) - Two fixes ported from Getwell:
+//   (1) isConfirmedNonSmoker "Pipe smoker" false positive: a chart like
+//   "Tobacco use: Former smoker ... Additional Findings: Tobacco user
+//   Pipe smoker" was flagged as a confirmed CURRENT smoker, because the
+//   bare-smoker check ran against the raw text and "Pipe smoker" isn't
+//   preceded by not/denies/no/former/past/non-. Now strips
+//   "<product type> smoker" phrases (pipe/cigar/cigarette/cigarillo/
+//   hookah/chew) out of the text before that check, but only once an
+//   explicit "Former smoker"/"non-smoker" answer already exists
+//   elsewhere in the note — genuine current-use phrasing like "Heavy
+//   smoker" is untouched.
+//   (2) NEW RULE: insurance-change carve-out for the preventive/
+//   counseling timeline gates. codeUsedInYear (annual "billed this
+//   calendar year" checks) and codeUsedInLastDays (30-day gates, the
+//   99214 "not used in the last 30 days" rule) now skip any historical
+//   encounter billed under a DIFFERENT payer than the current
+//   encounter's insurance. Example: MetroPlus billed G0442 10 days ago;
+//   patient is now on Healthfirst — Healthfirst can still bill G0442
+//   today, since Healthfirst itself never used it. Added
+//   getPayerBrand() (derives a payer "brand" key, stripping plan-variant
+//   words like PPO/HMO/Plan/Leaf/Premier/etc. — "Healthfirst" and
+//   "Healthfirst PPO" still count as the SAME payer; only a genuinely
+//   different payer resets the timeline) and isDifferentPayerThanCurrent()
+//   (conservative: unparsed insurance on either side is treated as the
+//   SAME payer, so missing data never opens a duplicate-billing gap).
+//   Does NOT affect new-vs-established patient status — that stays
+//   based on full visit history regardless of insurance changes.
 //
 // 1.73 (2026-08-11) - Age gate for the positive/negative RESULT codes tied
 //   to the screening bundles, not just the screening G-codes themselves.
@@ -1108,9 +1136,56 @@
         return !isMedicaidOrMedicareIns(insurance) && !isUHCInsurance(insurance);
     }
 
+    // Plan-variant words stripped out when deriving a payer "brand" key —
+    // used to tell a genuine insurance CHANGE (MetroPlus -> Healthfirst)
+    // apart from a same-payer plan-name variation (Healthfirst ->
+    // Healthfirst PPO / Healthfirst Leaf Premier). Only used for the
+    // insurance-change carve-out below; does not affect any other payer
+    // matching elsewhere in this file (isUHCInsurance, etc.).
+    const INSURANCE_PLAN_VARIANT_WORDS = new Set([
+        'ppo', 'hmo', 'epo', 'pos', 'hdhp', 'plan', 'choice', 'advantage',
+        'gold', 'silver', 'bronze', 'platinum', 'essential', 'elite',
+        'complete', 'premier', 'leaf', 'select', 'value', 'basic',
+        'standard', 'preferred', 'network', 'of', 'ny', 'nyc', 'the',
+        'insurance', 'health', 'care', 'plus'
+    ]);
+    function getPayerBrand(insuranceName) {
+        if (!insuranceName) return "";
+        const words = insuranceName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+        if (!words.length) return "";
+        const significant = words.filter(w => !INSURANCE_PLAN_VARIANT_WORDS.has(w));
+        // If every word got stripped (e.g. name was ALL plan-variant
+        // words), fall back to the unfiltered words rather than losing
+        // the brand entirely.
+        return (significant.length ? significant : words)[0];
+    }
+
+    // True if `pastInsuranceName` should be treated as a DIFFERENT payer
+    // than the current encounter's insurance, for the purpose of the
+    // preventive/counseling timeline carve-out below. Unknown/unparsed
+    // insurance on either side is treated conservatively as SAME payer
+    // (i.e. still counts against the timeline) so missing data never
+    // opens up a duplicate-billing gap.
+    function isDifferentPayerThanCurrent(pastInsuranceName) {
+        const currentInsurance = parseInsuranceFromPage(getEncounterText());
+        if (!currentInsurance || !pastInsuranceName) return false; // unknown -> treat as same, conservative
+        const currentBrand = getPayerBrand(currentInsurance);
+        const pastBrand = getPayerBrand(pastInsuranceName);
+        if (!currentBrand || !pastBrand) return false;
+        return currentBrand !== pastBrand;
+    }
+
     // Was `code` already billed in a PRIOR encounter this `year`? Excludes
     // the currently-open encounter's own date, so today's own claim doesn't
     // count against a genuinely new instance later in the year.
+    //
+    // Insurance-change carve-out: if that prior encounter was billed under
+    // a DIFFERENT payer than the current encounter's insurance, it does
+    // NOT count against this year's timeline — e.g. MetroPlus billed
+    // G0442 in 2026, patient's insurance is now Healthfirst -> Healthfirst
+    // can still bill G0442 this year, since it never used it. An
+    // established patient stays established regardless of this — that
+    // status isn't derived from this function.
     function codeUsedInYear(code, year) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1122,6 +1197,7 @@
             const ts = parseUSDateSnap(enc.encounter_date);
             if (!ts) return false;
             if (new Date(ts).getFullYear() !== year) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -1133,6 +1209,10 @@
     // Was `code` billed in any PRIOR encounter within the last `days` days
     // of the current DOS? Excludes the currently-open encounter's own date.
     // Used for the 99214 "not used in the last 30 days" rule.
+    //
+    // Same insurance-change carve-out as codeUsedInYear above: a prior
+    // encounter billed under a different payer than the current
+    // encounter's insurance doesn't count against the day window.
     function codeUsedInLastDays(code, days) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1147,6 +1227,7 @@
             if (!ts) return false;
             const diffDays = Math.abs(currentTs - ts) / 86400000;
             if (diffDays > days) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -1194,12 +1275,29 @@
         // is exactly the negation this guard exists to catch.
         if (new RegExp(`\\bcurrent\\b[\\s\\S]{0,25}?${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(socText)) return false;
 
+        const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
+
+        // When an explicit "Former smoker" / "non-smoker" answer already
+        // exists, a later "<product type> smoker" phrase (e.g. "Pipe
+        // smoker", "Cigar smoker", "Cigarette smoker") coming from a
+        // SEPARATE "Additional Findings: Tobacco user" sub-question is
+        // just describing what type of tobacco they used/use — it is not
+        // a fresh, independent affirmation of CURRENT smoking, and must
+        // not override the former/non-smoker answer. Without this,
+        // "Tobacco use: Former smoker, ... Additional Findings: Tobacco
+        // user Pipe smoker" was being flagged as a confirmed CURRENT
+        // smoker even though the patient explicitly answered "Former
+        // smoker".
+        const textForBareSmokerCheck = explicitNegative
+            ? socText.replace(/\b(?:pipe|cigar|cigarette|cigarillo|hookah|chew(?:ing)?)\s+smoker\b/gi, '')
+            : socText;
+
         // Bare "smoker" mention (e.g. "Light cigarette smoker") — checked
         // before "other tobacco use? No" below, since that question is
         // about smokeless/chewing tobacco, not cigarettes.
-        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(socText)) return false;
+        if (new RegExp(`${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(textForBareSmokerCheck)) return false;
 
-        if (/non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText)) return true;
+        if (explicitNegative) return true;
 
         const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(socText);
         if (otherTobaccoUse) {
