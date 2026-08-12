@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.39
+// @name         Getwell SmartCoder by ATQ v5.40
 // @namespace    http://tampermonkey.net/
-// @version      5.39
+// @version      5.40
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,23 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 5.40 (2026-08-12) - NEW RULE: commercial-insurance office-visit gating.
+//   Getwell rule — Aetna, Cigna, BCBS/Blue Cross Blue Shield, Empire
+//   (starting word), United Healthcare, UMR, Oxford (starting word) are
+//   commercial payers. When the current chart's insurance is commercial
+//   AND a Preventive visit code (99381-99397/G0438/G0439) is present,
+//   the office-visit E&M code is not billable alongside it — any
+//   office-visit code already on the chart is proposed for removal and
+//   none is suggested. If the same commercial payer has no Preventive
+//   code on the chart, the office-visit code is suggested/corrected
+//   exactly as before. New isGetwellCommercialInsurance() reuses
+//   isUHCInsurance() for United Healthcare/UMR/Oxford (already
+//   start-anchored there) and adds Aetna/Cigna/BCBS/Blue Cross Blue
+//   Shield/Empire on top; gating uses the existing hasPreventiveVisit
+//   flag so it stays in sync with the same gating rules (already-billed,
+//   televisit, etc.) that determine whether a Preventive code truly
+//   counts this encounter.
 //
 // 5.39 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
 //   "history still loading" notice if window.__ecwPatientHistory
@@ -1174,6 +1191,34 @@
         ];
 
         return UHC_BRAND_PATTERNS.some(re => re.test(name));
+    }
+
+    // ---- Commercial-insurance office-visit rule ----
+    // Getwell rule: when the payer is one of the listed commercial
+    // insurances AND a Preventive visit code is on the chart, the office
+    // visit E&M code is NOT billable alongside it and must be removed. If
+    // the same commercial payer has NO Preventive code on the chart, the
+    // office visit code is billed normally — this function only identifies
+    // the payer; the preventive-or-not branching happens where it's used.
+    // Reuses isUHCInsurance() for United Healthcare / UMR / Oxford (all
+    // three already covered there — see its own comments for why "United"
+    // and "Oxford"/"UMR" are start-anchored) so that matching logic isn't
+    // duplicated here.
+    function isGetwellCommercialInsurance(insurance) {
+        if (!insurance) return false;
+        if (isUHCInsurance(insurance)) return true; // United Healthcare, UMR, Oxford...
+        const name = insurance.trim().toLowerCase()
+            .replace(/[.,]/g, '')
+            .replace(/[\s-]+/g, ' ')
+            .trim();
+        if (/^aetna\b/.test(name)) return true;
+        if (/^cigna\b/.test(name)) return true;
+        if (/^bcbs\b/.test(name)) return true;
+        // Covers "Blue Cross Blue Shield", "Blue Cross Blue Shield of NY",
+        // "Blue Cross of California", etc. — anything starting "Blue Cross".
+        if (/^blue\s+cross\b/.test(name)) return true;
+        if (/^empire\b/.test(name)) return true; // Empire BCBS and similar Empire-branded plans
+        return false;
     }
 
     // Eligible unless insurance starts with Medicaid/Medicare or is
@@ -2499,7 +2544,24 @@
         // already on the chart gets flagged for removal if it's not right.
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
-        if (visitCategory) {
+        // ---- Commercial-insurance + Preventive: no office visit code ----
+        // Per Getwell rule: Aetna, Cigna, BCBS/Blue Cross Blue Shield,
+        // Empire (starting word), United Healthcare, UMR, Oxford (starting
+        // word) are commercial. When the payer is commercial AND a
+        // Preventive visit code is already on the chart, the office-visit
+        // E&M code is not billable alongside it — any office-visit code
+        // present gets removed and none is proposed. If the same
+        // commercial payer has NO Preventive code on the chart, the office
+        // visit code is suggested/corrected exactly as before.
+        const isCommercialInsForOV = isGetwellCommercialInsurance(insurance);
+        const blockOfficeVisitForCommercialPreventive = isCommercialInsForOV && hasPreventiveVisit;
+        if (blockOfficeVisitForCommercialPreventive) {
+            currentRows.forEach(r => {
+                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Commercial insurance (${insurance || 'commercial'}) + Preventive visit — office visit code not billable, removed` });
+                }
+            });
+        } else if (visitCategory) {
             let ovCode;
             let ovIsNewPatient = false;
             if (visitCategory === 'new') { ovCode = '99203'; ovIsNewPatient = true; }
