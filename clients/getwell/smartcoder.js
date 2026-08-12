@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v5.35
 // @namespace    http://tampermonkey.net/
-// @version      5.35
+// @version      5.36
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -1203,20 +1203,22 @@
         if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
 
         const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
-        if (explicitNegative) return true;
 
-        const otherTobaccoUse = /smokeless|chewing tobacco|tobacco user(?!\?\s*No)|\bcigar\b/i.test(socText);
-        if (otherTobaccoUse) {
-            const api = window.__ecwPatientHistory;
-            const data = api && api.getData ? api.getData() : null;
-            const confirmedByHistory = !!data && data.some(enc =>
-                [...(enc.assessments || []), ...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
-                    .some(c => (c.code || "").toUpperCase().startsWith("F17.210"))
-            );
-            return !confirmedByHistory; // unconfirmed -> treat as not-a-confirmed-smoker
-        }
+        // When an explicit "Former smoker" / "non-smoker" answer already
+        // exists, a later "<product type> smoker" phrase (e.g. "Pipe
+        // smoker", "Cigar smoker", "Cigarette smoker") coming from a
+        // SEPARATE "Additional Findings: Tobacco user" sub-question is
+        // just describing what type of tobacco they used/use — it is not
+        // a fresh, independent affirmation of CURRENT smoking, and must
+        // not override the former/non-smoker answer.
+        const textForAffirmativeCheck = explicitNegative
+            ? socText.replace(/\b(?:pipe|cigar|cigarette|cigarillo|hookah|chew(?:ing)?)\s+smoker\b/gi, '')
+            : socText;
 
-        return true; // no positive indicators found
+        const affirmativeSmokerWordPresent = /(?<!(?:not|denies|no)\s(?:\w+\s)?)(?<!(?:non|former)[\s-]?)(?<!\bex[\s-](?:\w+[\s-])?)\bsmoker\b/i.test(textForAffirmativeCheck);
+        if (affirmativeSmokerWordPresent) return false; // confirmed positive smoker
+
+        if (explicitNegative) return true; // no positive indicators found
     }
 
     // ====================== SHARED CLINICAL FLAG EXTRACTION ======================
