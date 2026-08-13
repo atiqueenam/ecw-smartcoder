@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-13T05:07:24.182Z",
+  "generatedAt": "2026-08-13T05:17:34.798Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.57",
+      "version": "1.58",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "a43511cec1bd3f3f681787465b08be603185e58546335753e919b517620655b8"
+      "sha256": "6cf1be027dcefb4c097a91050454b0ca5eb7e8885d0a9b5ccdb1df44bfa44c63"
     },
     {
       "id": "getwell",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "5.41",
+      "version": "5.42",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "97ba6777d759cdc14363f6222572f0fea24f72a4388c88e69a5e8f4318eeec88"
+      "sha256": "9c122116545f9c48addc99b2f7c843b1cc73b0b3ba7652850aa9bf92d4eaaf04"
     },
     {
       "id": "hasan-sheikh",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.75",
+      "version": "1.76",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "ecc6f7e85732cc3247206783dbc703955e690ee561b8e787c3cdab6d74f06a60"
+      "sha256": "f36ff430e150623233ce3336d5b6ef4ea508d95247d498266b016887dcfc2f81"
     }
   ]
 }
