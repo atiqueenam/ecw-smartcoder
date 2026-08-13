@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v5.40
 // @namespace    http://tampermonkey.net/
-// @version      5.40
+// @version      5.41
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,7 +12,8 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
-//
+// 5.41 - rawCPTCodeSet function defined
+
 // 5.40 (2026-08-12) - NEW RULE: commercial-insurance office-visit gating.
 //   Getwell rule — Aetna, Cigna, BCBS/Blue Cross Blue Shield, Empire
 //   (starting word), United Healthcare, UMR, Oxford (starting word) are
@@ -1937,6 +1938,7 @@
         const rawCPTCodesNow = getCPTRows()
             .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
             .filter(Boolean);
+        const rawCPTCodeSet = new Set(rawCPTCodesNow);
 
         // Single source of truth for whether each of the 4 quick-action
         // buttons (PV/PC/SM/OB) is currently allowed to fire — same
