@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.56
+// @name         Bronx Health SmartCoder v1.57
 // @namespace    http://tampermonkey.net/
-// @version      1.56
+// @version      1.57
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,25 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.57 (2026-08-13) - BUG FIX x3:
+//   1) isStraightMedicareIns() now strips harmless trailing/interior noise
+//      (a parenthetical like "(Traditional)", stray dashes) before its
+//      exact match, so a plain-Medicare name carrying that noise is
+//      recognized as straight Medicare and gets G0438/G0439 instead of
+//      falling through to an age-banded 993xx preventive code.
+//   2) The "Controlling BP" chief-complaint check now also matches the
+//      common typo "controllin bp" (missing trailing "g").
+//   3) Televisit (CON) 99212-vs-99213 med-refill rule: a CC segment is no
+//      longer treated as "refill-only" just because the word "refill"
+//      appears somewhere in it. A heavy CC like "MEDICATION REFILL ( 95
+//      yr male contacted @ 11:39 am spoke with pts daughter and care
+//      giver ( pts medication and pharmacy confirmed ( kt )" has no
+//      commas/semicolons so it was one giant "segment", and used to bill
+//      99212 even though it documents a real encounter (contact time, who
+//      was spoken to, meds/pharmacy confirmed). Now the refill phrase is
+//      stripped out of each segment and only counts as refill-only if
+//      what's left is a short (<=6 word) descriptor — otherwise 99213.
+//
 // 1.56 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
 //   "history still loading" notice if window.__ecwPatientHistory
 //   .isLoading() is true, instead of proceeding. isEstablishedPatient()
@@ -2118,7 +2137,9 @@
         // encounter, or no I10) we leave whatever is currently on the
         // chart untouched. ----
         {
-            const ccHasControllingBP = /controlling\s*bp/i.test(ccText);
+            // Accept the common typo "controllin bp" (missing trailing "g")
+            // as equivalent to "controlling bp".
+            const ccHasControllingBP = /controllin[g]?\s*bp/i.test(ccText);
             const sysCodes = ['3074F', '3075F'];
             const diaCodes = ['3078F', '3079F'];
             const existingCptCodesBp = getCPTRows().map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
@@ -2517,11 +2538,33 @@
                     // separate complaint. If any comma-separated part is
                     // an unrelated complaint instead, more time was spent
                     // discussing it, so bill 99213.
+                    //
+                    // A segment merely CONTAINING the word "refill"
+                    // somewhere isn't enough — a CC like "MEDICATION
+                    // REFILL ( 95 yr male contacted @ 11:39 am spoke with
+                    // pts daughter and care giver ( pts medication and
+                    // pharmacy confirmed ( kt )" has no commas/semicolons
+                    // (one giant segment) but documents a real telemed
+                    // encounter — contact time, who was spoken to,
+                    // confirmation of meds/pharmacy — well beyond a bare
+                    // refill descriptor, so it should bill 99213. Strip
+                    // the refill phrase(s) out of each segment and only
+                    // treat it as refill-only if what's left is a short
+                    // descriptor (a handful of words), not substantive
+                    // encounter narrative.
                     const MED_REFILL_RE = /\b(?:rx\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?)|med(?:ication)?s?\s*(?:refill|renewal|review)|refill|renewal)\b/i;
+                    const MED_REFILL_RE_G = new RegExp(MED_REFILL_RE.source, 'gi');
+                    const REFILL_DESCRIPTOR_WORD_LIMIT = 6;
                     const hasMedRefillMention = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
                     const ccSegments = ccText.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+                    const isSegmentRefillOnly = seg => {
+                        if (!MED_REFILL_RE.test(seg)) return false;
+                        const remainder = seg.replace(MED_REFILL_RE_G, ' ').replace(/[()]/g, ' ');
+                        const remainderWords = remainder.split(/\s+/).map(w => w.trim()).filter(Boolean);
+                        return remainderWords.length <= REFILL_DESCRIPTOR_WORD_LIMIT;
+                    };
                     const isOnlyMedRefill = hasMedRefillMention &&
-                        (ccSegments.length === 0 || ccSegments.every(seg => MED_REFILL_RE.test(seg)));
+                        (ccSegments.length === 0 || ccSegments.every(isSegmentRefillOnly));
                     ovCode = isOnlyMedRefill ? '99212' : '99213';
                     ovReason = isOnlyMedRefill
                         ? 'Televisit (CON), CC is med refill/renewal/review only — 99212'
@@ -2936,8 +2979,26 @@
     // — only this and VNS Choice get the G0438/G0439 Medicare AWV codes.
     // Same regex the office-visit E&M rule already uses for its own
     // Medicare check.
+    //
+    // Real charts often carry harmless trailing/interior noise on an
+    // otherwise-plain Medicare name — a parenthetical like "(Traditional)"
+    // or "(Original)", a stray dash between "Medicare" and "Part B", extra
+    // spacing, etc. None of that makes it an Advantage plan, but the old
+    // exact ^...$ match choked on it and fell through to the age-banded
+    // 993xx branch instead of G0438/G0439. Strip that noise before the
+    // exact match so straight Medicare is recognized whenever the name
+    // simply STARTS with "Medicare" (optionally "Part A/B") and carries
+    // no other distinguishing plan/brand text.
     function isStraightMedicareIns(insurance) {
-        return !!insurance && /^\s*medicare(\s+part\s*[ab]|\s+[ab])?\s*$/i.test(insurance.trim());
+        if (!insurance) return false;
+        let name = insurance.trim();
+        // Strip a trailing parenthetical annotation (and any punctuation/
+        // whitespace it leaves behind) — e.g. "Medicare Part B (Traditional)",
+        // "MEDICARE (ID 123456)".
+        name = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+        // Normalize stray dashes/extra spacing between words.
+        name = name.replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+        return /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(name);
     }
 
     // Established = at least one PRIOR encounter exists in patient history
