@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.45
+// @name         Bronx Health SmartCoder v1.60
 // @namespace    http://tampermonkey.net/
-// @version      1.45
-// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link + PN modal resize with his custom coding rules.
+// @version      1.60
+// @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
@@ -11,6 +11,215 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.60 (2026-08-13) - BUG FIX: United Health Care's blanket "no G-prefixed
+//   CPT code" rule was deleting G0101/G0102/G0103 too, even though UHC
+//   does use these. Added UHC_GCODE_EXCEPTIONS = {G0101,G0102,G0103},
+//   checked in BOTH places the UHC G-code sweep runs (the `desired` map
+//   filter before toAdd is built, and the currentRows sweep that removes
+//   any leftover G-code already on the chart) — these 3 codes are now
+//   never proposed for deletion for UHC, everything else G-prefixed
+//   still is.
+//
+// 1.59 (2026-08-13) - NEW RULE: NYCE PPO billing restrictions.
+//   1) No counseling services for NYCE PPO — Preventive Counseling was
+//      already blocked; Smoking Counseling (SM) and Obesity Counseling
+//      (OB) quick-action buttons are now also disabled for this payer,
+//      same as the other counseling-blocked payers.
+//   2) If a Preventive visit code (993xx or G0438/G0439) is on a NYCE
+//      PPO claim, no office-visit E/M code is billed alongside it — any
+//      office-visit code already on the chart is removed and none is
+//      suggested. Added isNycePPOIns() helper, reused by both rules.
+//
+// 1.58 (2026-08-13) - NEW RULE: depression/alcohol screening ICD cleanup.
+//   If Z13.31 (depression screening) or Z13.9/Z13.89 (alcohol screening)
+//   is sitting on the chart but there's no matching screening CPT on the
+//   claim (G8510/G8431/G0444/3725F for depression; G9622/3016F/G0442/
+//   H0049/99408 for alcohol) — either already present or about to be
+//   added this run — the ICD is now flagged for deletion. Previously
+//   these Z-codes were only ever ADDED when a screening was documented;
+//   nothing removed one that was left over from a prior visit or added
+//   by hand with no screening actually billed this encounter.
+//
+// 1.57 (2026-08-13) - BUG FIX x3:
+//   1) isStraightMedicareIns() now strips harmless trailing/interior noise
+//      (a parenthetical like "(Traditional)", stray dashes) before its
+//      exact match, so a plain-Medicare name carrying that noise is
+//      recognized as straight Medicare and gets G0438/G0439 instead of
+//      falling through to an age-banded 993xx preventive code.
+//   2) The "Controlling BP" chief-complaint check now also matches the
+//      common typo "controllin bp" (missing trailing "g").
+//   3) Televisit (CON) 99212-vs-99213 med-refill rule: a CC segment is no
+//      longer treated as "refill-only" just because the word "refill"
+//      appears somewhere in it. A heavy CC like "MEDICATION REFILL ( 95
+//      yr male contacted @ 11:39 am spoke with pts daughter and care
+//      giver ( pts medication and pharmacy confirmed ( kt )" has no
+//      commas/semicolons so it was one giant "segment", and used to bill
+//      99212 even though it documents a real encounter (contact time, who
+//      was spoken to, meds/pharmacy confirmed). Now the refill phrase is
+//      stripped out of each segment and only counts as refill-only if
+//      what's left is a short (<=6 word) descriptor — otherwise 99213.
+//
+// 1.56 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
+//   "history still loading" notice if window.__ecwPatientHistory
+//   .isLoading() is true, instead of proceeding. isEstablishedPatient()
+//   can't distinguish "genuinely no prior encounters" from "history
+//   fetch hasn't finished yet" — both look like an empty getData(), and
+//   it silently defaulted to "New Patient" either way. Since this
+//   established/new call picks the actual CPT billed (99381-99387 vs
+//   99391-99397, or G0438 vs G0439 Medicare AWV), clicking Preventive
+//   right after opening/switching a chart — before the async,
+//   multi-request history fetch resolves — could bill a new-patient
+//   code (or a duplicate G0438) for a genuinely established patient.
+//   isLoading() already existed and was already used elsewhere (the
+//   "Loading visit history…" banner) but was never checked here.
+//
+// 1.55 (2026-08-12) - NEW RULE: insurance-change carve-out for the
+//   preventive/counseling timeline gates, ported from Getwell/Hasan
+//   Sheikh. codeUsedInYear (annual "billed this calendar year" checks)
+//   and codeUsedInLastDays (30-day gates, the 99214 "not used in the
+//   last 30 days" rule) now skip any historical encounter billed under
+//   a DIFFERENT payer than the current encounter's insurance. Example:
+//   a code billed under one insurance no longer blocks billing it again
+//   once the patient's insurance genuinely changes to a different
+//   payer, since that new payer never used it. Added getPayerBrand()
+//   (derives a payer "brand" key, stripping plan-variant words like
+//   PPO/HMO/Plan/Leaf/Premier/etc. — same payer under a different plan
+//   name still counts as the SAME payer; only a genuinely different
+//   payer resets the timeline) and isDifferentPayerThanCurrent()
+//   (conservative: unparsed insurance on either side is treated as the
+//   SAME payer, so missing data never opens a duplicate-billing gap).
+//   Does NOT touch smoker/tobacco detection (Bronx has no
+//   isConfirmedNonSmoker logic to begin with) and does NOT affect
+//   new-vs-established patient status — that stays based on full visit
+//   history regardless of insurance changes.
+//
+// 1.54 (2026-08-11) - 99401 is now allowed for MetroPlus (was blocked in 1.53).
+//   Empire alcohol/tobacco removal is now limited to televisits only
+//
+// 1.53 (2026-08-11) - Age gates for screening result codes and smoking
+//   counseling (ported from Getwell 5.33/Hasan Sheikh 1.71-1.73). Audit:
+//   G0444 (12+), G0442 (18+), and their result codes G8510/G8431 (12+)
+//   and G9622/3016F (18+) were ALREADY correctly gated, including the
+//   age-based cleanup block for G0444/G0442 (they're deliberately not in
+//   MANAGED_CODES). Two gaps found and fixed: (1) tobacco screening result
+//   codes G9275/G9276/1036F/1000F had no age gate — added the same 18+
+//   requirement as 99406; they're in MANAGED_CODES so an already-present
+//   one now auto-deletes for a too-young patient. (2) 99406 (Smoking
+//   Counseling) itself had no age gate anywhere — added an 18+ check to
+//   the SM quick-action gating (computeQuickActionGating), which already
+//   doubles as cleanup, so this also auto-deletes an existing 99406 for a
+//   patient under 18.
+//
+// 1.52 (2026-08-11) - Widened the 1.51 popup fix into a general rule: the
+//   background popup-dismiss helpers (dismissEcwErrorPopup,
+//   dismissAssociatedCPTModalIfPresent) now ONLY ever act while this
+//   extension is itself mid-action (quick action, Start Action, Auto
+//   Link, or Claim Link) — added a new extensionBusy flag, set for Auto
+//   Link/Claim Link's duration (they had no such tracking before; quick
+//   actions and Start Action already had quickActionRunning/
+//   actionRunning). Both helpers now bail out and touch nothing at all
+//   whenever quickActionRunning/actionRunning/extensionBusy are all
+//   false — i.e. whenever it's the user doing something manually, not
+//   this extension. Previously the "Associated CPT Codes" popup was
+//   auto-answered "No" and plain "eClinicalWorks" error alerts were
+//   auto-dismissed regardless of who triggered them, which could
+//   override a decision the user was mid-way through making by hand.
+//   extensionBusy is cleared in a finally block (so an unexpected error
+//   mid-flow can't leave it stuck true) plus a 20s hard-timeout safety
+//   net around Auto Link's async delete/confirm loop.
+//
+// 1.51 (2026-08-11) - BUG FIX: manually clicking Remove on an ICD/CPT in
+//   eCW's own Claim screen and confirming "Are you sure you want to
+//   remove this ICD?" was getting the dialog instantly force-closed
+//   before Yes/No could be clicked, silently cancelling the delete. Root
+//   cause: dismissEcwErrorPopup() (polls every 1.8s to auto-close eCW's
+//   plain "eClinicalWorks"-titled error alerts, e.g. "Could not add ICD:
+//   ...") matches on modal TITLE only — but eCW reuses that exact same
+//   titled modal for Yes/No confirmation dialogs too. Since a confirm
+//   dialog has no "OK" button to match, the old code fell through to the
+//   close/X button and force-dismissed it on every poll tick, faster than
+//   a person could click anything. Fixed by having the function bail out
+//   immediately (do nothing at all) whenever it detects a Yes/No button
+//   pair in the modal, leaving any such confirmation dialog fully alone
+//   for the user to answer. Plain OK-only error alerts are unaffected and
+//   still auto-dismiss as before.
+//
+// 1.50 (2026-08-11) - Two fixes. (1) New-patient office-visit E&M: if the
+//   practice already added 99204 or 99205 to a new-patient chart, we no
+//   longer also suggest/add our own 99203 alongside it (theirs is the
+//   deliberate call, keep it) — and if a stale 99203 from an earlier run
+//   is already sitting there next to their 99204/99205, it now gets
+//   flagged for deletion as redundant. If neither 99204 nor 99205 is
+//   present, behavior is unchanged: we still only ever add 99203. (2)
+//   Preventive E&M code selection: only STRAIGHT/plain Medicare (exact
+//   "Medicare"/"Medicare Part A"/"Medicare Part B", nothing else in the
+//   name) and VNS Choice get the G0438/G0439 Medicare AWV codes now.
+//   Clover Health — previously lumped in with Medicare for this — and
+//   every other insurance (including Medicare Advantage plans whose name
+//   merely mentions "Medicare") now correctly get the age-banded 993xx
+//   preventive E&M code instead. Added isStraightMedicareIns() for this;
+//   isAnyMedicareIns()'s other, unrelated uses (vaccine Medicare gating,
+//   Preventive-Counseling-blocked-payer check) are untouched.
+//
+// 1.49 (2026-08-11) - Two fixes. (1) 99402/99403/99404 (30/45/60-min
+//   Preventive Counseling) are never used by this provider — only 99401
+//   is. Removed their ICD-linking entries from both Auto Link and Claim
+//   Link's CPT rule tables (they were wrongly treated as valid/linkable
+//   like 99401) and added an unconditional Analyze-flow deletion: any of
+//   the three gets removed outright wherever found, independent of visit
+//   type/insurance/PC gating. (2) Office-visit E&M cleanup was silently
+//   ignoring 99204/99205 (new-patient level 4/5) because they weren't in
+//   OFFICE_VISIT_EM_CODES at all — a 99204 sitting on an ESTABLISHED
+//   visit's chart (wrong patient type) could never be flagged. Added both
+//   to OFFICE_VISIT_EM_CODES and made their PRACTICE_PROTECTED_OV_CODES
+//   protection conditional on ovIsNewPatient: on an actual new-patient
+//   visit a 99204/99205 next to the computed 99203 is still protected as
+//   a deliberate practice override (unchanged behavior); on an
+//   established visit it's now correctly recognized as a mismatched code
+//   and deleted. 99215's unconditional protection is unchanged.
+//
+// 1.48 (2026-08-11) - 95250 (CGM placement) now follows the exact same
+//   rule as 95251 (CGM interpretation): both link to the diabetic ICD
+//   E11.9 in Auto Link and Claim Link's CPT rule tables, and both trigger
+//   the same modifier logic (checked together as "9525x present").
+//   Televisit modifier rule unchanged: office-visit code gets mod1=95
+//   always, plus mod2=25 when either 9525x code is present. NEW: added a
+//   normal (non-televisit) visit rule — when 9525x is present, the
+//   office-visit code gets mod1=25 by default; but if a Preventive or
+//   Preventive Counseling code (993xx/G0438/G0439/99401) is ALSO on the
+//   chart alongside the office-visit code, the 25 goes on that
+//   preventive/counseling code's mod1 instead, and the office-visit
+//   code's own modifier is left completely untouched (not set, not
+//   cleared). Refactored al_applyTelevisitModifier's Angular-scope/manual-
+//   input modifier-setting into a shared al_setCPTModifier() helper used
+//   by both branches — no behavior change to the write mechanism itself.
+//
+// 1.47 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
+//   cleanup, not just an add-guard. Whenever a quick-action button is
+//   faded — for ANY of its existing reasons (already billed this year/30
+//   days, wrong insurance, no chronic dx this encounter, not a confirmed
+//   smoker, BMI doesn't qualify, new patient, televisit, etc.) — that
+//   bundle's own CPT code is deleted if already on the chart: PV faded ->
+//   993xx/G0438/G0439 removed; PC faded -> 99401 removed; SM faded ->
+//   99406 removed; OB faded -> G0447 removed. Existing
+//   hasPreventiveVisit/has99401ForZ71/hasObesityCPTForBMI logic now reads
+//   through this same gating, so the linked ICDs (Z00.01/Z00.121,
+//   Z71.3/Z71.82/Z71.89, BMI Z68.xx) cascade-delete automatically too —
+//   Z68.xx specifically is only removed if NEITHER the PV nor the
+//   (now-cleaned) OB bundle still needs it. Superseded/generalized the
+//   1.46 televisit-only cleanup (televisit is just one of the gating
+//   reasons now, same as before).
+//
+// 1.46 (2026-08-11) - Removed the "commercial payer" office-visit exclusion:
+//   Bronx does not follow that rule, so an office-visit E&M code is now
+//   suggested for every visit (Aetna/Cigna/BCBS/UHC/UMR/Empire included).
+//   Added active cleanup for televisits (CON): any Preventive visit code
+//   (993xx/G0438/G0439) or Preventive Counseling (99401) already on the
+//   chart is now deleted outright, along with their linked ICDs
+//   (Z00.01/Z00.121, Z71.3/Z71.82/Z71.89, Z68.xx when no longer needed) —
+//   not just blocked from being newly added. Removed MODULE 3 (PN modal
+//   resize) entirely per Bronx's request; #mainPNDialog is left at eCW's
+//   own default size/behavior now.
 //
 // 1.45 (2026-08-10) - Fixed pediatric Obesity Counseling gating. Patients
 //   under 18 now use documented BMI percentile >=95 instead of adult BMI >=30;
@@ -385,6 +594,16 @@
     let analysisRunning = false;
     let actionRunning = false;
     let actionLog = [];         // [{code, action:'add'|'delete', status:'success'|'fail', message}]
+
+    // True only while THIS extension is actively performing its own
+    // add/delete/link work (Auto Link, Claim Link — quick actions and
+    // Start Action have their own quickActionRunning/actionRunning flags
+    // already). Used exclusively to gate the background popup-dismiss
+    // helpers below: they should only ever act on a dialog that OUR OWN
+    // action just triggered, never on one raised by something the user
+    // is doing manually — see dismissEcwErrorPopup/
+    // dismissAssociatedCPTModalIfPresent.
+    let extensionBusy = false;
 
     // Caches SOAP-note text from the last time it was visible (billing tab
     // hides it from innerText), so analysis stays correct on either tab.
@@ -1026,7 +1245,7 @@
     // Empire plan: alcohol/tobacco screening codes aren't used for this
     // payer — any already on the chart get removed.
     function isEmpireIns(insurance) {
-        return !!insurance && /empire/i.test(insurance.trim());
+    return !!insurance && /^empire\b/i.test(insurance.trim());
     }
 
     // Eligible unless insurance starts with Medicaid/Medicare or is
@@ -1037,9 +1256,57 @@
         return !isMedicaidOrMedicareIns(insurance) && !isUHCInsurance(insurance);
     }
 
+    // Plan-variant words stripped out when deriving a payer "brand" key —
+    // used to tell a genuine insurance CHANGE (e.g. MetroPlus ->
+    // Healthfirst) apart from a same-payer plan-name variation
+    // (Healthfirst -> Healthfirst PPO / Healthfirst Leaf Premier). Only
+    // used for the insurance-change carve-out below; does not affect any
+    // other payer matching elsewhere in this file (isEmpireIns,
+    // isUHCInsurance, isPreventiveCounselBlockedIns, etc.).
+    const INSURANCE_PLAN_VARIANT_WORDS = new Set([
+        'ppo', 'hmo', 'epo', 'pos', 'hdhp', 'plan', 'choice', 'advantage',
+        'gold', 'silver', 'bronze', 'platinum', 'essential', 'elite',
+        'complete', 'premier', 'leaf', 'select', 'value', 'basic',
+        'standard', 'preferred', 'network', 'of', 'ny', 'nyc', 'the',
+        'insurance', 'health', 'care', 'plus'
+    ]);
+    function getPayerBrand(insuranceName) {
+        if (!insuranceName) return "";
+        const words = insuranceName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+        if (!words.length) return "";
+        const significant = words.filter(w => !INSURANCE_PLAN_VARIANT_WORDS.has(w));
+        // If every word got stripped (e.g. name was ALL plan-variant
+        // words), fall back to the unfiltered words rather than losing
+        // the brand entirely.
+        return (significant.length ? significant : words)[0];
+    }
+
+    // True if `pastInsuranceName` should be treated as a DIFFERENT payer
+    // than the current encounter's insurance, for the purpose of the
+    // preventive/counseling timeline carve-out below. Unknown/unparsed
+    // insurance on either side is treated conservatively as SAME payer
+    // (i.e. still counts against the timeline) so missing data never
+    // opens up a duplicate-billing gap.
+    function isDifferentPayerThanCurrent(pastInsuranceName) {
+        const currentInsurance = parseInsuranceFromPage(getEncounterText());
+        if (!currentInsurance || !pastInsuranceName) return false; // unknown -> treat as same, conservative
+        const currentBrand = getPayerBrand(currentInsurance);
+        const pastBrand = getPayerBrand(pastInsuranceName);
+        if (!currentBrand || !pastBrand) return false;
+        return currentBrand !== pastBrand;
+    }
+
     // Was `code` already billed in a PRIOR encounter this `year`? Excludes
     // the currently-open encounter's own date, so today's own claim doesn't
     // count against a genuinely new instance later in the year.
+    //
+    // Insurance-change carve-out: if that prior encounter was billed under
+    // a DIFFERENT payer than the current encounter's insurance, it does
+    // NOT count against this year's timeline — e.g. a code billed under
+    // one insurance doesn't block billing it again after the patient's
+    // insurance genuinely changes to a different payer, since the NEW
+    // payer never used it. An established patient stays established
+    // regardless of this — that status isn't derived from this function.
     function codeUsedInYear(code, year) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1051,6 +1318,7 @@
             const ts = parseUSDateSnap(enc.encounter_date);
             if (!ts) return false;
             if (new Date(ts).getFullYear() !== year) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -1062,6 +1330,10 @@
     // Was `code` billed in any PRIOR encounter within the last `days` days
     // of the current DOS? Excludes the currently-open encounter's own date.
     // Used for the 99214 "not used in the last 30 days" rule.
+    //
+    // Same insurance-change carve-out as codeUsedInYear above: a prior
+    // encounter billed under a different payer than the current
+    // encounter's insurance doesn't count against the day window.
     function codeUsedInLastDays(code, days) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1076,6 +1348,7 @@
             if (!ts) return false;
             const diffDays = Math.abs(currentTs - ts) / 86400000;
             if (diffDays > days) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -1770,6 +2043,22 @@
             .filter(Boolean);
         const rawCPTCodeSet = new Set(rawCPTCodesNow);
 
+        // Televisit is determined from the appointment caption's visit type
+        // ("CON","TEL" = televisit for this provider) — not from CPT 98012, which
+        // this client doesn't use for that purpose.
+        const isTelevisitNote = ['con', 'tel'].includes(getVisitType().toLowerCase().trim());
+
+        // Single source of truth for whether each of the 4 quick-action
+        // buttons (PV/PC/SM/OB) is currently allowed to fire — same
+        // function that fades/enables them in the floating panel. Reusing
+        // it here means "button faded" and "code gets cleaned off the
+        // chart" can never drift apart: whatever reason disables a button
+        // (already billed this year/30 days, wrong insurance, no chronic
+        // dx, not a confirmed smoker, BMI doesn't qualify, new patient,
+        // televisit, etc.) also disqualifies that bundle's codes from
+        // staying on THIS chart.
+        const gating = computeQuickActionGating(insurance, flags, text);
+
         // Whether a preventive visit code is on this chart — several
         // other rules below (G0444/G0442, BMI CPTs) are gated on this.
         const PREVENTIVE_VISIT_CODES = new Set([
@@ -1777,7 +2066,50 @@
             '99391', '99392', '99393', '99394', '99395', '99396', '99397',
             'G0438', 'G0439'
         ]);
-        const hasPreventiveVisit = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        const hasPreventiveVisitRaw = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
+        // If the PV button is faded (for ANY reason — already billed this
+        // year, televisit, etc.) an already-present preventive code no
+        // longer counts for downstream bundle logic; the code itself is
+        // deleted below, right alongside its linked ICDs.
+        const hasPreventiveVisit = hasPreventiveVisitRaw && !gating.pv.disabled;
+
+        // NYCE PPO: office-visit E/M code isn't billable alongside a
+        // Preventive visit for this payer — used both to remove any
+        // office-visit code already on the chart (below, once toDelete
+        // exists) and to skip suggesting a new one further down.
+        const isNycePPOForOV = isNycePPOIns(insurance);
+
+        // ---- Quick-action gating cleanup ----
+        // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
+        // if it's already sitting on the chart. Linked ICDs (Z00.01/
+        // Z00.121, Z71.3/Z71.82/Z71.89, BMI Z68.xx) are handled further
+        // down by the existing hasPreventiveVisit/has99401ForZ71/
+        // hasObesityCPTForBMI-driven logic, which now folds this gating in
+        // too — so a faded button cascades into ICDs automatically without
+        // duplicating the "still needed?" rules here.
+        // Collected here (before `toDelete` exists yet below) and merged in
+        // once `toDelete` is declared.
+        const gatedBundleCPTDeletes = [];
+        function deleteBundleCPTIfPresent(codes, reason) {
+            getCPTRows().forEach(r => {
+                const code = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+                if (codes.includes(code) && !gatedBundleCPTDeletes.some(d => d.code === code)) {
+                    gatedBundleCPTDeletes.push({ code, row: r, kind: 'cpt', reason });
+                }
+            });
+        }
+        if (gating.pv.disabled) {
+            deleteBundleCPTIfPresent([...PREVENTIVE_VISIT_CODES], `Preventive not applicable — ${gating.pv.title}`);
+        }
+        if (gating.pc.disabled) {
+            deleteBundleCPTIfPresent(['99401'], `Preventive Counseling not applicable — ${gating.pc.title}`);
+        }
+        if (gating.sm.disabled) {
+            deleteBundleCPTIfPresent(['99406'], `Smoking Counseling not applicable — ${gating.sm.title}`);
+        }
+        if (gating.ob.disabled) {
+            deleteBundleCPTIfPresent(['G0447'], `Obesity Counseling not applicable — ${gating.ob.title}`);
+        }
 
         const desired = new Map(); // code -> reason
 
@@ -1840,7 +2172,9 @@
         // encounter, or no I10) we leave whatever is currently on the
         // chart untouched. ----
         {
-            const ccHasControllingBP = /controlling\s*bp/i.test(ccText);
+            // Accept the common typo "controllin bp" (missing trailing "g")
+            // as equivalent to "controlling bp".
+            const ccHasControllingBP = /controllin[g]?\s*bp/i.test(ccText);
             const sysCodes = ['3074F', '3075F'];
             const diaCodes = ['3078F', '3079F'];
             const existingCptCodesBp = getCPTRows().map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
@@ -1880,10 +2214,9 @@
         // age 65+, never added fresh, only corrected/deleted.
         const icdRows = getICDRows();
         const hasPainOrM = icdRows.some(r => isPainRelatedICDEntry(r.code, r.name));
-        // Televisit is determined from the appointment caption's visit type
-        // ("CON" = televisit for this provider) — not from CPT 98012, which
-        // this client doesn't use for that purpose.
-        const isTelevisitNote = getVisitType().toLowerCase().trim() === 'con';
+        // isTelevisitNote is computed earlier in this function (see above,
+        // right before hasPreventiveVisit) so it can also gate the
+        // Preventive/Preventive-Counseling bundle cleanup.
 
         if (age >= 65) {
             const has1157or1158 = rawCPTCodeSet.has('1157F') || rawCPTCodeSet.has('1158F');
@@ -1936,10 +2269,16 @@
             else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
         }
 
-        if (hasTob === true) {
-            desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
-        } else if (hasTob === false) {
-            desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+        // Tobacco/smoking screening result codes share 99406's 18+ age
+        // requirement — same pattern as depression (12+) and alcohol (18+)
+        // above. Both are in MANAGED_CODES, so gating the add here also
+        // makes an already-present one auto-delete for a too-young patient.
+        if (age >= 18) {
+            if (hasTob === true) {
+                desired.set(isHealthfirst ? '1036F' : 'G9275', 'Tobacco screening negative');
+            } else if (hasTob === false) {
+                desired.set(isHealthfirst ? '1000F' : 'G9276', 'Tobacco screening positive');
+            }
         }
 
         // G0136 (social needs screening) can only be used once every 6
@@ -1976,11 +2315,14 @@
         })).filter(r => r.code);
         const currentCodes = new Set(currentRows.map(r => r.code));
 
-        // United Health Care: no G-prefixed CPT codes at all, for any reason.
+        // United Health Care: no G-prefixed CPT codes at all, for any
+        // reason — EXCEPT G0101/G0102/G0103, which UHC does use and which
+        // must never be swept up by this rule.
         const isUHC = isUHCInsurance(insurance);
+        const UHC_GCODE_EXCEPTIONS = new Set(['G0101', 'G0102', 'G0103']);
         if (isUHC) {
             Array.from(desired.keys()).forEach(code => {
-                if (/^G\d/i.test(code)) desired.delete(code);
+                if (/^G\d/i.test(code) && !UHC_GCODE_EXCEPTIONS.has(code)) desired.delete(code);
             });
         }
 
@@ -2026,9 +2368,9 @@
             toAdd.push({ code: 'Z13.6', reason: '93000 present, no ECG-related ICD on chart — added for linking', kind: 'icd' });
         }
 
-        const toDelete = [];
+        const toDelete = [...gatedBundleCPTDeletes];
         currentRows.forEach(r => {
-            if (MANAGED_CODES.has(r.code) && !desired.has(r.code)) {
+            if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                 const reason = exclusionReasons.get(r.code) || 'Not applicable / wrong value for current chart';
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason });
             }
@@ -2036,10 +2378,11 @@
 
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/
-        // G0442) — this payer doesn't use G-codes at all.
+        // G0442) — this payer doesn't use G-codes at all, EXCEPT
+        // G0101/G0102/G0103 (UHC_GCODE_EXCEPTIONS above), which stay.
         if (isUHC) {
             currentRows.forEach(r => {
-                if (/^G\d/i.test(r.code) && !toDelete.some(d => d.code === r.code)) {
+                if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
                 }
             });
@@ -2059,6 +2402,42 @@
             if (empireZ139) {
                 toDelete.push({ code: empireZ139.code, row: empireZ139.row, kind: 'icd', reason: 'Empire plan — alcohol screening ICD not used for this payer' });
             }
+        }
+
+        // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
+        // (or Z13.89) on the chart with no matching screening CPT means
+        // the screening was never actually billed — someone added the
+        // diagnosis code (or it carried over from a prior visit) but no
+        // screening was documented/ordered this time. Delete the ICD in
+        // that case rather than leaving an orphaned screening diagnosis
+        // sitting on the claim with nothing to justify it.
+        // "Matching CPT" means either already on the chart OR about to be
+        // added this run (`desired` — e.g. G0444 added a few lines above).
+        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
+        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        getICDGridEntriesFast().forEach(entry => {
+            const code = entry.code.toUpperCase();
+            if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
+            }
+            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
+            }
+        });
+
+        // ---- NYCE PPO: office-visit E/M code not billable alongside a
+        // Preventive visit — remove any office-visit code already on the
+        // chart (isNycePPOForOV/hasPreventiveVisit computed above; the OV
+        // section further below is also skipped so a new one won't be
+        // re-added right after this deletes the old one).
+        if (isNycePPOForOV && hasPreventiveVisit) {
+            currentRows.forEach(r => {
+                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'NYCE PPO — office-visit E/M code not billable alongside a Preventive visit' });
+                }
+            });
         }
 
         // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
@@ -2088,10 +2467,13 @@
         // (Obesity's own gating already depends on BMI, per
         // computeQuickActionGating's BMI<30 fade rule) — if neither
         // applies, any existing Z68.xx is proposed for deletion instead of
-        // being corrected/kept.
+        // being corrected/kept. If the OB button is faded (G0447 is being
+        // deleted above, for whatever reason), G0447 no longer counts
+        // toward "still needed" either — the BMI code is kept ONLY if the
+        // PV bundle still needs it.
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
-        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447');
+        const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
         const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
@@ -2157,7 +2539,7 @@
         // Preventive Counseling (P/C) bundles (see the quick-action
         // clearOtherQuickActionBundles() comment above) — they only belong
         // on the chart when one of those two is actually being billed.
-        const has99401ForZ71 = rawCPTCodesNow.includes('99401');
+        const has99401ForZ71 = rawCPTCodesNow.includes('99401') && !gating.pc.disabled;
         const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
         if (!z71BundleNeeded) {
             const z71BundleEntries = getICDRows().filter(e =>
@@ -2193,14 +2575,12 @@
         // below) exist for this provider. Suggested code goes to the TOP
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
-        // No office-visit code at all for: Aetna, Cigna, BCBS, UHC, UMR
-        // ("umk" in the original request), Empire.
-        const isCommercialNoOfficeVisitIns = isUHCInsurance(insurance) ||
-            (!!insurance && /aetna|cigna|\bbcbs\b|blue\s*cross|\bumr\b|empire/i.test(insurance.trim()));
-
+        // Bronx does not follow the "commercial payer" exclusion other
+        // clients use — every visit (regardless of insurance) gets an
+        // office-visit E&M code suggested.
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
-        if (visitCategory && !isCommercialNoOfficeVisitIns) {
+        if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
             let ovCode;
             let ovIsNewPatient = false;
             let ovReason;
@@ -2233,11 +2613,33 @@
                     // separate complaint. If any comma-separated part is
                     // an unrelated complaint instead, more time was spent
                     // discussing it, so bill 99213.
+                    //
+                    // A segment merely CONTAINING the word "refill"
+                    // somewhere isn't enough — a CC like "MEDICATION
+                    // REFILL ( 95 yr male contacted @ 11:39 am spoke with
+                    // pts daughter and care giver ( pts medication and
+                    // pharmacy confirmed ( kt )" has no commas/semicolons
+                    // (one giant segment) but documents a real telemed
+                    // encounter — contact time, who was spoken to,
+                    // confirmation of meds/pharmacy — well beyond a bare
+                    // refill descriptor, so it should bill 99213. Strip
+                    // the refill phrase(s) out of each segment and only
+                    // treat it as refill-only if what's left is a short
+                    // descriptor (a handful of words), not substantive
+                    // encounter narrative.
                     const MED_REFILL_RE = /\b(?:rx\s*refill|refill(?:ing)?\s*(?:all\s*)?(?:rx|meds?|medications?|prescriptions?)|med(?:ication)?s?\s*(?:refill|renewal|review)|refill|renewal)\b/i;
+                    const MED_REFILL_RE_G = new RegExp(MED_REFILL_RE.source, 'gi');
+                    const REFILL_DESCRIPTOR_WORD_LIMIT = 6;
                     const hasMedRefillMention = MED_REFILL_RE.test(ccText) || MED_REFILL_RE.test(text);
                     const ccSegments = ccText.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+                    const isSegmentRefillOnly = seg => {
+                        if (!MED_REFILL_RE.test(seg)) return false;
+                        const remainder = seg.replace(MED_REFILL_RE_G, ' ').replace(/[()]/g, ' ');
+                        const remainderWords = remainder.split(/\s+/).map(w => w.trim()).filter(Boolean);
+                        return remainderWords.length <= REFILL_DESCRIPTOR_WORD_LIMIT;
+                    };
                     const isOnlyMedRefill = hasMedRefillMention &&
-                        (ccSegments.length === 0 || ccSegments.every(seg => MED_REFILL_RE.test(seg)));
+                        (ccSegments.length === 0 || ccSegments.every(isSegmentRefillOnly));
                     ovCode = isOnlyMedRefill ? '99212' : '99213';
                     ovReason = isOnlyMedRefill
                         ? 'Televisit (CON), CC is med refill/renewal/review only — 99212'
@@ -2272,8 +2674,15 @@
                 }
             }
 
+            // New patient: if the practice already put 99204 or 99205 on
+            // the chart themselves, that's a deliberate higher-level call
+            // — don't also suggest/add 99203 alongside it. Only add 99203
+            // when neither of those is already present.
+            const practiceAddedHigherNewPatientCode = ovIsNewPatient &&
+                (currentCodes.has('99204') || currentCodes.has('99205'));
+
             if (ovCode) {
-                if (!currentCodes.has(ovCode)) {
+                if (!currentCodes.has(ovCode) && !practiceAddedHigherNewPatientCode) {
                     toAdd.unshift({
                         code: ovCode,
                         reason: ovReason,
@@ -2282,12 +2691,34 @@
                         emIsNewPatient: ovIsNewPatient
                     });
                 }
-                // 99204/99205/99215 given directly by the practice are
-                // never auto-removed here, even if they don't match the
-                // computed office-visit code for this visit type.
-                const PRACTICE_PROTECTED_OV_CODES = new Set(['99204', '99205', '99215']);
+                // 99215 given directly by the practice on an established
+                // visit is never auto-removed, even if it doesn't match
+                // the computed office-visit code for this visit type.
+                // 99204/99205 (new-patient level 4/5) get that SAME
+                // protection ONLY when this really is a new-patient visit
+                // (ovIsNewPatient) — this provider's own logic only ever
+                // computes 99203 for a new patient, so a 99204/99205 next
+                // to it is a deliberate practice override worth keeping.
+                // But if the visit is actually ESTABLISHED, a 99204/99205
+                // on the chart isn't an override at all — it's just the
+                // wrong patient-type code (e.g. left over from a mistaken
+                // add) and gets cleaned up like any other mismatched
+                // office-visit code, not protected.
+                const PRACTICE_PROTECTED_OV_CODES = new Set(
+                    ovIsNewPatient ? ['99204', '99205', '99215'] : ['99215']
+                );
                 currentRows.forEach(r => {
                     if (PRACTICE_PROTECTED_OV_CODES.has(r.code)) return;
+                    // When the practice already added 99204/99205 to a new-
+                    // patient chart, our own 99203 (if it's sitting there
+                    // too, e.g. added on an earlier run before theirs was
+                    // added) is now redundant — two office-visit E&M codes
+                    // on the same new-patient encounter is wrong, and
+                    // theirs is the one to keep.
+                    if (practiceAddedHigherNewPatientCode && r.code === '99203') {
+                        toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: 'Practice already added a higher-level new-patient code (99204/99205) — 99203 is redundant' });
+                        return;
+                    }
                     if (OFFICE_VISIT_EM_CODES.includes(r.code) && r.code !== ovCode) {
                         toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Wrong office-visit code for this visit type (should be ${ovCode})` });
                     }
@@ -2330,6 +2761,21 @@
                 toDelete.push({ code: 'G0444', row: g0444Row.row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
             }
         }
+
+        // ---- 99402/99403/99404 (30/45/60-min Preventive Counseling):
+        // unconditional deletion ----
+        // Bronx only ever bills 99401 for Preventive Counseling — these
+        // longer-duration siblings are never used by this provider, so
+        // unlike 99401 (whose removal depends on the PC quick-action
+        // gating above) any of these three is simply wrong wherever it's
+        // found and gets deleted outright, regardless of visit type,
+        // insurance, or anything else.
+        ['99402', '99403', '99404'].forEach(wrongCode => {
+            const row = currentRows.find(r => r.code === wrongCode);
+            if (row && !toDelete.some(d => d.code === wrongCode)) {
+                toDelete.push({ code: wrongCode, row: row.row, kind: 'cpt', reason: 'Only 99401 is used for Preventive Counseling — this code is never used' });
+            }
+        });
 
         // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
         ['90686', '90688'].forEach(oldCode => {
@@ -2599,6 +3045,37 @@
         return !!insurance && /medicare/i.test(insurance);
     }
 
+    // "Straight"/plain Medicare only — i.e. the insurance name IS Medicare
+    // (optionally "Part A"/"Part B"/"A"/"B"), start-to-end, with nothing
+    // else in the name. This deliberately does NOT match Medicare
+    // Advantage plans or any other payer that merely mentions "Medicare"
+    // somewhere in a longer branded name (those get age-banded 993xx
+    // preventive E&M codes instead, same as any other non-Medicare payer)
+    // — only this and VNS Choice get the G0438/G0439 Medicare AWV codes.
+    // Same regex the office-visit E&M rule already uses for its own
+    // Medicare check.
+    //
+    // Real charts often carry harmless trailing/interior noise on an
+    // otherwise-plain Medicare name — a parenthetical like "(Traditional)"
+    // or "(Original)", a stray dash between "Medicare" and "Part B", extra
+    // spacing, etc. None of that makes it an Advantage plan, but the old
+    // exact ^...$ match choked on it and fell through to the age-banded
+    // 993xx branch instead of G0438/G0439. Strip that noise before the
+    // exact match so straight Medicare is recognized whenever the name
+    // simply STARTS with "Medicare" (optionally "Part A/B") and carries
+    // no other distinguishing plan/brand text.
+    function isStraightMedicareIns(insurance) {
+        if (!insurance) return false;
+        let name = insurance.trim();
+        // Strip a trailing parenthetical annotation (and any punctuation/
+        // whitespace it leaves behind) — e.g. "Medicare Part B (Traditional)",
+        // "MEDICARE (ID 123456)".
+        name = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+        // Normalize stray dashes/extra spacing between words.
+        name = name.replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+        return /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(name);
+    }
+
     // Established = at least one PRIOR encounter exists in patient history
     // (i.e. more than just today's current visit). No history at all, or
     // only today's own encounter, means New Patient.
@@ -2716,7 +3193,13 @@
     }
 
     // ====================== OFFICE VISIT E&M (visit-type driven) ======================
-    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99203'];
+    // Includes 99204/99205 (new-patient level 4/5) even though this
+    // provider's own suggestion logic only ever computes 99203 for a new
+    // patient — they need to be in this family so a wrong-patient-type
+    // 99204/99205 sitting on an ESTABLISHED visit's chart is recognized as
+    // a mismatched office-visit code and can be cleaned up (see the
+    // ovIsNewPatient-gated PRACTICE_PROTECTED_OV_CODES check below).
+    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99203', '99204', '99205'];
 
     // Chronic disease ICD list used for the 99213-vs-99214 complexity check.
     const CHRONIC_DISEASE_ICD_CODES = new Set([
@@ -2900,7 +3383,12 @@
             "2010F": { type: "startsWith", icds: ["Z68"] },
             "0503F": { type: "exact", icds: ["Z39.2"], fallback: "al_officeVisit" },
             "99401": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
-            "99402": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
+            // 99402/99403/99404 (30/45/60-min Preventive Counseling) are
+            // deliberately NOT linked here — Bronx only ever uses 99401 for
+            // Preventive Counseling. If one of them shows up on the chart
+            // it's always wrong and gets deleted outright (see the
+            // "9940x other than 99401" cleanup in computeAnalysis), never
+            // treated as a valid code worth linking ICDs to.
             "99406": { type: "multiICD", icds: [["F17"], ["Z71.6"]] },
             "G0447": { type: "multiICD", icds: [["E66.9","E66.01","E66.09"], ["Z68"]] },
             "G8418": { type: "customICDCollector", icdList: bmiOnlyICDs, fallback: "al_officeVisit" },
@@ -3047,6 +3535,9 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
@@ -3368,7 +3859,7 @@
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
+            'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6','Z00.00'
         ]);
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
@@ -3535,55 +4026,84 @@
     // signal.
     const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203']);
 
+    // 95250 (CGM placement) and 95251 (CGM interpretation) share the same
+    // modifier rules — wherever one applies, the other does too.
+    const CGM_9525X_CODES = new Set(['95250', '95251']);
+
+    // Preventive (993xx/G0438/G0439) and Preventive Counseling (99401) —
+    // used by the normal-visit 9525x modifier rule below to decide whether
+    // the 25 modifier belongs on the office-visit code or on this bundle
+    // instead.
+    const PREVENTIVE_OR_COUNSELING_CODES = new Set([...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES, '99401']);
+
+    // Sets a modifier field on a CPT row, trying the live Angular scope
+    // first (so eCW's own bindings update immediately) and falling back to
+    // a manual input event dispatch if the scope isn't reachable.
+    function al_setCPTModifier(row, field, value) {
+        try {
+            const scope = angular.element(row).scope();
+            if (scope && scope.cpt) {
+                scope.$applyAsync(() => { scope.cpt[field] = value; });
+                return;
+            }
+        } catch (e) { /* fall through to manual input path */ }
+        const input = row.querySelector(`input[data-fieldname="${field}"]`) ||
+                     row.querySelector(`input[name="${field}"]`) ||
+                     row.querySelector(`input[id*="${field}"]`);
+        if (input) {
+            input.focus();
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+        }
+    }
+
     function al_applyTelevisitModifier() {
         const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
         const codesPresent = cptRows
             .map(r => r.querySelector('td:nth-child(2)')?.textContent.trim().toUpperCase())
             .filter(Boolean);
-        if (getVisitType().toLowerCase().trim() !== 'con') return; // not a televisit — leave modifiers alone
+        const has9525x = codesPresent.some(c => CGM_9525X_CODES.has(c));
 
-        // Always 95 — no insurance-based 93 carve-out for this client.
-        const modifierValue = '95';
-        // 95251 present -> office visit code also gets mod2 = 25. Absent ->
-        // office visit code only gets the mod1 modifier above.
-        const has95251 = codesPresent.includes('95251');
+        if (getVisitType().toLowerCase().trim() === 'con') {
+            // ---- Televisit ----
+            // Always 95 on mod1 — no insurance-based 93 carve-out for this
+            // client. 95250/95251 present -> office visit code also gets
+            // mod2 = 25. Absent -> office visit code only gets mod1.
+            cptRows.forEach(row => {
+                const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+                if (!AL_OFFICE_VISIT_CODES.has(code)) return;
+                al_setCPTModifier(row, 'mod1', '95');
+                if (has9525x) al_setCPTModifier(row, 'mod2', '25');
+            });
+            return;
+        }
 
-        cptRows.forEach(row => {
+        // ---- Normal (non-televisit) visit ----
+        // 95250/95251 needs a 25 modifier to be billed alongside the same-
+        // day office visit. Default target is the office-visit code's
+        // mod1. But if a Preventive or Preventive Counseling code is ALSO
+        // on the chart alongside the office-visit code, the 25 goes on
+        // that preventive/counseling code's mod1 instead — the office-
+        // visit code's own modifier is left completely untouched (not
+        // set, not cleared) in that case.
+        if (!has9525x) return;
+
+        const officeVisitRow = cptRows.find(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
-            if (!AL_OFFICE_VISIT_CODES.has(code)) return;
-            try {
-                const scope = angular.element(row).scope();
-                if (scope && scope.cpt) {
-                    scope.$applyAsync(() => {
-                        scope.cpt.mod1 = modifierValue;
-                        if (has95251) scope.cpt.mod2 = '25';
-                    });
-                    return;
-                }
-            } catch (e) { /* fall through to manual input path */ }
-            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
-                             row.querySelector('input[name="mod1"]') ||
-                             row.querySelector('input[id*="mod1"]');
-            if (modInput) {
-                modInput.focus();
-                modInput.value = modifierValue;
-                modInput.dispatchEvent(new Event('input', { bubbles: true }));
-                modInput.dispatchEvent(new Event('change', { bubbles: true }));
-                modInput.blur();
-            }
-            if (has95251) {
-                const mod2Input = row.querySelector('input[data-fieldname="mod2"]') ||
-                                 row.querySelector('input[name="mod2"]') ||
-                                 row.querySelector('input[id*="mod2"]');
-                if (mod2Input) {
-                    mod2Input.focus();
-                    mod2Input.value = '25';
-                    mod2Input.dispatchEvent(new Event('input', { bubbles: true }));
-                    mod2Input.dispatchEvent(new Event('change', { bubbles: true }));
-                    mod2Input.blur();
-                }
-            }
+            return AL_OFFICE_VISIT_CODES.has(code);
         });
+        const preventiveRow = cptRows.find(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            return PREVENTIVE_OR_COUNSELING_CODES.has(code);
+        });
+
+        if (officeVisitRow && preventiveRow) {
+            al_setCPTModifier(preventiveRow, 'mod1', '25');
+        } else if (officeVisitRow) {
+            al_setCPTModifier(officeVisitRow, 'mod1', '25');
+        }
     }
 
     // ─── Modifier 59 on specific codes ──────────────────────────────────
@@ -3711,20 +4231,42 @@
     }
 
     function al_mainFlow() {
+        // extensionBusy stays true for this entire flow, including the
+        // async delete-then-confirm loop inside al_deleteUnwantedCodes —
+        // that's exactly the window where our OWN delete confirms need
+        // the popup helpers active. Cleared once every step below (all
+        // synchronous from here on) has run.
+        extensionBusy = true;
+        // Hard safety net: al_deleteUnwantedCodes's own delete/confirm
+        // loops are all individually time-bounded and always eventually
+        // call back, but if something truly unforeseen ever stalls it,
+        // this guarantees extensionBusy doesn't stay stuck true forever
+        // (which would otherwise leave the popup-dismiss helpers
+        // interfering with the user's later manual actions indefinitely).
+        const extensionBusyFallback = setTimeout(() => { extensionBusy = false; }, 20000);
         al_deleteUnwantedCodes(() => {
-            const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
-            const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-            al_linkCPTGeneric(icdRows, cptRows);
-            al_handleUnlistedCPTs(cptRows);
-            al_applySLModifierForPedsVaccines();
-            al_applyTelevisitModifier();
-            al_applyModifier59();
-            al_applyQWModifier();
-            al_alertDuplicateICDStart(icdRows);
-            al_alertDuplicateCPT(cptRows);
-            al_validatePreventiveCPT(cptRows);
-            al_checkChronicDiseaseCountFor99214(icdRows);
-            al_checkForL21(icdRows);
+            clearTimeout(extensionBusyFallback);
+            try {
+                const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
+                const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+                al_linkCPTGeneric(icdRows, cptRows);
+                al_handleUnlistedCPTs(cptRows);
+                al_applySLModifierForPedsVaccines();
+                al_applyTelevisitModifier();
+                al_applyModifier59();
+                al_applyQWModifier();
+                al_alertDuplicateICDStart(icdRows);
+                al_alertDuplicateCPT(cptRows);
+                al_validatePreventiveCPT(cptRows);
+                al_checkChronicDiseaseCountFor99214(icdRows);
+                al_checkForL21(icdRows);
+            } finally {
+                // Always clear, even if a step above throws — an
+                // unexpected error must never leave extensionBusy stuck
+                // true, which would make the popup-dismiss helpers keep
+                // acting on dialogs raised by later MANUAL actions.
+                extensionBusy = false;
+            }
         });
     }
 
@@ -3983,7 +4525,8 @@
             "2010F": { type: "bmiLink" },
             "0503F": { type: "exact", icds: ["Z39.2"], fallback: "cl_officeVisit" },
             "99401": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
-            "99402": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
+            // 99402/99403/99404 deliberately NOT linked — see the matching
+            // note in al_buildCPTRules; Bronx only ever uses 99401.
             "99406": { type: "multiICD", icds: [["F17"], ["Z71.6"]] },
             "G0447": { type: "multiICD", icds: [["E66.9","E66.01","E66.09"], ["Z68"]] },
             // G8418 / G8417 / G8420 / 2010F are handled by the dedicated
@@ -4136,6 +4679,9 @@
             "G2023": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
+            // 95250/95251 (CGM placement/interpretation) follow the same
+            // rule — both link to the diabetic ICD (E11.9).
+            "95250": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
@@ -4644,26 +5190,34 @@
 
     // ─── Main Flow ─────────────────────────────────────────────────────
     function cl_mainFlow() {
-        const icdRows = cl_getICDRows();
-        const cptRows = cl_getCPTRows();
+        // Entirely synchronous, so a simple try/finally around it is
+        // enough to keep extensionBusy accurate (see al_mainFlow's fuller
+        // comment on why this flag exists).
+        extensionBusy = true;
+        try {
+            const icdRows = cl_getICDRows();
+            const cptRows = cl_getCPTRows();
 
-        cl_linkCPTGeneric(icdRows, cptRows);
-        cl_handleUnlistedCPTs(cptRows);
-        cl_alertDuplicateICDStart(icdRows);
-        cl_checkICDOrderZBeforeDx(icdRows);
-        cl_alertDuplicateCPT(cptRows);
-        cl_validatePreventiveCPT(cptRows);
-        cl_checkChronicDiseaseCountFor99214(icdRows);
-        cl_checkForL21(icdRows);
-        cl_checkForFluVaccineCPTs(cptRows);
-        cl_checkMedicarePreventiveCPT(cptRows);
-        cl_checkMedicaidCPTCount(cptRows);
-        cl_applyHealthfirstTelehealthPOS(cptRows);
-        cl_applyMedicaidTelehealthPOS(cptRows);
-        cl_applyOtherInsuranceTelehealthPOS(cptRows);
-        cl_fillBlankTOS(cptRows);
-        cl_applyModifier59(cptRows);
-        cl_applyQWModifier(cptRows);
+            cl_linkCPTGeneric(icdRows, cptRows);
+            cl_handleUnlistedCPTs(cptRows);
+            cl_alertDuplicateICDStart(icdRows);
+            cl_checkICDOrderZBeforeDx(icdRows);
+            cl_alertDuplicateCPT(cptRows);
+            cl_validatePreventiveCPT(cptRows);
+            cl_checkChronicDiseaseCountFor99214(icdRows);
+            cl_checkForL21(icdRows);
+            cl_checkForFluVaccineCPTs(cptRows);
+            cl_checkMedicarePreventiveCPT(cptRows);
+            cl_checkMedicaidCPTCount(cptRows);
+            cl_applyHealthfirstTelehealthPOS(cptRows);
+            cl_applyMedicaidTelehealthPOS(cptRows);
+            cl_applyOtherInsuranceTelehealthPOS(cptRows);
+            cl_fillBlankTOS(cptRows);
+            cl_applyModifier59(cptRows);
+            cl_applyQWModifier(cptRows);
+        } finally {
+            extensionBusy = false;
+        }
     }
 
 
@@ -4743,11 +5297,18 @@
         }
 
         // ---- SM: Smoking Counseling ----
+        // 99406 requires the patient to be 18+ — same age-gate pattern as
+        // the G0444 (12+) / G0442 (18+) screening G-codes.
+        const smAge = getAgeAtDOS(text);
         let sm = { disabled: false, title: 'Smoking Counseling' };
-        if (flags.hasTob !== false) {
+        if (smAge != null && smAge < 18) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
+        } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
         } else if (codeUsedInLastDays('99406', 30)) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };
+        } else if (isNycePPOIns(insuranceNorm)) {
+            sm = { disabled: true, title: 'Smoking Counseling not applicable for NYCE PPO' };
         } else if (isTelevisit) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
         }
@@ -4781,6 +5342,8 @@
             ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
         } else if (insuranceNorm && /medicaid/i.test(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
+        } else if (isNycePPOIns(insuranceNorm)) {
+            ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -4800,6 +5363,19 @@
     async function runPreventiveAction() {
         if (quickActionRunning || actionRunning || analysisRunning) return;
         {
+            // isEstablishedPatient() can't tell "genuinely no history" apart
+            // from "history hasn't finished loading yet" — both look like
+            // an empty getData(). Since the established/new determination
+            // here picks the actual CPT billed (99381-99387 vs 99391-99397,
+            // or G0438 vs G0439), guessing "new" while history is still
+            // loading risks billing a wrong/duplicate code for a genuinely
+            // established patient. Block and ask the user to retry once
+            // loading finishes, rather than silently defaulting to "new".
+            const historyApi = window.__ecwPatientHistory;
+            if (historyApi && historyApi.isLoading && historyApi.isLoading()) {
+                showQuickNotice("Preventive: patient history is still loading — wait a moment for it to finish, then try again.");
+                return;
+            }
             const text0 = getEncounterText();
             const gating = computeQuickActionGating(parseInsuranceFromPage(text0), extractClinicalFlags(text0), text0);
             if (gating.pv.disabled) { showQuickNotice(`Preventive: ${gating.pv.title}.`); return; }
@@ -4827,8 +5403,13 @@
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
-            const isMedicare = isAnyMedicareIns(insurance);
-            const isClover = isCloverHealthIns(insurance);
+            // Only STRAIGHT/plain Medicare and VNS Choice get the
+            // G0438/G0439 Medicare AWV codes. Every other insurance —
+            // Clover Health included, and any Medicare Advantage or other
+            // plan whose name merely mentions "Medicare" — gets the
+            // age-banded 993xx preventive E&M code instead, same as any
+            // other non-Medicare payer.
+            const isStraightMedicare = isStraightMedicareIns(insurance);
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
@@ -4836,15 +5417,14 @@
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
 
-            if (isVNS || isMedicare || isClover) {
-                // VNS Choice, Clover Health, and any other Medicare are
-                // treated the same: directly add G0438/G0439. Never G0402
-                // (retired).
+            if (isVNS || isStraightMedicare) {
+                // VNS Choice and straight Medicare are treated the same:
+                // directly add G0438/G0439. Never G0402 (retired).
                 const medicareAwvCode = established ? 'G0439' : 'G0438';
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
                 await deleteCPTCodesByCode(MEDICARE_AWV_CODES.filter(c => c !== medicareAwvCode));
                 const result = await addSingleCPT(medicareAwvCode);
-                const payerLabel = isVNS ? 'VNS Choice' : (isClover ? 'Clover Health' : 'Medicare');
+                const payerLabel = isVNS ? 'VNS Choice' : 'Medicare';
                 showQuickNotice(result.ok
                     ? `${payerLabel} — added ${medicareAwvCode} (${established ? 'Established' : 'New'} Patient).`
                     : `${payerLabel} — could not add ${medicareAwvCode} automatically (${result.message}).`);
@@ -4865,6 +5445,14 @@
         }
     }
 
+    // NYCE PPO — used both by isPreventiveCounselBlockedIns() below (P/C
+    // is one of the counseling services blocked for this payer) and
+    // directly by the SM/OB gating and the preventive-visit/office-visit
+    // exclusivity rule further down.
+    function isNycePPOIns(insurance) {
+        return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
+    }
+
     // Preventive Counseling can't be applied for these payers: MetroPlus,
     // Medicaid, straight/plain Medicare (not VNS Choice — that's handled
     // separately via the Medicare AWV codes elsewhere), UHC/United
@@ -4872,10 +5460,10 @@
     function isPreventiveCounselBlockedIns(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
-        if (/metro\s*plus/i.test(name)) return true;
+        //if (/metro\s*plus/i.test(name)) return true;
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
-        if (/nyce/i.test(name) && /ppo/i.test(name)) return true;
+        if (isNycePPOIns(name)) return true;
         if (/molina/i.test(name)) return true;
         if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
         return false;
@@ -5642,7 +6230,14 @@
     // the modal's title text, not by id — ids like billingLink29 get reused
     // elsewhere in eCW's markup and clicking the wrong match was spam-firing
     // clicks on an unrelated element every cycle.
+    //
+    // Only runs while WE are actively adding/linking a code (quick action,
+    // Start Action, Auto Link, or Claim Link). If the user manually added a
+    // CPT themselves and eCW asks them this, that's their call to make —
+    // this must never auto-answer "No" out from under a manual action.
     function dismissAssociatedCPTModalIfPresent() {
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && /Associated CPT Codes/i.test(el.textContent || ''));
         if (!title) return false;
@@ -5665,13 +6260,38 @@
     // backdrop blocks every click after it (that's what "stuck" looked
     // like) — dismiss it whenever it appears, and surface the message so a
     // failed add isn't silently swallowed.
+    //
+    // Same rule as dismissAssociatedCPTModalIfPresent above: only acts
+    // while WE are the one mid-action. A popup eCW raises in response to
+    // something the user did manually is left completely alone — they
+    // dismiss it themselves, on their own timing, exactly as if this
+    // extension weren't installed at all.
     let lastEcwErrorShown = "";
     function dismissEcwErrorPopup() {
+        if (!quickActionRunning && !actionRunning && !extensionBusy) return false;
+
         const title = Array.from(document.querySelectorAll('.modal-title'))
             .find(el => el.offsetParent !== null && el.textContent.trim() === 'eClinicalWorks');
         if (!title) return false;
 
         const modal = title.closest('.modal, .modal-content, [role="dialog"]') || document;
+
+        // eCW reuses this SAME "eClinicalWorks"-titled modal for both
+        // plain error alerts (OK only, e.g. "Could not add ICD: ...") and
+        // Yes/No confirmation dialogs (e.g. "Are you sure you want to
+        // remove this ICD?" when the user manually clicks Remove on the
+        // Claim screen). Only the former should ever be auto-dismissed —
+        // a Yes/No confirm is the user's own deliberate action waiting on
+        // THEIR decision. Since it has no "OK" button to match, the old
+        // code fell through to the close/X button and force-closed it
+        // every 1.8s before the user could ever click Yes or No,
+        // silently cancelling their delete. Bail out immediately whenever
+        // a Yes/No pair is present so this interval never touches it.
+        const hasYesNoButtons = Array.from(modal.querySelectorAll('a, button')).some(
+            b => b.offsetParent !== null && /^(yes|no)$/i.test(b.textContent.trim())
+        );
+        if (hasYesNoButtons) return false;
+
         const bodyText = (modal.textContent || '').replace(title.textContent, '').trim();
 
         if (bodyText && bodyText !== lastEcwErrorShown) {
@@ -5696,129 +6316,4 @@
     // initial render, which is exactly when things already feel slow.
     setInterval(checkAndUpdate, 2500);
     setTimeout(checkAndUpdate, 3000);
-})();
-
-/* ============================================================
-   MODULE 3 — PN MODAL RESIZE (Bronx only)
-   Bronx's Progress Note / coding modal (#mainPNDialog) renders
-   at a different default size than eCW uses on our other client
-   sites. Left alone, that mismatch is what was producing the
-   blank space around the note/coding grid and, by extension,
-   throwing off where our own SmartCoder floating panel had room
-   to sit. This shrinks the dialog to a sane fixed size (with a
-   safe minimum) and keeps its body height in sync with the new
-   header/footer measurements, automatically, the moment the
-   modal is opened for any patient — no per-patient action needed.
-   Runs independently of Modules 1/2 and is fully self-contained;
-   a failure here never touches the Patient History or Coding
-   Snapshot features.
-   ============================================================ */
-(function () {
-    'use strict';
-
-    const CFG = {
-        dialogWidth: '60vw',
-        dialogHeight: '75vh',
-        minWidthPx: 980,
-        minHeightPx: 640,
-        margin: '10px auto'
-    };
-
-    function px(n) { return `${Math.round(n)}px`; }
-
-    function clampPx(v, minPx) { return Math.max(v, minPx); }
-
-    function parseSizeToPx(value) {
-        if (typeof value !== 'string') return null;
-        const s = value.trim().toLowerCase();
-        if (s.endsWith('px')) return parseFloat(s);
-        if (s.endsWith('vw')) return (window.innerWidth * parseFloat(s)) / 100;
-        if (s.endsWith('vh')) return (window.innerHeight * parseFloat(s)) / 100;
-        const n = parseFloat(s);
-        return Number.isFinite(n) ? n : null;
-    }
-
-    function isVisible(el) {
-        if (!el) return false;
-        const cs = getComputedStyle(el);
-        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-    }
-
-    function setImp(el, prop, value) {
-        if (!el) return;
-        el.style.setProperty(prop, value, 'important');
-    }
-
-    function getPnEls() {
-        const dialog = document.querySelector('#mainPNDialog');
-        const content = document.querySelector('#mainPNContent');
-        const header = document.querySelector('#pn-modal-header');
-        const footer = document.querySelector('#main-footer');
-        const body = dialog ? dialog.querySelector('.modal-body') : null;
-        return { dialog, content, header, footer, body };
-    }
-
-    function applyPnResize() {
-        try {
-            const { dialog, content, header, footer, body } = getPnEls();
-            if (!dialog || !content || !isVisible(dialog)) return;
-
-            let w = parseSizeToPx(CFG.dialogWidth);
-            let h = parseSizeToPx(CFG.dialogHeight);
-            if (!Number.isFinite(w) || !Number.isFinite(h)) return;
-
-            w = clampPx(w, CFG.minWidthPx);
-            h = clampPx(h, CFG.minHeightPx);
-
-            setImp(dialog, 'width', px(w));
-            setImp(dialog, 'height', px(h));
-            setImp(dialog, 'margin', CFG.margin);
-            setImp(content, 'height', '100%');
-
-            if (body) {
-                const headerH = header ? header.getBoundingClientRect().height : 0;
-                const footerH = footer ? footer.getBoundingClientRect().height : 0;
-                const bodyH = Math.max(0, h - headerH - footerH - 2);
-                setImp(body, 'height', px(bodyH));
-                setImp(body, 'maxHeight', px(bodyH));
-                setImp(body, 'overflowX', 'hidden');
-            }
-        } catch (e) {
-            // Never let a resize hiccup break the page or the modal.
-        }
-    }
-
-    // The modal's own DOM churns a lot while eCW builds it (rows/fields
-    // streaming in), so a MutationObserver firing applyPnResize on every
-    // single mutation — as the original standalone version of this script
-    // did — becomes a real source of lag on a big note. Debounce to one
-    // pass per animation frame instead: same responsiveness the moment
-    // anything actually changes, without redoing the layout math dozens
-    // of times per second.
-    let pnResizeScheduled = false;
-    function schedulePnResize() {
-        if (pnResizeScheduled) return;
-        pnResizeScheduled = true;
-        requestAnimationFrame(() => {
-            pnResizeScheduled = false;
-            applyPnResize();
-        });
-    }
-
-    const pnObserver = new MutationObserver(schedulePnResize);
-    pnObserver.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['style', 'class']
-    });
-
-    window.addEventListener('resize', schedulePnResize);
-    // Light safety-net poll in addition to the observer, in case the modal
-    // is swapped in via a path that doesn't trigger a matching mutation.
-    setInterval(schedulePnResize, 1000);
-
-    schedulePnResize();
 })();
