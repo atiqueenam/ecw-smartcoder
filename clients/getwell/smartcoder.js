@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v5.40
 // @namespace    http://tampermonkey.net/
-// @version      5.41
+// @version      5.42
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.42 (2026-08-13) - NEW RULE: depression/alcohol screening ICD cleanup.
+//   If Z13.31 (depression screening) or Z13.9/Z13.89 (alcohol screening)
+//   is sitting on the chart but there's no matching screening CPT on the
+//   claim (G8510/G8431/G0444/3725F for depression; G9622/3016F/G0442/
+//   H0049/99408 for alcohol) — either already present or about to be
+//   added this run — the ICD is now flagged for deletion. Previously
+//   these Z-codes were only ever ADDED when a screening was documented;
+//   nothing removed one that was left over from a prior visit or added
+//   by hand with no screening actually billed this encounter.
+//
 // 5.41 - rawCPTCodeSet function defined
 
 // 5.40 (2026-08-12) - NEW RULE: commercial-insurance office-visit gating.
@@ -2316,6 +2326,29 @@
         if (age >= 18 && hasAlc !== null && !currentICDCodesForScreening.includes('Z13.9')) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
+
+        // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
+        // (or Z13.89) on the chart with no matching screening CPT means
+        // the screening was never actually billed — someone added the
+        // diagnosis code (or it carried over from a prior visit) but no
+        // screening was documented/ordered this time. Delete the ICD in
+        // that case rather than leaving an orphaned screening diagnosis
+        // sitting on the claim with nothing to justify it.
+        // "Matching CPT" means either already on the chart OR about to be
+        // added this run (`desired` — e.g. G0444 added a few lines above).
+        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
+        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        getICDGridEntriesFast().forEach(entry => {
+            const code = entry.code.toUpperCase();
+            if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
+            }
+            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
+            }
+        });
 
         currentRows.forEach(r => {
             if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.57
+// @name         Bronx Health SmartCoder v1.58
 // @namespace    http://tampermonkey.net/
-// @version      1.57
+// @version      1.58
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,16 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.58 (2026-08-13) - NEW RULE: depression/alcohol screening ICD cleanup.
+//   If Z13.31 (depression screening) or Z13.9/Z13.89 (alcohol screening)
+//   is sitting on the chart but there's no matching screening CPT on the
+//   claim (G8510/G8431/G0444/3725F for depression; G9622/3016F/G0442/
+//   H0049/99408 for alcohol) — either already present or about to be
+//   added this run — the ICD is now flagged for deletion. Previously
+//   these Z-codes were only ever ADDED when a screening was documented;
+//   nothing removed one that was left over from a prior visit or added
+//   by hand with no screening actually billed this encounter.
+//
 // 1.57 (2026-08-13) - BUG FIX x3:
 //   1) isStraightMedicareIns() now strips harmless trailing/interior noise
 //      (a parenthetical like "(Traditional)", stray dashes) before its
@@ -2364,6 +2374,29 @@
                 toDelete.push({ code: empireZ139.code, row: empireZ139.row, kind: 'icd', reason: 'Empire plan — alcohol screening ICD not used for this payer' });
             }
         }
+
+        // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
+        // (or Z13.89) on the chart with no matching screening CPT means
+        // the screening was never actually billed — someone added the
+        // diagnosis code (or it carried over from a prior visit) but no
+        // screening was documented/ordered this time. Delete the ICD in
+        // that case rather than leaving an orphaned screening diagnosis
+        // sitting on the claim with nothing to justify it.
+        // "Matching CPT" means either already on the chart OR about to be
+        // added this run (`desired` — e.g. G0444 added a few lines above).
+        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
+        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        getICDGridEntriesFast().forEach(entry => {
+            const code = entry.code.toUpperCase();
+            if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
+            }
+            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
+            }
+        });
 
         // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
         // isn't on the chart. These two are the age-split "well visit"
