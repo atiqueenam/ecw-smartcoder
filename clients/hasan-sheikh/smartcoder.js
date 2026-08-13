@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.78
+// @name         Hasan Sheikh SmartCoder v1.80
 // @namespace    http://tampermonkey.net/
-// @version      1.78
+// @version      1.80
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,32 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.80 (2026-08-13) - RULE CHANGE (reverts part of 1.79): Z13.31/Z13.9 and
+//   their screening CPT are now enforced as a true bundle — the ICD is
+//   only ever proposed/kept when its matching screening CPT is actually
+//   billable for this payer, with NO payer-specific carve-out. 1.79 had
+//   added a UHC exception that kept the ICD even when no CPT applied
+//   (since UHC blocks G-coded results); per explicit instruction, that
+//   split the bundle and is wrong — if the G-code isn't used for UHC,
+//   its paired Z-code isn't suggested either, exactly like the G-code
+//   itself. The CPT-support check (hasDepressionScreeningCpt/
+//   hasAlcoholScreeningCpt) is now computed once and shared by BOTH the
+//   add rule and the delete/cleanup rule, so they can never disagree —
+//   this also closes the add/delete loop from 1.76/1.79 for good, since
+//   the same condition now gates both directions.
+//
+// 1.79 (2026-08-13) - BUG FIX: the depression/alcohol screening ICD
+//   cleanup (Z13.31/Z13.9) added in 1.76 fought with United Health
+//   Care's "no G-prefixed CPT" rule and produced an add/delete loop
+//   (same bug confirmed live on Getwell — see its 5.45 changelog). A
+//   NEGATIVE alcohol screen wants G9622 (and a negative depression
+//   screen wants G8510/G8431/G0444) — all G-prefixed, all wiped by the
+//   UHC rule, leaving no CPT the cleanup would accept as proof the
+//   screening was billed. Fixed by treating a documented screening
+//   (hasDep/hasAlc !== null) as sufficient on its own for UHC, since the
+//   matching CPT is deliberately never billable for this payer
+//   regardless of the result.
 //
 // 1.78 (2026-08-13) - BUG FIX: United Health Care's blanket "no G-prefixed
 //   CPT code" rule was deleting G0101/G0102/G0103 too, even though UHC
@@ -2197,11 +2223,27 @@
         // corresponding screening ICD. These go through the same
         // Proposed-changes / Start-Action flow as everything else, not
         // added automatically.
+        //
+        // Z13.31/Z13.9 and their screening CPT are billed as a bundle —
+        // the ICD is only proposed/kept when the matching CPT is actually
+        // billable for this payer. "Matching CPT" means either already on
+        // the chart OR about to be added this run (`desired`, post any
+        // payer-specific filtering above — e.g. United Health Care's "no
+        // G-prefixed CPT" sweep). For UHC, that sweep wipes G8510/G8431/
+        // G0444/G0442/G9622, so when the actual screening result is the
+        // G-coded one (e.g. a negative alcohol screen → G9622), NO CPT in
+        // the bundle survives — Z13.31/Z13.9 are correctly never
+        // suggested/kept for UHC in that case either, same as the G-code
+        // itself. ICD and CPT move together, never one without the other.
+        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
+        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
-        if (age >= 12 && hasDep !== null && !currentICDCodesForScreening.includes('Z13.31')) {
+        if (age >= 12 && hasDep !== null && hasDepressionScreeningCpt && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
         }
-        if (age >= 18 && hasAlc !== null && !currentICDCodesForScreening.includes('Z13.9')) {
+        if (age >= 18 && hasAlc !== null && hasAlcoholScreeningCpt && !currentICDCodesForScreening.includes('Z13.9')) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
@@ -2211,15 +2253,12 @@
         // (or Z13.89) on the chart with no matching screening CPT means
         // the screening was never actually billed — someone added the
         // diagnosis code (or it carried over from a prior visit) but no
-        // screening was documented/ordered this time. Delete the ICD in
-        // that case rather than leaving an orphaned screening diagnosis
-        // sitting on the claim with nothing to justify it.
-        // "Matching CPT" means either already on the chart OR about to be
-        // added this run (`desired` — e.g. G0444 added a few lines above).
-        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
-        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
-        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
-        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        // screening was documented/ordered this time, or (as above) the
+        // only matching CPT is a G-code this payer never bills. Delete
+        // the ICD in that case rather than leaving an orphaned screening
+        // diagnosis sitting on the claim with nothing to justify it. Uses
+        // the SAME hasDepressionScreeningCpt/hasAlcoholScreeningCpt as
+        // the add rule above, so add and delete can never disagree.
         getICDGridEntriesFast().forEach(entry => {
             const code = entry.code.toUpperCase();
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
