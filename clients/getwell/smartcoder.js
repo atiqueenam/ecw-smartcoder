@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.40
+// @name         Getwell SmartCoder by ATQ v5.47
 // @namespace    http://tampermonkey.net/
-// @version      5.46
+// @version      5.47
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.47 (2026-08-15) - BUG FIX: mapBMIToZ68() had a `bmi < 19.5 return null`
+//   guard that silently skipped the entire Z68.xx add/fix/delete block for
+//   any adult patient with BMI in the 18.5-19.4 range (e.g. BMI 18.56) —
+//   Analyze showed "Nothing to add"/"Nothing to remove" for the BMI ICD no
+//   matter what was actually on the chart, even though the very next line
+//   already correctly maps anything under 20 to Z68.1 ("BMI 19 or less,
+//   adult"). Removed the guard so Z68.1 is reachable for every BMI < 20,
+//   restoring "BMI applies on every encounter" for this client (3008F/
+//   G8417/G8418/G8420 CPT logic was never gated by this and was unaffected).
+//
 // 5.46 (2026-08-13) - RULE CHANGE (reverts part of 5.45): Z13.31/Z13.9 and
 //   their screening CPT are now enforced as a true bundle — the ICD is
 //   only ever proposed/kept when its matching screening CPT is actually
@@ -2867,7 +2877,16 @@
     function mapBMIToZ68(bmi, age) {
         if (age != null && age < 18) return null;
         if (bmi == null || isNaN(bmi)) return null;
-        if (bmi < 19.5) return null; // underweight codes intentionally not auto-added
+        // NOTE: there is deliberately no "too low to code" cutoff here —
+        // Getwell documents a BMI Z68.xx code on every encounter (see the
+        // changelog note "BMI applies on every encounter"), including low
+        // BMI values. A prior `bmi < 19.5 return null` guard silently
+        // skipped the entire Z68 add/fix/delete block below for any
+        // patient in the 18.5-19.4 range (e.g. BMI 18.56) even though the
+        // very next line already correctly maps anything under 20 to
+        // Z68.1 ("BMI 19 or less, adult") — Analyze showed "Nothing to
+        // add"/"Nothing to remove" for those charts no matter what was on
+        // the ICD grid. Removed so Z68.1 is reachable for every BMI < 20.
         if (bmi < 20) return "Z68.1";
         if (bmi < 30) return `Z68.${Math.floor(bmi)}`;   // Z68.20 .. Z68.29
         if (bmi < 40) return `Z68.${Math.floor(bmi)}`;   // Z68.30 .. Z68.39
