@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.62
+// @name         Bronx Health SmartCoder v1.63
 // @namespace    http://tampermonkey.net/
-// @version      1.62
+// @version      1.63
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,22 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.63 (2026-08-15) - BUG FIXES (4): (1) BP codes (3074F-3079F) are now
+//   withheld entirely when EITHER systolic (>139) or diastolic (>89) is out
+//   of range — previously a high systolic with an in-range diastolic (or
+//   vice versa) still let the in-range half's code through. (2) Tobacco
+//   detection now recognizes a bare "(Smoking):yes." structured answer as a
+//   confirmed smoker — previously this fell through every regex (none of
+//   which match a lone "yes") to the "no positive indicators" default and
+//   was reported as a false non-smoker. (3) G0442/G0444 are now deleted
+//   from the current chart if they were already billed in another
+//   encounter this same calendar year, instead of only being skipped from
+//   re-proposal (a copy already added to the current chart stayed put
+//   before this fix). (4) Z00.01 (18+) and Z00.121 (under 18) are now
+//   mutually exclusive — both the Preventive quick-action and the regular
+//   Analyze/Start Action flow remove whichever one doesn't match the
+//   patient's age instead of leaving both on the chart.
+//
 // 1.62 (2026-08-13) - RULE CHANGE (reverts part of 1.61): Z13.31/Z13.9 and
 //   their screening CPT are now enforced as a true bundle — the ICD is
 //   only ever proposed/kept when its matching screening CPT is actually
@@ -1494,6 +1510,14 @@
         // Bronx's terse "(Smoking):no." shape — a bare "no" answer.
         if (/^no\.?$/i.test(combined)) return true;
 
+        // Bronx's terse "(Smoking):yes." shape — a bare "yes" answer to
+        // the tobacco-use question. No other positive-language regex below
+        // catches this (there's no "smoker"/"tobacco user"/etc. wording at
+        // all, just the bare "yes"), so without this check it fell through
+        // to the "no positive indicators found" default and was wrongly
+        // reported as a confirmed non-smoker.
+        if (/^yes\.?$/i.test(combined)) return false;
+
         if (/non[\s-]?user/i.test(combined)) return true; // "Tobacco non-user: Never used..."
 
         // "current ... smoker" wins over other text in the section (eCW
@@ -2213,9 +2237,17 @@
             if (bp && ccHasControllingBP) {
                 const [sys, dia] = bp.split('/').map(n => parseInt(n));
                 const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
-                if (hasI10) {
-                    if (!isNaN(sys) && sys <= 139) sysTarget = sys <= 129 ? '3074F' : '3075F';
-                    if (!isNaN(dia) && dia <= 89) diaTarget = dia <= 79 ? '3078F' : '3079F';
+                // Bronx rule: if EITHER systolic or diastolic is out of
+                // range (sys > 139 or dia > 89), no BP code is suggested at
+                // all this encounter — not even for the reading that is in
+                // range. A high reading on either side means the whole BP
+                // pair is withheld, not just the high half.
+                const sysOutOfRange = !isNaN(sys) && sys > 139;
+                const diaOutOfRange = !isNaN(dia) && dia > 89;
+                const bpInRange = !sysOutOfRange && !diaOutOfRange;
+                if (hasI10 && bpInRange) {
+                    if (!isNaN(sys)) sysTarget = sys <= 129 ? '3074F' : '3075F';
+                    if (!isNaN(dia)) diaTarget = dia <= 79 ? '3078F' : '3079F';
                 }
             }
 
@@ -2494,6 +2526,18 @@
             preventiveBundleEntries.forEach(e => {
                 toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present this encounter — preventive bundle ICD not applicable' });
             });
+        } else if (age != null) {
+            // Z00.01 (18+) and Z00.121 (under 18) are mutually exclusive —
+            // only the age-correct one may stay. If both are present (e.g.
+            // a wrong one was added by hand, or the patient aged across the
+            // 18-year boundary since it was first billed), remove the
+            // wrong one instead of leaving both on the chart.
+            const correctZ00 = age >= 18 ? 'Z00.01' : 'Z00.121';
+            const wrongZ00 = correctZ00 === 'Z00.01' ? 'Z00.121' : 'Z00.01';
+            const wrongZ00Entry = getICDRows().find(e => e.code.toUpperCase() === wrongZ00);
+            if (wrongZ00Entry && !toDelete.some(d => d.code === wrongZ00)) {
+                toDelete.push({ code: wrongZ00Entry.code, row: wrongZ00Entry.row, kind: 'icd', reason: `Patient age ${age} — ${correctZ00} applies, not ${wrongZ00}` });
+            }
         }
 
         // ---- BMI Z68.xx ICD code: add if missing, fix if wrong, delete if
@@ -2800,6 +2844,24 @@
             const g0444Row = currentRows.find(r => r.code === 'G0444');
             if (g0444Row && !toDelete.some(d => d.code === 'G0444')) {
                 toDelete.push({ code: 'G0444', row: g0444Row.row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
+            }
+        }
+
+        // ---- G0442/G0444 already billed this calendar year ----
+        // These are once-per-year codes. If either is already sitting on
+        // this chart AND was also billed in a different encounter this
+        // same DOS year, it must be removed here rather than left in
+        // place — being present on the current chart doesn't override the
+        // once/year rule just because it wasn't re-proposed above.
+        {
+            const annualDosYear = getCurrentDosYear();
+            const g0442RowAnnual = currentRows.find(r => r.code === 'G0442');
+            if (g0442RowAnnual && !toDelete.some(d => d.code === 'G0442') && codeUsedInYear('G0442', annualDosYear)) {
+                toDelete.push({ code: 'G0442', row: g0442RowAnnual.row, kind: 'cpt', reason: 'Already billed this calendar year — annual alcohol screening G-code is once/year' });
+            }
+            const g0444RowAnnual = currentRows.find(r => r.code === 'G0444');
+            if (g0444RowAnnual && !toDelete.some(d => d.code === 'G0444') && codeUsedInYear('G0444', annualDosYear)) {
+                toDelete.push({ code: 'G0444', row: g0444RowAnnual.row, kind: 'cpt', reason: 'Already billed this calendar year — annual depression screening G-code is once/year' });
             }
         }
 
@@ -5432,7 +5494,9 @@
             const icdEntries = getICDGridEntriesFast();
 
             const codes = [];
-            codes.push(age >= 18 ? "Z00.01" : "Z00.121");
+            const z00Code = age >= 18 ? "Z00.01" : "Z00.121";
+            const z00Opposite = z00Code === "Z00.01" ? "Z00.121" : "Z00.01";
+            codes.push(z00Code);
             const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
             codes.push("Z71.3");
@@ -5455,7 +5519,7 @@
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
             await clearOtherQuickActionBundles('pv');
-            await deleteICDCodesByCode([z71Opposite]);
+            await deleteICDCodesByCode([z71Opposite, z00Opposite]);
             await addICDCodesFast(codes);
 
             if (isVNS || isStraightMedicare) {
