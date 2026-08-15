@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.80
+// @name         Hasan Sheikh SmartCoder v1.81
 // @namespace    http://tampermonkey.net/
-// @version      1.80
+// @version      1.81
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.81 (2026-08-15) - NEW RULE (all clients): Preventive/Preventive
+//   Counseling/Smoking Counseling/Obesity Counseling now all require at
+//   least one vital sign (BP, weight, height, pulse, temp, resp rate, O2
+//   sat) documented this encounter, via the existing isVitalsDocumented()
+//   helper. With no vitals at all, all four quick-action buttons fade and
+//   each one's hover tooltip reads "No vitals documented — <bundle> can't
+//   be applied" — checked last in computeQuickActionGating() so it always
+//   overrides every other individual rule. Nothing else changed.
 //
 // 1.80 (2026-08-13) - RULE CHANGE (reverts part of 1.79): Z13.31/Z13.9 and
 //   their screening CPT are now enforced as a true bundle — the ICD is
@@ -5242,6 +5251,20 @@
             if (!pc.disabled) pc = { disabled: true, title: reason };
             if (!sm.disabled) sm = { disabled: true, title: reason };
             if (!ob.disabled) ob = { disabled: true, title: reason };
+        }
+
+        // ---- No vitals documented: none of the four bundles apply ----
+        // Preventive/Preventive Counseling/Smoking Counseling/Obesity
+        // Counseling all require at least one vital sign (BP, weight,
+        // height, pulse, temp, resp rate, O2 sat) documented this
+        // encounter. With no vitals at all, every one of the four is
+        // faded regardless of what its own rule above would otherwise
+        // allow — this check runs last so it always wins.
+        if (!isVitalsDocumented(text)) {
+            pv = { disabled: true, title: "No vitals documented — Preventive can't be applied" };
+            pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
+            sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
+            ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
         }
 
         return { pv, pc, sm, ob };

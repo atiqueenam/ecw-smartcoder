@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.47
+// @name         Getwell SmartCoder by ATQ v5.48
 // @namespace    http://tampermonkey.net/
-// @version      5.47
+// @version      5.48
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.48 (2026-08-15) - NEW RULE (all clients): Preventive/Preventive
+//   Counseling/Smoking Counseling/Obesity Counseling now all require at
+//   least one vital sign (BP, weight, height, pulse, temp, resp rate, O2
+//   sat) documented this encounter, via a new isVitalsDocumented() helper
+//   (ported from Bronx/Hasan Sheikh — Getwell had no equivalent). With no
+//   vitals at all, all four quick-action buttons fade and each one's hover
+//   tooltip reads "No vitals documented — <bundle> can't be applied" —
+//   checked last in computeQuickActionGating() so it always overrides
+//   every other individual rule. Nothing else changed.
+//
 // 5.47 (2026-08-15) - BUG FIX: mapBMIToZ68() had a `bmi < 19.5 return null`
 //   guard that silently skipped the entire Z68.xx add/fix/delete block for
 //   any adult patient with BMI in the 18.5-19.4 range (e.g. BMI 18.56) —
@@ -1401,6 +1411,27 @@
             ].map(c => (c.code || "").toUpperCase());
             return codes.includes(upperCode);
         });
+    }
+
+    // Vitals documented: at least one real reading (BP, weight, height,
+    // pulse, temp, resp rate, O2 sat) anywhere in the note. Used to gate
+    // the Preventive/Preventive Counseling/Smoking Counseling/Obesity
+    // Counseling quick-action buttons below — none of the four apply
+    // without at least one vital sign documented this encounter.
+    //
+    // The "Patient Info" sidebar widget always shows a cached Wt/Ht (e.g.
+    // "Wt: 253 lbs (on 07/13/26)") regardless of whether vitals were taken
+    // THIS visit — scanning the raw page text made this check always true.
+    // Strip that widget's text out first.
+    function isVitalsDocumented(text) {
+        const cleaned = (text || "").replace(/Patient Info\b[\s\S]{0,300}?(?=Billing Details\b|Notes\b|Secure Notes\b|Healow\b|$)/i, '');
+        return /\bBP\s*:?\s*\d{2,3}\s*\/\s*\d{2,3}\b/i.test(cleaned) ||
+               /\b(?:Wt|Weight)\s*:?\s*\d/i.test(cleaned) ||
+               /\b(?:Ht|Height)\s*:?\s*\d/i.test(cleaned) ||
+               /\b(?:Pulse|HR)\s*:?\s*\d/i.test(cleaned) ||
+               /\bTemp(?:erature)?\s*:?\s*\d/i.test(cleaned) ||
+               /\b(?:Resp|RR)\s*:?\s*\d/i.test(cleaned) ||
+               /\b(?:O2\s*Sat|SpO2)\s*:?\s*\d/i.test(cleaned);
     }
 
     // Drives the "Tob" flag chip (red = false) and the Smoking button. A
@@ -5208,6 +5239,20 @@
             if (!pc.disabled) pc = { disabled: true, title: reason };
             if (!sm.disabled) sm = { disabled: true, title: reason };
             if (!ob.disabled) ob = { disabled: true, title: reason };
+        }
+
+        // ---- No vitals documented: none of the four bundles apply ----
+        // Preventive/Preventive Counseling/Smoking Counseling/Obesity
+        // Counseling all require at least one vital sign (BP, weight,
+        // height, pulse, temp, resp rate, O2 sat) documented this
+        // encounter. With no vitals at all, every one of the four is
+        // faded regardless of what its own rule above would otherwise
+        // allow — this check runs last so it always wins.
+        if (!isVitalsDocumented(text)) {
+            pv = { disabled: true, title: "No vitals documented — Preventive can't be applied" };
+            pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
+            sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
+            ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
         }
 
         return { pv, pc, sm, ob };
