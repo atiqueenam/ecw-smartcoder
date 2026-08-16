@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.3
+// @name         Hasnayen Medical SmartCoder v1.4
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.4 (2026-08-16) - Removed "(rule N)" numbering from on-screen reasons;
+//   office visit code always 99213 when we add it, no no-vitals 99212.
+//
 // 1.3 (2026-08-16) - Social screening now ONLY the SDOH block inside
 //   Preventive Medicine; removed old PRAPARE/SCN widget checks.
 //
@@ -2285,7 +2288,7 @@
         if (has93000 && !hasEkgLinkIcd && !hasZ136Already) {
             // No priority ICD present and (by definition) no I10 either —
             // Z13.6 is the documented last-resort link target.
-            toAdd.push({ code: 'Z13.6', reason: '93000 present, none of E78.5/R00.2/R06.02/R07.9/I10/R00.1 on chart — Z13.6 added for linking (rule 19)', kind: 'icd' });
+            toAdd.push({ code: 'Z13.6', reason: '93000 present, none of E78.5/R00.2/R06.02/R07.9/I10/R00.1 on chart — Z13.6 added for linking', kind: 'icd' });
         }
 
         const toDelete = [...gatedBundleCPTDeletes];
@@ -2591,15 +2594,14 @@
                     ovReason = `Office visit (${visitType}) — new patient, suggested E&M code 99203`;
                 }
             } else if (visitInfo && visitInfo.ov) {
-                // Rule 6 per-visit-type office-visit override
-                // (Blood Test -> 99213, F/U labs -> 99212).
+                // Per-visit-type office-visit override (Blood Test -> 99213,
+                // F/U labs -> 99212).
                 ovCode = visitInfo.ov;
-                ovReason = `Visit type "${visitType}" — office visit code ${visitInfo.ov} (rule 6)`;
-            } else if (!isVitalsDocumented(text)) {
-                // Bronx rule 6.ii, kept: no vitals documented -> 99212.
-                ovCode = '99212';
-                ovReason = 'No vitals documented — 99212';
+                ovReason = `Visit type "${visitType}" — office visit code ${visitInfo.ov}`;
             } else {
+                // Hasnayen: always 99213 when we're the ones adding it — no
+                // vitals-based downgrade to 99212 (that was a Bronx-only
+                // rule and does not apply here).
                 // Rule 1 / rule 17 / rule 27: 99214 is only ever placed by
                 // us when a qualifying chronic disease is on the ICD list
                 // AND 99214 hasn't been used within the 1-month window —
@@ -2628,8 +2630,8 @@
                     ovReason = `${chronicCount} chronic dx present, DOS within the 1-month window — 99214`;
                 } else {
                     ovCode = '99213';
-                    if (fidelisBlocks99214) ovReason = 'Fidelis Care — 99214 is never used, 99213 instead (rule 17)';
-                    else if (preventiveBlocks99214) ovReason = 'Preventive code present — 99213 used instead of 99214 (rule 27)';
+                    if (fidelisBlocks99214) ovReason = 'Fidelis Care — 99214 is never used, 99213 instead';
+                    else if (preventiveBlocks99214) ovReason = 'Preventive code present — 99213 used instead of 99214';
                     else ovReason = 'Established visit — 99213 (default)';
                 }
             }
@@ -2645,13 +2647,13 @@
             if (fidelisExisting99214) {
                 currentRows.forEach(r => {
                     if (r.code === '99214' && !toDelete.some(d => d.code === '99214')) {
-                        toDelete.unshift({ code: '99214', row: r.row, kind: 'cpt', reason: 'Fidelis Care — 99214 is never used, replaced with 99213 (rule 17)' });
+                        toDelete.unshift({ code: '99214', row: r.row, kind: 'cpt', reason: 'Fidelis Care — 99214 is never used, replaced with 99213' });
                     }
                 });
                 if (!currentCodes.has('99213') && !toAdd.some(a => a.code === '99213')) {
                     toAdd.unshift({
                         code: '99213',
-                        reason: 'Fidelis Care — 99214 replaced with 99213 (rule 17)',
+                        reason: 'Fidelis Care — 99214 replaced with 99213',
                         kind: 'em',
                         emCategory: 'E/M SERVICES',
                         emIsNewPatient: false
@@ -2833,7 +2835,7 @@
 
             // ---- Rule 14: T78.40XS -> J30.9 ----
             replaceIcds(c => c === 'T78.40XS', 'J30.9',
-                'T78.40XS is replaced with J30.9 for this practice (rule 14)');
+                'T78.40XS is replaced with J30.9 for this practice');
 
             // ---- Rule 15: all vitamin-deficiency ICDs -> E56.9 ----
             // E53.9 (Vit B deficiency), E55.9 (Vit D deficiency) and the
@@ -2843,7 +2845,7 @@
             // NOT in this family and is untouched here.
             const VITAMIN_DEFICIENCY_ICD_RE = /^(E5[0-6](\.|$))/;
             replaceIcds(c => VITAMIN_DEFICIENCY_ICD_RE.test(c), 'E56.9',
-                'Vitamin-deficiency ICD consolidated to E56.9 (rule 15)');
+                'Vitamin-deficiency ICD consolidated to E56.9');
 
             // ---- Rule 16: dorsalgia -> M54.50 ----
             // M54.5 and its children (M54.50/M54.51/M54.59) plus the
@@ -2853,22 +2855,22 @@
             // "dorsalgia", so a dorsalgia code outside the M54.5x range is
             // caught too.
             replaceIcds((c, name) => /^M54\.(5|9)/.test(c) || c === 'M54.9' || /dorsalgia/i.test(name),
-                'M54.50', 'Dorsalgia ICD replaced with M54.50, low back pain unspecified (rule 16)');
+                'M54.50', 'Dorsalgia ICD replaced with M54.50, low back pain unspecified');
 
             // ---- Rule 18: cough -> R05.9, fever -> R50.9 ----
             replaceIcds(c => /^R05(\.|$)/.test(c), 'R05.9',
-                'Cough is always coded R05.9 for this practice (rule 18)');
+                'Cough is always coded R05.9 for this practice');
             replaceIcds(c => /^R50(\.|$)/.test(c), 'R50.9',
-                'Fever is always coded R50.9 for this practice (rule 18)');
+                'Fever is always coded R50.9 for this practice');
 
             // ---- Rule 20: E78.1 -> E78.5 ----
             replaceIcds(c => c === 'E78.1', 'E78.5',
-                'E78.1 (pure hyperglyceridemia) replaced with E78.5, hyperlipidemia (rule 20)');
+                'E78.1 (pure hyperglyceridemia) replaced with E78.5, hyperlipidemia');
 
             // ---- Rule 24: K29.00 (acute gastritis) — delete, no replacement ----
             hasnayenIcdEntries.forEach(e => {
                 if (e.code.toUpperCase() === 'K29.00' && !alreadyQueuedForDelete(e.code)) {
-                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'K29.00 (acute gastritis) is not used for this practice (rule 24)' });
+                    toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'K29.00 (acute gastritis) is not used for this practice' });
                 }
             });
 
@@ -2890,7 +2892,7 @@
             const hasPapScreeningNow = rawCPTCodesNow.some(c => PAP_SCREENING_CPTS.includes(c));
 
             if (hasImmunizationNow && !hasnayenIcdCodes.includes('Z23') && !alreadyQueuedForAdd('Z23')) {
-                toAdd.push({ code: 'Z23', reason: 'Immunization administered — encounter for immunization (rule 28)', kind: 'icd' });
+                toAdd.push({ code: 'Z23', reason: 'Immunization administered — encounter for immunization', kind: 'icd' });
             }
             // Z23 must not be swept away by any earlier rule once an
             // immunization is present.
@@ -2900,7 +2902,7 @@
                 }
             }
             if (hasPapScreeningNow && !hasnayenIcdCodes.includes('Z12.4') && !alreadyQueuedForAdd('Z12.4')) {
-                toAdd.push({ code: 'Z12.4', reason: 'Q0091/G0101 present — cervical cancer screening ICD (rule 29)', kind: 'icd' });
+                toAdd.push({ code: 'Z12.4', reason: 'Q0091/G0101 present — cervical cancer screening ICD', kind: 'icd' });
             }
             // No counseling code alongside an immunization or a pap smear.
             if (hasImmunizationNow || hasPapScreeningNow) {
@@ -2909,8 +2911,8 @@
                     toDelete.push({
                         code: '99401', row: counselingRow.row, kind: 'cpt',
                         reason: hasImmunizationNow
-                            ? 'Immunization present — counseling code not used (rule 28)'
-                            : 'Q0091/G0101 present — counseling code not used (rule 29)'
+                            ? 'Immunization present — counseling code not used'
+                            : 'Q0091/G0101 present — counseling code not used'
                     });
                 }
                 for (let i = toAdd.length - 1; i >= 0; i--) {
@@ -2928,7 +2930,7 @@
             if (!hasPapLinkableCpt) {
                 hasnayenIcdEntries.forEach(e => {
                     if (e.code.toUpperCase() === 'Z12.4' && !alreadyQueuedForDelete(e.code)) {
-                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Z12.4 present but no pap smear code on the chart to link it to (rule 21)' });
+                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Z12.4 present but no pap smear code on the chart to link it to' });
                     }
                 });
                 for (let i = toAdd.length - 1; i >= 0; i--) {
@@ -5765,7 +5767,7 @@
         } else if (!hasChronicDiseaseThisEncounter) {
             pc = { disabled: true, title: 'Preventive Counseling requires at least one chronic disease diagnosis in this encounter' };
         } else if (pcVisitInfo && pcVisitInfo.behavior !== 'counseling') {
-            pc = { disabled: true, title: `Visit type "${getVisitType()}" does not allow a counseling code (rule 6)` };
+            pc = { disabled: true, title: `Visit type "${getVisitType()}" does not allow a counseling code` };
         } else if (isTelevisit) {
             pc = { disabled: true, title: 'Preventive Counseling not applicable for a televisit' };
         }
@@ -6029,7 +6031,7 @@
             await clearOtherQuickActionBundles('sm');
             await addICDCodesFast(["F17.210"]);
             if (has99407Already) {
-                showQuickNotice("Smoking: 99407 already on the chart — kept as-is, 99406 not added (rule 30).");
+                showQuickNotice("Smoking: 99407 already on the chart — kept as-is, 99406 not added.");
             } else {
                 await addSingleCPT("99406");
             }
