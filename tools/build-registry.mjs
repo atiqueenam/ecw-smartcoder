@@ -26,8 +26,8 @@ for (const directoryEntry of directoryEntries) {
   if (!/^[a-z0-9-]+$/.test(config.id || "")) {
     throw new Error(`${directoryName}: id must contain lowercase letters, numbers, or hyphens only.`);
   }
-  if (config.id !== directoryName) {
-    throw new Error(`${directoryName}: folder name must match client id "${config.id}".`);
+  if (config.id !== directoryName.toLowerCase()) {
+    throw new Error(`${directoryName}: folder name must match client id "${config.id}" (case-insensitive).`);
   }
   if (seenIds.has(config.id)) throw new Error(`Duplicate client id: ${config.id}`);
   seenIds.add(config.id);
@@ -69,7 +69,7 @@ for (const directoryEntry of directoryEntries) {
     siteId: config.siteId,
     hostnames,
     version: config.version.trim(),
-    file: `clients/${config.id}/${config.entry}`,
+    file: `clients/${directoryName}/${config.entry}`,
     sha256
   });
 }
