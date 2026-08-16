@@ -25,6 +25,7 @@ Current automatic site mappings:
 - `ynfexq7i5dh95jitbvapp.ecwcloud.com` → Bronx Health Wellness
 - `nyshpyapp.eclinicalweb.com` → Hasan Sheikh
 - `nygwmcapp.eclinicalweb.com` → Getwell
+- `nysmhmapp.ecwcloud.com` → Hasnayen
 
 Browsers do not expose a dependable difference between `F5` and `Ctrl+Shift+R` to page JavaScript, so either kind of reload checks for updates. The button is the clearest method.
 
