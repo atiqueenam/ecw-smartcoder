@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.4
+// @name         Hasnayen Medical SmartCoder v1.5
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.5 (2026-08-16) - 99213 reason no longer mentions 99214 unless 99214
+//   was actually in play (chronic dx present) — cleaner, less confusing.
+//
 // 1.4 (2026-08-16) - Removed "(rule N)" numbering from on-screen reasons;
 //   office visit code always 99213 when we add it, no no-vitals 99212.
 //
@@ -2630,8 +2633,14 @@
                     ovReason = `${chronicCount} chronic dx present, DOS within the 1-month window — 99214`;
                 } else {
                     ovCode = '99213';
-                    if (fidelisBlocks99214) ovReason = 'Fidelis Care — 99214 is never used, 99213 instead';
-                    else if (preventiveBlocks99214) ovReason = 'Preventive code present — 99213 used instead of 99214';
+                    // Only mention 99214 in the reason when it was actually
+                    // in play (chronic dx present, within the 1-month
+                    // window) and Fidelis/preventive is why it's not used —
+                    // otherwise this is a plain, ordinary 99213 add and the
+                    // reason shouldn't reference 99214 at all.
+                    const chronicWouldQualify = chronicCount >= 1 && !codeUsedInLastDays('99214', 30);
+                    if (chronicWouldQualify && fidelisBlocks99214) ovReason = 'Fidelis Care does not use 99214 — 99213 used instead';
+                    else if (chronicWouldQualify && preventiveBlocks99214) ovReason = 'Preventive visit — 99213 used instead of 99214';
                     else ovReason = 'Established visit — 99213 (default)';
                 }
             }
