@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.1
+// @name         Hasnayen Medical SmartCoder v1.2
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,12 +13,13 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.2 (2026-08-16) - Fixed SDOH screening not detected in free-text
+//   Preventive Medicine notes, and AUDIT-C widget losing its label.
+//
 // 1.1 (2026-08-16) - BUG FIX: the P/C, SM, and OB quick-action comment fixed
 //
-// 1.0 (2026-08-16) - Initial Hasnayen Medical build, forked from
-//   clients/bronx/smartcoder.js v1.64 and modified per the Hasnayen rule
-//   doc (rules 1-30 plus the payer-helper decisions). See
-//   clients/hasnayen/CHANGELOG.md for the full rule-by-rule record.
+// 1.0 (2026-08-16) - Initial Hasnayen Medical build, forked from Bronx
+//   v1.64 per the Hasnayen rule doc (rules 1-30 + payer-helper decisions).
 
 
 
@@ -1198,13 +1199,23 @@
     // "no answer at all" (grey) when a blank Tobacco widget was
     // immediately followed by a Social Determinants widget on the same
     // note.
+    // v1.2: on this client's standalone AUDIT-C widget, "Drug/Alcohol:" only
+    // exists in the .cattablink header — deleting it left the widget with no
+    // label to anchor on, so a clean AUDIT-C came back as "no answer". Known
+    // labels are now kept (normalized), unknown headers still stripped.
+    const CATTABLINK_LABEL_RE = /(Tobacco Use|Drugs?\s*\/\s*Alcohol|Social Determinants|PRAPARE|Tobacco Control \(Standard\))\s*:?\s*$/i;
     function extractStructuredScreeningText() {
         const categories = document.querySelectorAll('div[id^="readOnlyCategory_"]');
         if (!categories.length) return "";
         const parts = [];
         categories.forEach(cat => {
             const clone = cat.cloneNode(true);
-            clone.querySelectorAll('.leftPaneData, .cattablink').forEach(el => el.remove());
+            clone.querySelectorAll('.leftPaneData').forEach(el => el.remove());
+            clone.querySelectorAll('.cattablink').forEach(el => {
+                const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+                const m = raw.match(CATTABLINK_LABEL_RE);
+                el.replaceWith(clone.ownerDocument.createTextNode(m ? ` ${m[1].replace(/\s*\/\s*/, '/')}: ` : ''));
+            });
             const t = (clone.textContent || "").replace(/\s+/g, " ").trim();
             if (t) parts.push(t);
         });
@@ -1299,7 +1310,8 @@
         // got overridden by an explicit "No" elsewhere in the same intake,
         // and conversely an explicit "Yes" was always treated as positive
         // even when paired with a technically-low AUDIT-C score.
-        const drinkQuestion = combined.match(/drink[^:]*?:\s*(Yes|No)\b/i);
+        // v1.2: this client's widget answers right after the "?", not a colon.
+        const drinkQuestion = combined.match(/drink[^:?]*?[:?]\s*(Yes|No)\b/i);
         if (drinkQuestion) return /no/i.test(drinkQuestion[1]);
 
         // 2) No plain yes/no question on this note — go by the raw AUDIT-C/
@@ -1334,7 +1346,48 @@
             (s.label === 'Social Determinants' || s.label === 'PRAPARE') &&
             /PRAPARE Score|housing situation|work situation/i.test(s.content)
         );
-        return hasPrapare || /Social Needs Screening|SCN\s*Screening/i.test(fullText);
+        return hasPrapare || /Social Needs Screening|SCN\s*Screening/i.test(fullText) || !!evaluateFreeTextSDOH(fullText);
+    }
+
+    // v1.2: this client documents SDOH as free text in the Preventive
+    // Medicine note (not eCW's structured widget), heading "Social
+    // Determinants of Health Risk Assesment" (their template's spelling).
+    // Requires >=2 real questions to count as administered; G0136 only
+    // needs the screen done, not a positive result, so unmetNeeds doesn't
+    // gate it — it's reported for reference only.
+    function evaluateFreeTextSDOH(text) {
+        const t = String(text || "");
+        const headingMatch = t.match(/Social Determinants of Health(?:\s+Risk)?\s+Ass?es{1,2}ment\s*:?/i);
+        if (!headingMatch) return null;
+        let block = t.slice(headingMatch.index + headingMatch[0].length);
+        const closeMatch = block.match(/=={3,}/);
+        if (closeMatch) block = block.slice(0, closeMatch.index);
+
+        const questionHits = [
+            /living situation today/i,
+            /problems with any of the following/i,
+            /food would run out/i,
+            /food you bought just didn'?t last/i,
+            /lack of reliable transportation/i,
+        ].filter(re => re.test(block)).length;
+        if (questionHits < 2) return null;
+
+        // Housing-problems checklist is single-select: only "None of the
+        // above" carries its own (Yes)/(N/A) marker in real notes. A need
+        // exists only when something OTHER than "None of the above" is the
+        // one marked (Yes) — checked within just that question's segment so
+        // it can't match a (Yes) belonging to a later, unrelated question.
+        const problemsSeg = (block.match(/problems with any of the following\?([\s\S]*?)(?:Food:|$)/i) || [])[1] || "";
+        const housingProblemNeed = /-\s*\(Yes\)/.test(problemsSeg) && !/None of the above\s*-\s*\(Yes\)/i.test(problemsSeg);
+
+        const needHit =
+            /do not have a steady place to live\s*-\s*\(Yes\)/i.test(block) ||
+            /worried about losing it.{0,80}?-\s*\(Yes\)/i.test(block) ||
+            housingProblemNeed ||
+            /(Often true|Sometimes true)\s*-\s*\(Yes\)/i.test(block) ||
+            /reliable transportation kept you[\s\S]{0,160}?-\s*Yes\b/i.test(block);
+
+        return { administered: true, unmetNeeds: !!needHit };
     }
 
     // ====================== SHARED CLINICAL FLAG EXTRACTION ======================
