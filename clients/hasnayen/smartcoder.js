@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.0
+// @name         Hasnayen Medical SmartCoder v1.1
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -10,12 +10,15 @@
 // @grant        none
 // ==/UserScript==
 
-// HASNAYEN MEDICAL (clients/hasnayen) — forked from clients/bronx/smartcoder.js
-// v1.64 and modified per the Hasnayen rule doc (rules 1-30 plus the payer-
-// helper decisions). See clients/hasnayen/CHANGELOG.md for the full
-// rule-by-rule record of what was found in Bronx's code and what changed.
-// Everything not named by a Hasnayen rule is Bronx's logic, untouched.
-// The changelog below this line is Bronx's inherited history.
+
+// HASNAYEN CHANGELOG (client-specific; newest first)
+
+// 1.1 (2026-08-16) - BUG FIX: the P/C, SM, and OB quick-action comment fixed
+//
+// 1.0 (2026-08-16) - Initial Hasnayen Medical build, forked from
+//   clients/bronx/smartcoder.js v1.64 and modified per the Hasnayen rule
+//   doc (rules 1-30 plus the payer-helper decisions). See
+//   clients/hasnayen/CHANGELOG.md for the full rule-by-rule record.
 
 
 
@@ -1085,6 +1088,41 @@
             ].map(c => (c.code || "").toUpperCase());
             return codes.includes(upperCode);
         });
+    }
+
+    // Same lookback as codeUsedInLastDays, but instead of a plain boolean it
+    // reports WHICH of `codes` actually matched and on what date — so gating
+    // messages can say "Preventive Counseling (99401) billed on 07/03/2024"
+    // instead of a vague "Preventive or Preventive Counseling billed", which
+    // is wrong/misleading whenever only one of the two actually occurred.
+    // Returns the most recent match, or null if none of `codes` were used
+    // within `days` of the current DOS.
+    function findCodeUsedInLastDays(codes, days) {
+        const api = window.__ecwPatientHistory;
+        const data = api && api.getData ? api.getData() : null;
+        if (!data || !data.length) return null;
+        const upperCodes = new Set(codes.map(c => c.toUpperCase()));
+        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : null;
+        if (!currentTs) return null;
+        let best = null;
+        for (const enc of data) {
+            if (currentDosStr && enc.encounter_date === currentDosStr) continue;
+            const ts = parseUSDateSnap(enc.encounter_date);
+            if (!ts) continue;
+            const diffDays = Math.abs(currentTs - ts) / 86400000;
+            if (diffDays > days) continue;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) continue;
+            const encCodes = [
+                ...(enc.visit_codes || []),
+                ...(enc.procedure_codes || [])
+            ].map(c => (c.code || "").toUpperCase());
+            const hit = encCodes.find(c => upperCodes.has(c));
+            if (hit && (!best || ts > best.ts)) {
+                best = { code: hit, date: enc.encounter_date, ts };
+            }
+        }
+        return best;
     }
 
     // Vitals documented: at least one real reading (BP, weight, height,
@@ -5651,8 +5689,14 @@
         const counselingGapDays = hasnayenCounselingGapDays(insuranceNorm);
         const pcVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         let pc = { disabled: false, title: 'Preventive Counseling' };
-        if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, counselingGapDays))) {
-            pc = { disabled: true, title: `Preventive or Preventive Counseling billed in the last ${counselingGapDays} days` };
+        const pcRecentHit = findCodeUsedInLastDays([...PREVENTIVE_ALL_CODES, '99401'], counselingGapDays);
+        if (pcRecentHit) {
+            // Report exactly which one was actually billed, and when — never
+            // a generic "Preventive or Preventive Counseling" message, since
+            // that reads as ambiguous/wrong when only one of the two occurred.
+            const isCounselingHit = pcRecentHit.code === '99401';
+            const label = isCounselingHit ? 'Preventive Counseling (99401)' : `Preventive (${pcRecentHit.code})`;
+            pc = { disabled: true, title: `${label} billed on ${pcRecentHit.date} — within the ${counselingGapDays}-day gap` };
         } else if (isPreventiveCounselBlockedIns(insuranceNorm)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insuranceNorm || 'this insurance'}` };
         } else if (!hasChronicDiseaseThisEncounter) {
@@ -5672,11 +5716,14 @@
             sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
         } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
-        } else if (codeUsedInLastDays('99406', 30) || codeUsedInLastDays('99407', 30)) {
+        } else if (findCodeUsedInLastDays(['99406', '99407'], 30)) {
             // Rule 30: 99407 (longer session) gets the identical treatment
             // 99406 already gets — same 18+ age gate above, same 30-day
-            // lookback here.
-            sm = { disabled: true, title: 'Smoking counseling (99406/99407) billed in the last 30 days' };
+            // lookback here. Report the SPECIFIC code and date actually
+            // found, not a generic "99406/99407" — e.g. avoid implying
+            // 99406 was billed when it was actually 99407, or vice versa.
+            const smHit = findCodeUsedInLastDays(['99406', '99407'], 30);
+            sm = { disabled: true, title: `Smoking counseling (${smHit.code}) billed on ${smHit.date} — within the 30-day gap` };
         } else if (isNycePPOIns(insuranceNorm)) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for NYCE PPO' };
         } else if (isTelevisit) {
@@ -5708,13 +5755,14 @@
         let ob = { disabled: false, title: 'Obesity Counseling' };
         if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
-        } else if (codeUsedInLastDays('G0447', counselingGapDays)) {
+        } else if (findCodeUsedInLastDays(['G0447'], counselingGapDays)) {
             // Hasnayen rule 4: same 2-month (Healthfirst) / 1-month (all
             // other payers) gap pattern as 99401. Unlike 99401, G0447 may
             // be ADDED by us when the gap and criteria are satisfied (the
             // OB quick action does that); when the criteria aren't met and
             // it's inside the window, computeAnalysis removes it.
-            ob = { disabled: true, title: `Obesity counseling (G0447) billed in the last ${counselingGapDays} days` };
+            const obHit = findCodeUsedInLastDays(['G0447'], counselingGapDays);
+            ob = { disabled: true, title: `Obesity counseling (G0447) billed on ${obHit.date} — within the ${counselingGapDays}-day gap` };
         } else if (insuranceNorm && /medicaid/i.test(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insuranceNorm)) {
