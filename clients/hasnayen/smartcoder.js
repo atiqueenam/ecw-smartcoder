@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.2
+// @name         Hasnayen Medical SmartCoder v1.3
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.3 (2026-08-16) - Social screening now ONLY the SDOH block inside
+//   Preventive Medicine; removed old PRAPARE/SCN widget checks.
+//
 // 1.2 (2026-08-16) - Fixed SDOH screening not detected in free-text
 //   Preventive Medicine notes, and AUDIT-C widget losing its label.
 //
@@ -1337,29 +1340,36 @@
         return null;
     }
 
-    // Social screening ("SCN" chip): a completed Social Determinants
-    // (PRAPARE) questionnaire — Bronx's version of the social-needs
-    // screen — or, for other clients sharing this same engine, the
-    // "SCN Screening"/"Social Needs Screening" phrasing they use instead.
+    // Social screening ("SCN" chip) for Hasnayen: ONLY the free-text SDOH
+    // block inside the "Preventive Medicine:" note counts — this client
+    // doesn't use eCW's structured Social Determinants/PRAPARE widget or
+    // the generic "SCN Screening" phrasing, so those Bronx checks are
+    // removed here rather than left as dead/misleading fallbacks.
     function evaluateSocialScreening(sections, fullText) {
-        const hasPrapare = sections.some(s =>
-            (s.label === 'Social Determinants' || s.label === 'PRAPARE') &&
-            /PRAPARE Score|housing situation|work situation/i.test(s.content)
-        );
-        return hasPrapare || /Social Needs Screening|SCN\s*Screening/i.test(fullText) || !!evaluateFreeTextSDOH(fullText);
+        return !!evaluateFreeTextSDOH(fullText);
     }
 
-    // v1.2: this client documents SDOH as free text in the Preventive
-    // Medicine note (not eCW's structured widget), heading "Social
-    // Determinants of Health Risk Assesment" (their template's spelling).
-    // Requires >=2 real questions to count as administered; G0136 only
-    // needs the screen done, not a positive result, so unmetNeeds doesn't
-    // gate it — it's reported for reference only.
+    // Hasnayen documents SDOH as free text inside the "Preventive Medicine:"
+    // note, heading "Social Determinants of Health Risk Assesment" (their
+    // template's spelling). Requires the Preventive Medicine heading AND
+    // the SDOH heading, in that order, so this can't fire on unrelated text
+    // elsewhere in the note. Requires >=2 real questions to count as
+    // administered; G0136 only needs the screen done, not a positive
+    // result, so unmetNeeds doesn't gate it — it's reported for reference.
     function evaluateFreeTextSDOH(text) {
         const t = String(text || "");
-        const headingMatch = t.match(/Social Determinants of Health(?:\s+Risk)?\s+Ass?es{1,2}ment\s*:?/i);
+        const pmMatch = t.match(/Preventive Medicine\s*:/i);
+        if (!pmMatch) return null;
+        const afterPM = t.slice(pmMatch.index + pmMatch[0].length);
+        const headingMatch = afterPM.match(/Social Determinants of Health(?:\s+Risk)?\s+Ass?es{1,2}ment\s*:?/i);
         if (!headingMatch) return null;
-        let block = t.slice(headingMatch.index + headingMatch[0].length);
+        let block = afterPM.slice(headingMatch.index + headingMatch[0].length);
+        // The template puts its own "===...===" divider line immediately
+        // after the heading too — strip that first, then find the REAL
+        // closing divider that comes after all the Q&A content. Without
+        // this, the block got truncated right at the heading's own
+        // divider, before any of the questions/answers were ever read.
+        block = block.replace(/^\s*=={3,}\s*/, '');
         const closeMatch = block.match(/=={3,}/);
         if (closeMatch) block = block.slice(0, closeMatch.index);
 
