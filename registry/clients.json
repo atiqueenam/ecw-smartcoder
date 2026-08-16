@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-16T05:21:33.864Z",
+  "generatedAt": "2026-08-16T05:35:42.487Z",
   "clients": [
     {
       "id": "bronx",
@@ -34,6 +34,17 @@
       "version": "1.81",
       "file": "clients/hasan-sheikh/smartcoder.js",
       "sha256": "4253b2491a336d570cd123b7ac821c9e0bbf69fdaa8981ffedb05597e6683a25"
+    },
+    {
+      "id": "hasnayen",
+      "name": "Hasnayen Medical",
+      "siteId": "nysmhmapp",
+      "hostnames": [
+        "nysmhmapp.ecwcloud.com"
+      ],
+      "version": "1.0",
+      "file": "clients/hasnayen/smartcoder.js",
+      "sha256": "2e998143c1d6495af9483dc4ff9a98b311b4a97f29e365e52498800fc8b73fc0"
     }
   ]
 }
