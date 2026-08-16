@@ -1,0 +1,9 @@
+{
+  "id": "hasnayen",
+  "name": "Hasnayen Medical",
+  "siteId": "nysmhmapp",
+  "hostnames": ["nysmhmapp.ecwcloud.com"],
+  "version": "1.0",
+  "entry": "smartcoder.js",
+  "enabled": false
+}
