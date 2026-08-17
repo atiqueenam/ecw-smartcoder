@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.13
+// @name         Hasnayen Medical SmartCoder v1.14
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,13 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.14 (2026-08-17) - Version label spacing fixed: margin-top 10px
+//   (was 2px, barely visible) and margin-bottom 4px (was a negative
+//   -7px that clipped into the panel's own padding). Also: 1.12-1.13
+//   were spacing-only edits with no version bump, so the loader's
+//   update check likely never re-fetched them — always bump on ANY
+//   change from now on, cosmetic or not.
+//
 // 1.13 (2026-08-17) - Version label moved to bottom-center, below the
 //   Analyze Codes/Proposed-changes area, instead of the top (was
 //   crowding the header).
@@ -340,7 +347,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.13';
+    const SCRIPT_VERSION = '1.14';
 
     let panel = null;
     let tab = null;
@@ -461,7 +468,7 @@
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
         .ecs-script-version {
             font-size: 9px; color: #94a3b8; text-align: center;
-            margin: 8px 0 -5px 0; line-height: 2; letter-spacing: .2px;
+            margin: 10px 0 4px 0; line-height: 1; letter-spacing: .2px;
         }
         .link-btn {
             flex: 1 1 0; min-width: 0; border: 0; border-radius: 7px; padding: 6px 4px;
