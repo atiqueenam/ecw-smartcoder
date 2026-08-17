@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.6
+// @name         Hasnayen Medical SmartCoder v1.7
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,11 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.7 (2026-08-16) - 1159F/1160F: Healthfirst no longer deletes these
+//   from the chart — age-66+ is the only removal rule now, same as any
+//   payer. Healthfirst instead gets them deselected (unchecked, not
+//   deleted) from the CLAIM tab via new cl_deselectHealthfirst1159_1160.
+//
 // 1.6 (2026-08-16) - 1125F/1126F/1157F/1158F/1170F: removed pain-vs and
 //   televisit-vs correction/swap logic — plain age check only, as given.
 //
@@ -2119,19 +2124,15 @@
             ['1170F', '1157F', '1158F', '1125F', '1126F'].forEach(c => exclusionReasons.set(c, reason));
         }
 
-        // 1159F/1160F: age 66+, no insurance-based rule. Never added fresh
-        // by us; if one or both are already present on the chart, they're
-        // left alone (no swap, no deletion) — only deleted outright if the
-        // patient is under 66.
-        // Hasnayen rule 25: 1159F and 1160F are never applied for
-        // Healthfirst, regardless of age — they're left out of `desired`
-        // for that payer, and since both are in MANAGED_CODES that also
-        // removes an already-present one.
-        if (isHealthfirst) {
-            const hfReason = 'Healthfirst — 1159F/1160F are never applied for this payer';
-            exclusionReasons.set('1159F', hfReason);
-            exclusionReasons.set('1160F', hfReason);
-        } else if (age >= 66) {
+        // 1159F/1160F: plain age check ONLY, same as the group above — 66+
+        // keeps whichever is already on the chart (never added fresh by
+        // us), under 66 removes it. NO insurance-based deletion here
+        // anymore, including for Healthfirst — if either code is on the
+        // chart and the patient is 66+, it stays on the chart regardless
+        // of payer. Healthfirst instead gets deselected from the CLAIM
+        // (not deleted from the chart) by cl_deselectHealthfirst1159_1160
+        // on the Claim tab — see that function.
+        if (age >= 66) {
             if (rawCPTCodeSet.has('1159F')) desired.set('1159F', `Age ${age} — retained`);
             if (rawCPTCodeSet.has('1160F')) desired.set('1160F', `Age ${age} — retained`);
         } else {
@@ -4814,6 +4815,18 @@
         return !!chk && chk.checked;
     }
 
+    // Unchecks (or checks) the row's "Assign To Patient" checkbox WITHOUT
+    // touching the code itself — the code stays on the chart, it's just
+    // deselected from being submitted on this claim. Uses .click() rather
+    // than setting .checked directly so eCW's own Angular ng-click/ng-model
+    // binding actually registers the change, not just the DOM property.
+    function cl_setCPTRowSelected(row, selected) {
+        const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+        if (!chk) return false;
+        if (chk.checked !== selected) chk.click();
+        return true;
+    }
+
     function cl_getClaimLevelPOSInput() {
         return document.querySelector('input[data-fieldname="ClaimPOS"]');
     }
@@ -5384,6 +5397,25 @@
         }
     }
 
+    // ─── Healthfirst + 1159F/1160F: deselect from claim, keep in chart ──
+    // 1159F/1160F are never deleted from the chart for Healthfirst — the
+    // age-66+ check (in computeAnalysis, chart/Analyze tab) is the ONLY
+    // thing that removes them, same as any other payer. But Healthfirst
+    // specifically doesn't want either code actually submitted on the
+    // claim, so on the Claim tab we uncheck the row's "Assign To Patient"
+    // box instead of deleting anything — the code visibly stays on the
+    // chart, it just isn't sent with this claim.
+    function cl_deselectHealthfirst1159_1160(cptRows) {
+        const primaryName = cl_getPrimaryInsuranceName();
+        if (!primaryName || !/health[\s-]*first\b/i.test(primaryName)) return;
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            if ((code === '1159F' || code === '1160F') && cl_isCPTRowSelected(row)) {
+                cl_setCPTRowSelected(row, false);
+            }
+        });
+    }
+
     // ─── Flu vaccine CPT presence check (90686 / 90688) ────────────────
     function cl_checkForFluVaccineCPTs(cptRows) {
         const targetCodes = new Set(["90686", "90688"]);
@@ -5593,6 +5625,7 @@
             cl_checkForFluVaccineCPTs(cptRows);
             cl_checkMedicarePreventiveCPT(cptRows);
             cl_checkMedicaidCPTCount(cptRows);
+            cl_deselectHealthfirst1159_1160(cptRows);
             cl_applyHealthfirstTelehealthPOS(cptRows);
             cl_applyMedicaidTelehealthPOS(cptRows);
             cl_applyOtherInsuranceTelehealthPOS(cptRows);
