@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-17T05:46:53.331Z",
+  "generatedAt": "2026-08-17T06:00:50.661Z",
   "clients": [
     {
       "id": "bronx",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.11",
+      "version": "1.12",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "0fe7299bdd19b85345a9f38183d5227c86462f62c580b0c2aa210ea2617192b3"
+      "sha256": "e8bec99f4839fcb2440c4b6032941e93fc001409d2b16253368103f972528c24"
     }
   ]
 }
