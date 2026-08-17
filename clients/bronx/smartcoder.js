@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.65
+// @name         Bronx Health SmartCoder v1.66
 // @namespace    http://tampermonkey.net/
-// @version      1.65
+// @version      1.66
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.66 (2026-08-16) - BUG FIX: deleteOneCPTRow/deleteOneICDRow reported
+//   "deleted successfully" for a row whose DOM reference went stale
+//   (e.g. Angular re-rendered the grid after an earlier delete in the
+//   same batch) WITHOUT actually clicking delete — the log said Z13.31
+//   (or any code) was removed while it was still visibly on the chart.
+//   Now re-finds the row by code in the current grid before giving up;
+//   only reports success-without-deleting if the code is genuinely gone.
+//
 // 1.65 (2026-08-16) - 1125F/1126F/1157F/1158F/1170F: removed pain-vs and
 //   televisit-vs correction/swap logic — plain age check only. 1159F/
 //   1160F: Healthfirst no longer deletes these from the chart (age-66+
@@ -1853,7 +1861,26 @@
     // handling, same "wait until gone" polling, for both the CPT grid and
     // (newly, for the quick-action cleanup below) the ICD grid.
     function deleteOneCPTRow(row, expectedCode, callback) {
-        if (!row || !document.body.contains(row)) { callback({ ok: true }); return; }
+        if (!row || !document.body.contains(row)) {
+            // BUG FIX: a detached/stale row reference does NOT mean the
+            // code is already gone — it usually means Angular re-rendered
+            // this grid (e.g. an earlier delete in this same batch caused
+            // a re-render), leaving our captured DOM node orphaned while
+            // the code is still sitting on the chart under a NEW row node.
+            // Previously this branch reported {ok:true} unconditionally,
+            // which showed "deleted" in the log even though nothing was
+            // ever clicked — the code stayed on the chart. Re-find the row
+            // by code in the CURRENT grid first; only report ok:true
+            // without deleting if it's genuinely not there anymore.
+            if (expectedCode) {
+                const freshRow = getCPTRowByCode(expectedCode);
+                if (freshRow) { row = freshRow; }
+                else { callback({ ok: true }); return; }
+            } else {
+                callback({ ok: true });
+                return;
+            }
+        }
 
         // eCW's ng-repeat uses "track by $index" — if the grid changed since
         // this row reference was captured, Angular can silently reuse this
@@ -1907,7 +1934,28 @@
     }
 
     function deleteOneICDRow(row, expectedCode, callback) {
-        if (!row || !document.body.contains(row)) { callback(true); return; }
+        if (!row || !document.body.contains(row)) {
+            // BUG FIX: a detached/stale row reference does NOT mean the
+            // ICD is already gone — it usually means Angular re-rendered
+            // the grid (e.g. an earlier CPT delete in this same
+            // applyAnalysis batch caused a re-render), leaving our
+            // captured DOM node orphaned while the ICD is still sitting
+            // on the chart under a NEW row node. This was the exact cause
+            // of the reported bug: the log said "Z13.31 deleted" but the
+            // code was still visibly on the chart, because this branch
+            // used to report success unconditionally without ever
+            // clicking delete. Re-find the row by code in the CURRENT
+            // grid first; only report success without deleting if the
+            // code is genuinely not there anymore.
+            if (expectedCode) {
+                const entry = getICDRows().find(r => r.code.toUpperCase() === expectedCode.toUpperCase());
+                if (entry) { row = entry.row; }
+                else { callback(true); return; }
+            } else {
+                callback(true);
+                return;
+            }
+        }
 
         // Same reuse risk as the CPT grid — re-verify before deleting.
         let actualCode = row.querySelector('td:nth-child(3)')?.textContent.trim();
