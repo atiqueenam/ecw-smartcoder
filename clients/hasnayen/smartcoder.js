@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.12
+// @name         Hasnayen Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,18 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.13 (2026-08-17) - Version label moved to bottom-center, below the
+//   Analyze Codes/Proposed-changes area, instead of the top (was
+//   crowding the header).
+//
+// 1.12 (2026-08-17) - Small "vX.X" version label added to the panel so
+//   the running build can be confirmed without touching the loader.
+//
+// 1.11 (2026-08-17) - BUG FIX: PV/SM/OB quick actions ignored visit type
+//   (rule 6) — e.g. F/U refill let PV add a preventive code that then
+//   showed up in the delete list right after. Now gated the same way
+//   P/C already was.
+//
 // 1.10 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
 //   enabled with no BMI documented at all, only failing after being
 //   clicked ("BMI not found on this page — skipped"). Now fades up
@@ -328,7 +340,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.12';
+    const SCRIPT_VERSION = '1.13';
 
     let panel = null;
     let tab = null;
@@ -448,8 +460,8 @@
         .link-btn-row { gap: 6px; }
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
         .ecs-script-version {
-            font-size: 9px; color: #94a3b8; text-align: right;
-            margin-top: -8px; margin-bottom: 6px; letter-spacing: .2px;
+            font-size: 9px; color: #94a3b8; text-align: center;
+            margin-top: 8px; letter-spacing: .2px;
         }
         .link-btn {
             flex: 1 1 0; min-width: 0; border: 0; border-radius: 7px; padding: 6px 4px;
@@ -6507,7 +6519,6 @@
                 <button id="ecsAutoLinkBtn" class="link-btn link-btn-al" title="Auto-link ICD/CPT on the billing tab">🔗 Auto Link</button>
                 <button id="ecsClaimLinkBtn" class="link-btn link-btn-cl" title="Claim Link rules on the Claim tab">📋 Claim Link</button>
             </div>
-            <div class="ecs-script-version" title="Version of this client script currently loaded in this browser">v${SCRIPT_VERSION}</div>
             <div class="snapshot-header">
                 CURRENT ENCOUNTER
                 <label class="weekend-toggle" title="Weekend rule (99051)">
@@ -6543,6 +6554,7 @@
                 <button id="ecsObesityBtn" class="qa-btn qa-obesity" title="${escapeHtml(qaGating.ob.title)}" ${(quickActionRunning || qaGating.ob.disabled) ? 'disabled' : ''}>OB</button>
             </div>
             ${renderAnalysisSection()}
+            <div class="ecs-script-version" title="Version of this client script currently loaded in this browser">v${SCRIPT_VERSION}</div>
         `;
 
         const body = document.getElementById('ecsBody');
