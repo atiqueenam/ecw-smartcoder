@@ -461,7 +461,7 @@
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
         .ecs-script-version {
             font-size: 9px; color: #94a3b8; text-align: center;
-            margin: 2px 0 -7px 0; line-height: 1; letter-spacing: .2px;
+            margin: 3px 0 -6px 0; line-height: 1; letter-spacing: .2px;
         }
         .link-btn {
             flex: 1 1 0; min-width: 0; border: 0; border-radius: 7px; padding: 6px 4px;
