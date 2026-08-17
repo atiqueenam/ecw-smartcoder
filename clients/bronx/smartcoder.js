@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.69
+// @name         Bronx Health SmartCoder v1.70
 // @namespace    http://tampermonkey.net/
-// @version      1.69
+// @version      1.70
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -2576,6 +2576,26 @@
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
                 }
             });
+        }
+
+        // BUG FIX: G0444/G0442 are deliberately excluded from MANAGED_CODES
+        // (so age-cleanup/annual-year logic can delete them on their own
+        // terms without an incomplete eligibility recheck stripping a
+        // legitimately-billed one). But that meant Medicaid/Medicare charts
+        // had NO deletion path at all if one of these was already sitting
+        // on the chart (added before insurance was set, added manually,
+        // carried over, etc.) — annualGCodesEligible() only blocked adding
+        // a NEW one, nothing ever removed an existing one. Mirrors the UHC
+        // block above; MetroPlus stays exempt via isMedicaidOrMedicareIns().
+        if (isMedicaidOrMedicareIns(insurance)) {
+            const g0444Existing = currentRows.find(r => r.code === 'G0444');
+            if (g0444Existing && !toDelete.some(d => d.code === 'G0444')) {
+                toDelete.push({ code: 'G0444', row: g0444Existing.row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444 not billable for this payer' });
+            }
+            const g0442Existing = currentRows.find(r => r.code === 'G0442');
+            if (g0442Existing && !toDelete.some(d => d.code === 'G0442')) {
+                toDelete.push({ code: 'G0442', row: g0442Existing.row, kind: 'cpt', reason: 'Medicaid/Medicare — G0442 not billable for this payer' });
+            }
         }
 
         // Empire plan: remove any alcohol/tobacco screening code (and the
