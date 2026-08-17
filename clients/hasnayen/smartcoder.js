@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.8
+// @name         Hasnayen Medical SmartCoder v1.9
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,10 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.9 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
+//   screening ICD): replaced with Z13.9 when alcohol screening applies,
+//   deleted outright with no replacement when it doesn't.
+//
 // 1.8 (2026-08-16) - BUG FIX: deleteOneCPTRow/deleteOneICDRow reported
 //   "deleted successfully" for a stale/detached row WITHOUT actually
 //   clicking delete — log said a code was removed while it stayed on
@@ -2373,7 +2377,22 @@
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
-            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+            if (code === 'Z13.89' && !toDelete.some(d => d.code === entry.code)) {
+                // Z13.89 and Z13.9 are the same alcohol-screening ICD for
+                // this practice's purposes — we standardize on Z13.9 only.
+                // If alcohol screening applies, Z13.89 is replaced with
+                // Z13.9 (the add rule above already adds Z13.9 whenever
+                // hasAlcoholScreeningCpt is true and it's not already on
+                // the chart). If alcohol screening does NOT apply, Z13.89
+                // is deleted outright with no replacement, same as Z13.9
+                // would be in that case.
+                toDelete.push({
+                    code: entry.code, row: entry.row, kind: 'icd',
+                    reason: hasAlcoholScreeningCpt
+                        ? 'Z13.89 replaced with Z13.9 — same alcohol screening ICD, this practice standardizes on Z13.9'
+                        : 'Alcohol screening ICD present but no alcohol screening CPT on chart'
+                });
+            } else if (code === 'Z13.9' && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
             }
         });

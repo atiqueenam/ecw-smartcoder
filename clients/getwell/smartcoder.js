@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.48
+// @name         Getwell SmartCoder by ATQ v5.49
 // @namespace    http://tampermonkey.net/
-// @version      5.48
+// @version      5.49
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,10 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.49 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
+//   screening ICD): replaced with Z13.9 when alcohol screening applies,
+//   deleted outright with no replacement when it doesn't.
+//
 // 5.48 (2026-08-15) - NEW RULE (all clients): Preventive/Preventive
 //   Counseling/Smoking Counseling/Obesity Counseling now all require at
 //   least one vital sign (BP, weight, height, pulse, temp, resp rate, O2
@@ -2459,7 +2463,22 @@
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
-            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+            if (code === 'Z13.89' && !toDelete.some(d => d.code === entry.code)) {
+                // Z13.89 and Z13.9 are the same alcohol-screening ICD for
+                // this practice's purposes — we standardize on Z13.9 only.
+                // If alcohol screening applies, Z13.89 is replaced with
+                // Z13.9 (the add rule above already adds Z13.9 whenever
+                // hasAlcoholScreeningCpt is true and it's not already on
+                // the chart). If alcohol screening does NOT apply, Z13.89
+                // is deleted outright with no replacement, same as Z13.9
+                // would be in that case.
+                toDelete.push({
+                    code: entry.code, row: entry.row, kind: 'icd',
+                    reason: hasAlcoholScreeningCpt
+                        ? 'Z13.89 replaced with Z13.9 — same alcohol screening ICD, this practice standardizes on Z13.9'
+                        : 'Alcohol screening ICD present but no alcohol screening CPT on chart'
+                });
+            } else if (code === 'Z13.9' && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
             }
         });
@@ -3820,7 +3839,7 @@
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6', 'Z00.00'
+            'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6'
         ]);
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }

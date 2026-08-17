@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.66
+// @name         Bronx Health SmartCoder v1.67
 // @namespace    http://tampermonkey.net/
-// @version      1.66
+// @version      1.67
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.67 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
+//   screening ICD): replaced with Z13.9 when alcohol screening applies,
+//   deleted outright with no replacement when it doesn't.
+//
 // 1.66 (2026-08-16) - BUG FIX: deleteOneCPTRow/deleteOneICDRow reported
 //   "deleted successfully" for a row whose DOM reference went stale
 //   (e.g. Angular re-rendered the grid after an earlier delete in the
@@ -2542,7 +2546,22 @@
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
-            if ((code === 'Z13.9' || code === 'Z13.89') && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+            if (code === 'Z13.89' && !toDelete.some(d => d.code === entry.code)) {
+                // Z13.89 and Z13.9 are the same alcohol-screening ICD for
+                // this practice's purposes — we standardize on Z13.9 only.
+                // If alcohol screening applies, Z13.89 is replaced with
+                // Z13.9 (the add rule above already adds Z13.9 whenever
+                // hasAlcoholScreeningCpt is true and it's not already on
+                // the chart). If alcohol screening does NOT apply, Z13.89
+                // is deleted outright with no replacement, same as Z13.9
+                // would be in that case.
+                toDelete.push({
+                    code: entry.code, row: entry.row, kind: 'icd',
+                    reason: hasAlcoholScreeningCpt
+                        ? 'Z13.89 replaced with Z13.9 — same alcohol screening ICD, this practice standardizes on Z13.9'
+                        : 'Alcohol screening ICD present but no alcohol screening CPT on chart'
+                });
+            } else if (code === 'Z13.9' && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
             }
         });
