@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.68
+// @name         Bronx Health SmartCoder v1.69
 // @namespace    http://tampermonkey.net/
-// @version      1.68
+// @version      1.69
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -1923,23 +1923,52 @@
         // Clear it first (best-effort, harmless no-op if nothing's open).
         clickAnyYesButton();
 
-        delBtn.click();
-        const start = Date.now();
-        const confirmTimer = setInterval(() => {
-            if (clickAnyYesButton()) {
-                clearInterval(confirmTimer);
-                waitUntilGoneCPT(() => {
-                    return getCPTRows().find(r =>
-                        r.querySelector('td:nth-child(2)')?.textContent.trim() === code
-                    );
-                }, 6000, (gone) => callback({ ok: gone }));
-                return;
-            }
-            if (Date.now() - start > 6000) {
-                clearInterval(confirmTimer);
-                callback({ ok: false });
-            }
-        }, 100);
+        // BUG FIX: rows further down a long CPT list are still real <tr>
+        // nodes in the DOM (eCW doesn't unmount off-screen rows), so the
+        // checks above all pass — but a delete button that's never been
+        // scrolled into view often doesn't register a real click, so no
+        // confirm dialog ever appears and this silently times out as
+        // "failed" 6 seconds later. Scroll it into view and give the grid
+        // a moment to settle before clicking, then retry once (re-finding
+        // the row fresh) if the confirm dialog doesn't show up quickly.
+        clickCPTDeleteWithRetry(row, expectedCode, code, delBtn, callback);
+    }
+
+    function clickCPTDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry) {
+        row.scrollIntoView({ block: 'center' });
+        setTimeout(() => {
+            delBtn.click();
+            const start = Date.now();
+            const shortWindow = 1500;
+            const confirmTimer = setInterval(() => {
+                if (clickAnyYesButton()) {
+                    clearInterval(confirmTimer);
+                    waitUntilGoneCPT(() => {
+                        return getCPTRows().find(r =>
+                            r.querySelector('td:nth-child(2)')?.textContent.trim() === code
+                        );
+                    }, 6000, (gone) => callback({ ok: gone }));
+                    return;
+                }
+                const elapsed = Date.now() - start;
+                if (!isRetry && elapsed > shortWindow) {
+                    // First attempt's click likely didn't land (row was
+                    // still settling into view) — re-find the row fresh
+                    // and retry once before giving up.
+                    clearInterval(confirmTimer);
+                    const freshRow = getCPTRowByCode(expectedCode || code);
+                    if (!freshRow) { callback({ ok: false }); return; }
+                    const freshBtn = freshRow.querySelector('button, i.blue-delete, .blue-delete');
+                    if (!freshBtn) { callback({ ok: false }); return; }
+                    clickCPTDeleteWithRetry(freshRow, expectedCode, code, freshBtn, callback, true);
+                    return;
+                }
+                if (elapsed > 6000) {
+                    clearInterval(confirmTimer);
+                    callback({ ok: false });
+                }
+            }, 100);
+        }, 200);
     }
 
     function deleteOneICDRow(row, expectedCode, callback) {
@@ -1985,21 +2014,50 @@
         // Clear it first (best-effort, harmless no-op if nothing's open).
         clickAnyYesButton();
 
-        delBtn.click();
-        const start = Date.now();
-        const confirmTimer = setInterval(() => {
-            if (clickAnyYesButton()) {
-                clearInterval(confirmTimer);
-                waitUntilGoneCPT(() => {
-                    return getICDRows().find(r => r.code === code);
-                }, 6000, callback);
-                return;
-            }
-            if (Date.now() - start > 6000) {
-                clearInterval(confirmTimer);
-                callback(false);
-            }
-        }, 100);
+        // BUG FIX: rows further down a long ICD list are still real <tr>
+        // nodes in the DOM (eCW doesn't unmount off-screen rows), so the
+        // checks above all pass — but a delete button that's never been
+        // scrolled into view often doesn't register a real click, so no
+        // confirm dialog ever appears and this silently times out as
+        // "failed" 6 seconds later. Scroll it into view and give the grid
+        // a moment to settle before clicking, then retry once (re-finding
+        // the row fresh) if the confirm dialog doesn't show up quickly.
+        clickICDDeleteWithRetry(row, expectedCode, code, delBtn, callback);
+    }
+
+    function clickICDDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry) {
+        row.scrollIntoView({ block: 'center' });
+        setTimeout(() => {
+            delBtn.click();
+            const start = Date.now();
+            const shortWindow = 1500;
+            const confirmTimer = setInterval(() => {
+                if (clickAnyYesButton()) {
+                    clearInterval(confirmTimer);
+                    waitUntilGoneCPT(() => {
+                        return getICDRows().find(r => r.code === code);
+                    }, 6000, callback);
+                    return;
+                }
+                const elapsed = Date.now() - start;
+                if (!isRetry && elapsed > shortWindow) {
+                    // First attempt's click likely didn't land (row was
+                    // still settling into view) — re-find the row fresh
+                    // and retry once before giving up.
+                    clearInterval(confirmTimer);
+                    const entry = getICDRows().find(r => r.code.toUpperCase() === (expectedCode || code).toUpperCase());
+                    if (!entry) { callback(false); return; }
+                    const freshBtn = entry.row.querySelector('button, i.blue-delete, .blue-delete');
+                    if (!freshBtn) { callback(false); return; }
+                    clickICDDeleteWithRetry(entry.row, expectedCode, code, freshBtn, callback, true);
+                    return;
+                }
+                if (elapsed > 6000) {
+                    clearInterval(confirmTimer);
+                    callback(false);
+                }
+            }, 100);
+        }, 200);
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
