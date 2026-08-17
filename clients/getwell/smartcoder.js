@@ -3820,7 +3820,7 @@
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6'
+            'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6', 'Z00.00'
         ]);
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
