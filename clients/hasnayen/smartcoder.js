@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.10
+// @name         Hasnayen Medical SmartCoder v1.11
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -5818,9 +5818,20 @@
         const PREVENTIVE_ALL_CODES = [...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES];
 
         // ---- PV: Preventive ----
+        // BUG FIX (rule 6): only a visit type classified 'preventive' (ANN
+        // VISIT / NP) should ever allow the PV button — every other visit
+        // type (counseling, none, excluded) was previously unrestricted
+        // here, so e.g. an "F/U refill" visit (counseling-only per rule 6)
+        // let PV run, add a preventive E/M code, and only got caught
+        // afterward by computeAnalysis flagging it for deletion on the
+        // next pass. Gate it up front instead of relying on the delete
+        // list to clean up after the fact.
+        const pvVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         let pv = { disabled: false, title: 'Preventive' };
         if (PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
             pv = { disabled: true, title: 'Preventive already billed this calendar year' };
+        } else if (pvVisitInfo && pvVisitInfo.behavior !== 'preventive') {
+            pv = { disabled: true, title: `Visit type "${getVisitType()}" does not allow a preventive code` };
         } else if (isTelevisit) {
             pv = { disabled: true, title: 'Preventive not applicable for a televisit' };
         }
@@ -5868,9 +5879,16 @@
         // ---- SM: Smoking Counseling ----
         // 99406 requires the patient to be 18+ — same age-gate pattern as
         // the G0444 (12+) / G0442 (18+) screening G-codes.
+        // BUG FIX (rule 6): visit types marked "No PV/counseling" (Blood
+        // Test, Vaccine, Televisit) or "excluded" (Call back) shouldn't
+        // suggest ANY of the counseling-family quick actions, not just PV
+        // — same visit-type gate P/C already has, extended here.
+        const smVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         const smAge = getAgeAtDOS(text);
         let sm = { disabled: false, title: 'Smoking Counseling' };
-        if (smAge != null && smAge < 18) {
+        if (smVisitInfo && (smVisitInfo.behavior === 'none' || smVisitInfo.behavior === 'excluded')) {
+            sm = { disabled: true, title: `Visit type "${getVisitType()}" does not allow a counseling code` };
+        } else if (smAge != null && smAge < 18) {
             sm = { disabled: true, title: `Smoking Counseling not applicable — patient age ${smAge} is under 18` };
         } else if (flags.hasTob !== false) {
             sm = { disabled: true, title: 'Smoking Counseling only applies to a confirmed smoker' };
@@ -5917,9 +5935,16 @@
         // instead of fading the button up front like every other missing-
         // prerequisite case. Now checked first so the button fades
         // immediately with a clear reason when BMI genuinely isn't there.
+        // BUG FIX (rule 6): same visit-type gate as SM above — "No PV/
+        // counseling" and "excluded" visit types block Obesity Counseling
+        // too, checked first so it wins over the BMI-missing message when
+        // the visit type itself already rules OB out.
+        const obVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         const obBmiMissing = obAge < 18 ? (obBmiPercentile == null) : (obBmi == null);
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmiMissing) {
+        if (obVisitInfo && (obVisitInfo.behavior === 'none' || obVisitInfo.behavior === 'excluded')) {
+            ob = { disabled: true, title: `Visit type "${getVisitType()}" does not allow a counseling code` };
+        } else if (obBmiMissing) {
             ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
         } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
