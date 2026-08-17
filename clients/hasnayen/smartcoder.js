@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.5
+// @name         Hasnayen Medical SmartCoder v1.6
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.6 (2026-08-16) - 1125F/1126F/1157F/1158F/1170F: removed pain-vs and
+//   televisit-vs correction/swap logic — plain age check only, as given.
+//
 // 1.5 (2026-08-16) - 99213 reason no longer mentions 99214 unless 99214
 //   was actually in play (chronic dx present) — cleaner, less confusing.
 //
@@ -2101,37 +2104,16 @@
             }
         }
 
-        // ---- Age-based correction-only CPTs ----
-        // 1170F/1157F(normal)/1158F(televisit)/1125F(pain)/1126F(no pain):
-        // age 65+, never added fresh, only corrected/deleted.
-        const icdRows = getICDRows();
-        const hasPainOrM = icdRows.some(r => isPainRelatedICDEntry(r.code, r.name));
-        // isTelevisitNote is computed earlier in this function (see above,
-        // right before hasPreventiveVisit) so it can also gate the
-        // Preventive/Preventive-Counseling bundle cleanup.
-
+        // ---- Age-gated CPTs: 1125F, 1126F, 1170F, 1157F, 1158F ----
+        // Hasnayen: plain age check ONLY — kept for 65+, removed if under
+        // 65. No televisit-vs-normal (1157F/1158F) or pain-vs-no-pain
+        // (1125F/1126F) correction/swap between the pair — whichever of
+        // these the practice already has on the chart is left as-is at
+        // 65+, and neither is ever added fresh by us.
         if (age >= 65) {
-            const has1157or1158 = rawCPTCodeSet.has('1157F') || rawCPTCodeSet.has('1158F');
-            if (has1157or1158) {
-                const correct6xF = isTelevisitNote ? '1158F' : '1157F';
-                const wrong6xF = correct6xF === '1157F' ? '1158F' : '1157F';
-                desired.set(correct6xF, `Visit-type correction (${isTelevisitNote ? 'televisit' : 'normal visit'}, age ${age})`);
-                if (rawCPTCodeSet.has(wrong6xF)) {
-                    exclusionReasons.set(wrong6xF, `Wrong visit-type code — should be ${correct6xF} (${isTelevisitNote ? 'televisit' : 'normal visit'})`);
-                }
-            }
-            if (rawCPTCodeSet.has('1170F')) {
-                desired.set('1170F', `Age ${age} — retained`);
-            }
-            const has1125or1126 = rawCPTCodeSet.has('1125F') || rawCPTCodeSet.has('1126F');
-            if (has1125or1126) {
-                const correctPain = hasPainOrM ? '1125F' : '1126F';
-                const wrongPain = correctPain === '1125F' ? '1126F' : '1125F';
-                desired.set(correctPain, `Pain-code correction based on ICD grid (age ${age})`);
-                if (rawCPTCodeSet.has(wrongPain)) {
-                    exclusionReasons.set(wrongPain, `Wrong pain-status code — should be ${correctPain} (${hasPainOrM ? 'pain ICD present' : 'no pain ICD'})`);
-                }
-            }
+            ['1170F', '1157F', '1158F', '1125F', '1126F'].forEach(c => {
+                if (rawCPTCodeSet.has(c)) desired.set(c, `Age ${age} — retained`);
+            });
         } else {
             const reason = `Patient age ${age} — under 65, code not applicable`;
             ['1170F', '1157F', '1158F', '1125F', '1126F'].forEach(c => exclusionReasons.set(c, reason));
