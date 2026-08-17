@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.9
+// @name         Hasnayen Medical SmartCoder v1.10
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      1.10
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,11 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.10 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
+//   enabled with no BMI documented at all, only failing after being
+//   clicked ("BMI not found on this page — skipped"). Now fades up
+//   front like every other missing-prerequisite case.
+//
 // 1.9 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
 //   screening ICD): replaced with Z13.9 when alcohol screening applies,
 //   deleted outright with no replacement when it doesn't.
@@ -5905,8 +5910,18 @@
         const obBmiBlockTitle = obAge < 18
             ? `Obesity Counseling not applicable — BMI percentile ${obBmiPercentile}% is under the 95th percentile`
             : `Obesity Counseling not applicable — BMI ${obBmi} is under 30`;
+        // BUG FIX: if NO BMI value/percentile is documented at all, the
+        // button used to stay enabled (obBmiBlocked short-circuits to
+        // false when the value is null) and only failed after being
+        // clicked, showing "BMI not found on this page — skipped."
+        // instead of fading the button up front like every other missing-
+        // prerequisite case. Now checked first so the button fades
+        // immediately with a clear reason when BMI genuinely isn't there.
+        const obBmiMissing = obAge < 18 ? (obBmiPercentile == null) : (obBmi == null);
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmiBlocked) {
+        if (obBmiMissing) {
+            ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
+        } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
         } else if (findCodeUsedInLastDays(['G0447'], counselingGapDays)) {
             // Hasnayen rule 4: same 2-month (Healthfirst) / 1-month (all

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.49
+// @name         Getwell SmartCoder by ATQ v5.50
 // @namespace    http://tampermonkey.net/
-// @version      5.49
+// @version      5.50
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.50 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
+//   enabled with no BMI documented at all, only failing after being
+//   clicked ("BMI not found on this page — skipped"). Now fades up
+//   front like every other missing-prerequisite case.
+//
 // 5.49 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
 //   screening ICD): replaced with Z13.9 when alcohol screening applies,
 //   deleted outright with no replacement when it doesn't.
@@ -5238,8 +5243,18 @@
         const obBmiBlockTitle = obAge < 18
             ? `Obesity Counseling not applicable — BMI percentile ${obBmiPercentile}% is under the 95th percentile`
             : `Obesity Counseling not applicable — BMI ${obBmi} is under 30`;
+        // BUG FIX: if NO BMI value/percentile is documented at all, the
+        // button used to stay enabled (obBmiBlocked short-circuits to
+        // false when the value is null) and only failed after being
+        // clicked, showing "BMI not found on this page — skipped."
+        // instead of fading the button up front like every other missing-
+        // prerequisite case. Now checked first so the button fades
+        // immediately with a clear reason when BMI genuinely isn't there.
+        const obBmiMissing = obAge < 18 ? (obBmiPercentile == null) : (obBmi == null);
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmiBlocked) {
+        if (obBmiMissing) {
+            ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
+        } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
         } else if (codeUsedInLastDays('G0447', 30)) {
             ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
