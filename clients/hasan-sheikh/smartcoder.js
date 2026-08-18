@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.83
+// @name         Hasan Sheikh SmartCoder v1.85
 // @namespace    http://tampermonkey.net/
-// @version      1.83
+// @version      1.85
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,27 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.85 (2026-08-18) - PERF FIX to 1.84's ICD delete retry: it was
+//   adding a settle wait after EVERY ICD delete, even ones that worked
+//   cleanly on the first try, slowing down normal deletes that never
+//   had a problem. Now the wait only happens AFTER a bounce-back is
+//   actually detected, before the next retry — a clean delete returns
+//   immediately, same speed as before 1.84.
+//
+// 1.84 (2026-08-18) - BUG FIX: an ICD delete could report success while
+//   leaving the row stale-detached-but-not-actually-clicked (the delete
+//   function treated a DOM node that had been re-rendered out from under
+//   it as "already gone" without ever clicking), and separately a
+//   genuinely-clicked delete could bounce back a moment later if eCW's
+//   backend hadn't committed it before the next action touched the
+//   grid. deleteOneICDRow now re-finds the row by code instead of
+//   assuming a detached reference means already-deleted, and new
+//   deleteICDRowWithRetry() retries the whole delete up to 4 times with
+//   an increasing settle wait (900ms/1600ms/2300ms/3000ms), re-reading
+//   the row fresh each attempt. Wired into both the main delete pass and
+//   the recheck pass (recheck pass no longer skips a code that failed on
+//   the first pass).
 //
 // 1.83 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
 //   enabled with no BMI documented at all, only failing after being
@@ -1706,7 +1727,24 @@
     }
 
     function deleteOneICDRow(row, expectedCode, callback) {
-        if (!row || !document.body.contains(row)) { callback(true); return; }
+        if (!row || !document.body.contains(row)) {
+            // BUG FIX: a detached/stale row reference does NOT mean the
+            // ICD is already gone — it usually means Angular re-rendered
+            // the grid (e.g. an earlier CPT/ICD delete in this same
+            // applyAnalysis batch caused a re-render), leaving our
+            // captured DOM node orphaned while the ICD is still sitting
+            // on the chart under a NEW row node. Report success without
+            // deleting only if the code is genuinely not there anymore in
+            // the CURRENT grid.
+            if (expectedCode) {
+                const entry = getICDRows().find(r => r.code.toUpperCase() === expectedCode.toUpperCase());
+                if (entry) { row = entry.row; }
+                else { callback(true); return; }
+            } else {
+                callback(true);
+                return;
+            }
+        }
 
         // Same reuse risk as the CPT grid — re-verify before deleting.
         let actualCode = row.querySelector('td:nth-child(3)')?.textContent.trim();
@@ -1742,6 +1780,39 @@
                 callback(false);
             }
         }, 100);
+    }
+
+    // Some ICD deletes visually succeed (row vanishes, confirm click
+    // worked) but bounce back a moment later — eCW's backend hadn't
+    // actually committed the delete yet when something else (usually the
+    // next add/delete in the same run) touched the grid and it
+    // re-rendered from a not-yet-updated list. Retry the delete itself a
+    // few times with an increasing settle wait after each attempt,
+    // re-reading the row fresh each time (never reusing a stale DOM
+    // reference across attempts).
+    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
+            if (!entry) return { ok: true }; // already gone (or never there)
+
+            const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
+            if (!clicked) {
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+
+            // Fast path: deleteOneICDRow already waited for the row to
+            // leave the DOM, so a normal, working delete confirms and
+            // returns here immediately — no added delay. Only a code that
+            // ACTUALLY bounces back pays an extra wait, and only on the
+            // retry after that happens (900ms, 1600ms, 2300ms), giving
+            // eCW's backend a little more time to commit before checking
+            // again.
+            if (!findICDRowByCodeFast(code)) return { ok: true };
+            if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
+            // Still there (or back) — loop and try again.
+        }
+        return { ok: false };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -5563,8 +5634,7 @@
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                result = { ok };
+                result = await deleteICDRowWithRetry(item.code);
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -5654,7 +5724,7 @@
 
         if (recheck) {
             for (const item of recheck.toDelete) {
-                if (actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
+                if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
                 let result;
                 if (item.kind === 'icd') {
                     const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));

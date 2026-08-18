@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.53
+// @name         Getwell SmartCoder by ATQ v5.55
 // @namespace    http://tampermonkey.net/
-// @version      5.53
+// @version      5.55
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,28 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.55 (2026-08-18) - PERF FIX to 5.54's ICD delete retry: it was
+//   adding a settle wait after EVERY ICD delete, even ones that
+//   worked cleanly on the first try, slowing down normal deletes
+//   that never had a problem. Now the wait only happens AFTER a
+//   bounce-back is actually detected, before the next retry — a
+//   clean delete returns immediately, same speed as before 5.54.
+//
+// 5.54 (2026-08-18) - BUG FIX: ICD deletes (e.g. Z13.89) could silently
+//   no-op and get reported as "reappeared"/failed even though the code
+//   was still genuinely on the chart. Root cause: computeAnalysis()
+//   captures each ICD row's DOM reference once, up front; if an earlier
+//   delete/add in the same Start Action run causes eCW to re-render the
+//   ICD grid, that captured reference goes stale (detached from the
+//   page), and the old delete function treated "detached" as "already
+//   deleted" without ever clicking anything. New deleteICDRowWithRetry()
+//   re-reads the row fresh by code immediately before every attempt
+//   (up to 4, with an increasing settle wait after each real delete
+//   click) instead of relying on that stale reference, fixing the
+//   underlying no-op and also retrying genuine bounce-backs. Wired into
+//   both the main delete pass and the recheck pass (recheck pass no
+//   longer skips a code that failed on the first pass).
+//
 // 5.53 (2026-08-18) - BUG FIX: computeAnalysis's local
 //   PREVENTIVE_VISIT_CODES set was missing G0402 (Medicare's
 //   "Welcome to Medicare"/Initial Preventive Physical Exam code) —
@@ -1776,6 +1798,45 @@
                 callback(false);
             }
         }, 100);
+    }
+
+    // Some ICD deletes visually succeed (row vanishes, confirm click
+    // worked) but bounce back a moment later — eCW's backend hadn't
+    // actually committed the delete yet when something else (usually the
+    // next add in the same run) touched the grid and it re-rendered from
+    // a not-yet-updated list. Manual single deletes don't hit this because
+    // nothing else happens to the grid right after; the automation's
+    // delete-then-add pace can outrun eCW's save. Rather than accept the
+    // first bounce-back as final, retry the delete itself a few times with
+    // an increasing settle wait after each attempt, re-reading the row
+    // fresh each time (never reusing a stale DOM reference across
+    // attempts). Falls back to reporting failure only if it still won't
+    // hold after all attempts.
+    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
+            if (!entry) return { ok: true }; // already gone (or never there)
+
+            const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
+            if (!clicked) {
+                // Confirm click/timeout failed outright — brief pause, then
+                // retry from scratch with a fresh row lookup.
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+
+            // Fast path: deleteOneICDRow already waited for the row to
+            // leave the DOM, so a normal, working delete confirms and
+            // returns here immediately — no added delay. Only a code that
+            // ACTUALLY bounces back pays an extra wait, and only on the
+            // retry after that happens (900ms, 1600ms, 2300ms), giving
+            // eCW's backend a little more time to commit before checking
+            // again.
+            if (!findICDRowByCodeFast(code)) return { ok: true };
+            if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
+            // Still there (or back) — loop and try again.
+        }
+        return { ok: false };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -5617,8 +5678,7 @@
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                result = { ok };
+                result = await deleteICDRowWithRetry(item.code);
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -5708,11 +5768,15 @@
 
         if (recheck) {
             for (const item of recheck.toDelete) {
-                if (actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
+                // Skip codes the first pass already reported as a genuine
+                // success — but a first-pass "fail" (e.g. the ICD
+                // bounce-back case) still means it's sitting on the chart,
+                // so give it another shot here instead of leaving it as a
+                // dead-end "fail" entry.
+                if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
                 let result;
                 if (item.kind === 'icd') {
-                    const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                    result = { ok };
+                    result = await deleteICDRowWithRetry(item.code);
                 } else {
                     result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
                 }

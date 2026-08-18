@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.19
+// @name         Hasnayen Medical SmartCoder v1.23
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.23
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,7 +13,24 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
-// 1.19 (2026-08-18) - BUG FIX: evaluateAlcohol()'s section filter only
+// 1.23 (2026-08-18) - PERF FIX to 1.22's ICD delete retry: it was
+//   adding a settle wait after EVERY ICD delete, even ones that worked
+//   cleanly on the first try, slowing down normal deletes that never
+//   had a problem. Now the wait only happens AFTER a bounce-back is
+//   actually detected, before the next retry — a clean delete returns
+//   immediately, same speed as before 1.22.
+//
+// 1.22 (2026-08-18) - BUG FIX: ICD deletes could bounce back a moment
+//   after appearing to delete successfully — eCW's backend hadn't
+//   actually committed the delete before the next add/delete in the
+//   same run touched the grid and it re-rendered from a not-yet-updated
+//   list. New deleteICDRowWithRetry() retries the delete up to 4 times
+//   with an increasing settle wait after each attempt (900ms/1600ms/
+//   2300ms/3000ms), re-reading the row fresh each time. Wired into both
+//   the main delete pass and the recheck pass (recheck pass no longer
+//   skips a code that failed on the first pass).
+//
+// 1.21 (2026-08-18) - BUG FIX: evaluateAlcohol()'s section filter only
 //   matched a combined "Drug/Alcohol" widget label — SCREENING_LABEL_RE
 //   also recognizes a standalone "Alcohol:" heading as its own label, but
 //   evaluateAlcohol() never accepted it. A chart whose alcohol screening
@@ -1907,6 +1924,39 @@
                 callback(false);
             }
         }, 100);
+    }
+
+    // Some ICD deletes visually succeed (row vanishes, confirm click
+    // worked) but bounce back a moment later — eCW's backend hadn't
+    // actually committed the delete yet when something else (usually the
+    // next add/delete in the same run) touched the grid and it
+    // re-rendered from a not-yet-updated list. Retry the delete itself a
+    // few times with an increasing settle wait after each attempt,
+    // re-reading the row fresh each time (never reusing a stale DOM
+    // reference across attempts).
+    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
+            if (!entry) return { ok: true }; // already gone (or never there)
+
+            const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
+            if (!clicked) {
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+
+            // Fast path: deleteOneICDRow already waited for the row to
+            // leave the DOM, so a normal, working delete confirms and
+            // returns here immediately — no added delay. Only a code that
+            // ACTUALLY bounces back pays an extra wait, and only on the
+            // retry after that happens (900ms, 1600ms, 2300ms), giving
+            // eCW's backend a little more time to commit before checking
+            // again.
+            if (!findICDRowByCodeFast(code)) return { ok: true };
+            if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
+            // Still there (or back) — loop and try again.
+        }
+        return { ok: false };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -6389,8 +6439,7 @@
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                result = { ok };
+                result = await deleteICDRowWithRetry(item.code);
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -6480,7 +6529,7 @@
 
         if (recheck) {
             for (const item of recheck.toDelete) {
-                if (actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
+                if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
                 let result;
                 if (item.kind === 'icd') {
                     const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
