@@ -19,7 +19,7 @@
 
   console.info("eCW SmartCoder Loader v1.2.7: userscript started.");
 
-  const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
+  const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/dev/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
   const STORAGE = {
     userId: "ecw_smartcoder_user_id",
