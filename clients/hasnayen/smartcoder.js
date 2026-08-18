@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.17
+// @name         Hasnayen Medical SmartCoder v1.18
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,12 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.18 (2026-08-18) - F/U labs office-visit override changed from 99212
+//   to 99213 — this practice doesn't use 99212 at all. Same protection
+//   as every other office-visit rule: 99213 is only added when there is
+//   NO office-visit code on the chart yet; if the practice already has
+//   99213/99214/99215/etc. on the chart, it's left untouched.
+//
 // 1.17 (2026-08-18) - Two fixes:
 //   - Preventive Counseling (99401) gap rule 3 corrected: the
 //     payer-specific gap (60 days Healthfirst / 30 days elsewhere) only
@@ -387,7 +393,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.17';
+    const SCRIPT_VERSION = '1.18';
 
     let panel = null;
     let tab = null;
@@ -2730,7 +2736,8 @@
         // wins.
         //
         // Rule 6 supplies per-visit-type overrides (Blood Test -> 99213,
-        // F/U labs -> 99212) and marks "Call back" as excluded (no E&M
+        // F/U labs -> 99213 — was 99212, but this practice doesn't use
+        // 99212 at all) and marks "Call back" as excluded (no E&M
         // recommendation at all).
         //
         // Rule 12: Bronx's televisit "med refill visit type" special-casing
@@ -2783,20 +2790,22 @@
                 }
             } else if (visitInfo && visitInfo.ov) {
                 // Per-visit-type office-visit override (Blood Test -> 99213,
-                // F/U labs -> 99212).
+                // F/U labs -> 99213 — this practice never uses 99212).
                 ovCode = visitInfo.ov;
                 ovReason = `Visit type "${visitType}" — office visit code ${visitInfo.ov}`;
             } else {
                 // Hasnayen: always 99213 when we're the ones adding it — no
                 // vitals-based downgrade to 99212 (that was a Bronx-only
-                // rule and does not apply here).
+                // rule and does not apply here; 99212 isn't used by this
+                // practice at all, for F/U labs or anything else).
                 // Rule update (2026-08-18): 99214 is NEVER auto-added by
                 // this engine anymore, regardless of chronic disease count
-                // — 99213 is always the default add. F/U labs still uses
-                // 99212 via the visitInfo.ov branch above. If the practice
-                // already has an office-visit code on the chart, rule 1
-                // still applies further down and nothing here is added at
-                // all.
+                // — 99213 is always the default add, for F/U labs too via
+                // the visitInfo.ov branch above (rule update 2026-08-18:
+                // F/U labs was previously 99212, changed to 99213). If the
+                // practice already has an office-visit code on the chart,
+                // rule 1 still applies further down and nothing here is
+                // added at all.
                 ovCode = '99213';
                 ovReason = 'Established visit — 99213 (default)';
             }
@@ -3407,6 +3416,10 @@
     // Same regex the office-visit E&M rule already uses for its own
     // Medicare check.
     //
+    // REVERTED (2026-08-18): the "starts with Medicare" broadening only
+    // applies to Getwell (clients/getwell/smartcoder.js) — Hasnayen's own
+    // rule set is different and keeps this exact/anchored match.
+    //
     // Real charts often carry harmless trailing/interior noise on an
     // otherwise-plain Medicare name — a parenthetical like "(Traditional)"
     // or "(Original)", a stray dash between "Medicare" and "Part B", extra
@@ -3590,7 +3603,10 @@
     //
     // Rule 6 mapping, verbatim:
     //   Blood Test  -> No PV/counseling, office visit 99213
-    //   F/U labs    -> counseling, office visit 99212
+    //   F/U labs    -> counseling, office visit 99213 (was 99212 — rule
+    //                  update 2026-08-18: 99212 isn't used by this
+    //                  practice at all, F/U labs now follows the same
+    //                  office-visit default as every other visit type)
     //   ANN VISIT   -> preventive
     //   F/U         -> counseling
     //   URG         -> counseling
@@ -3605,7 +3621,7 @@
     //   POSTHOS     -> counseling (chief complaint has an ED visit)
     const HASNAYEN_VISIT_TYPES = {
         'blood test': { behavior: 'none',       ov: '99213' },
-        'f/u labs':   { behavior: 'counseling', ov: '99212' },
+        'f/u labs':   { behavior: 'counseling', ov: '99213' },
         'ann visit':  { behavior: 'preventive' },
         'f/u':        { behavior: 'counseling' },
         'urg':        { behavior: 'counseling' },
