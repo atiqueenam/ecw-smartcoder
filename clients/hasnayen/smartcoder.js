@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.14
+// @name         Hasnayen Medical SmartCoder v1.15
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,15 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.15 (2026-08-18) - Rule update: BMI Z68.xx and 3008F are no longer
+//   proposed for deletion when a BMI value is documented on the
+//   encounter, even without a preventive visit or Obesity Counseling
+//   (G0447) on the chart — G8417/G8418/G8420 remain gated to preventive
+//   visits only, unchanged. Also removed rule 15 (auto-consolidating
+//   vitamin-deficiency ICDs to E56.9): whatever vitamin-deficiency code
+//   is already on the chart is left as-is, never replaced. Confirmed
+//   99000/99001 were already in the delete-on-sight CPT list.
+//
 // 1.14 (2026-08-17) - Version label spacing fixed: margin-top 10px
 //   (was 2px, barely visible) and margin-bottom 4px (was a negative
 //   -7px that clipped into the panel's own padding). Also: 1.12-1.13
@@ -347,7 +356,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.14';
+    const SCRIPT_VERSION = '1.15';
 
     let panel = null;
     let tab = null;
@@ -2090,9 +2099,16 @@
                 desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped} (preventive visit)`);
             }
         }
-        // If no preventive visit is present, 3008F/G8417/G8418/G8420 are
-        // left out of `desired` entirely — MANAGED_CODES diff below will
-        // flag any of them already on the chart for removal.
+        // If no preventive visit is present, G8417/G8418/G8420 are left out
+        // of `desired` entirely — MANAGED_CODES diff below will flag any of
+        // them already on the chart for removal. 3008F is the exception:
+        // if BMI is documented on this encounter and 3008F is already on
+        // the chart, it's kept regardless of preventive-visit status (it
+        // is never newly added outside a preventive visit, only preserved
+        // if already present).
+        if (bmi && !desired.has('3008F') && rawCPTCodesNow.includes('3008F')) {
+            desired.set('3008F', 'BMI documented — already on chart, not removed');
+        }
 
         // Deletion reasons override for specific MANAGED_CODES that need
         // more than the generic message (populated below, used in the
@@ -2490,7 +2506,13 @@
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
         const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
-        const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
+        // BMI documented this encounter (raw number for adults, percentile
+        // for pediatric) always keeps an existing Z68.xx around, even
+        // without a preventive visit or Obesity Counseling on the chart —
+        // it just never gets corrected to a different Z68.xx value unless
+        // one of those two is also present (handled by correctZ68 below).
+        const bmiDocumentedThisEncounter = age >= 18 ? (bmiNum != null) : (bmiPercentile != null && bmiPercentile !== '');
+        const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI || bmiDocumentedThisEncounter;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
             currentZ68Entries.forEach(e => {
@@ -2927,15 +2949,10 @@
             replaceIcds(c => c === 'T78.40XS', 'J30.9',
                 'T78.40XS is replaced with J30.9 for this practice');
 
-            // ---- Rule 15: all vitamin-deficiency ICDs -> E56.9 ----
-            // E53.9 (Vit B deficiency), E55.9 (Vit D deficiency) and the
-            // rest of the E5x vitamin-deficiency family consolidate into
-            // E56.9 (vitamin deficiency, unspecified). E56.9 itself is
-            // excluded from the test by replaceIcds. E66.x (obesity) is
-            // NOT in this family and is untouched here.
-            const VITAMIN_DEFICIENCY_ICD_RE = /^(E5[0-6](\.|$))/;
-            replaceIcds(c => VITAMIN_DEFICIENCY_ICD_RE.test(c), 'E56.9',
-                'Vitamin-deficiency ICD consolidated to E56.9');
+            // ---- Rule 15 REMOVED: vitamin-deficiency ICDs are no longer
+            // auto-consolidated to E56.9. Whatever vitamin-deficiency code
+            // (E53.9, E55.9, etc.) is already on the chart is left as-is;
+            // this engine no longer replaces it.
 
             // ---- Rule 16: dorsalgia -> M54.50 ----
             // M54.5 and its children (M54.50/M54.51/M54.59) plus the
@@ -3735,9 +3752,9 @@
         // customICDCollector list-order path (al_matchICDsFromList) is
         // what honours it.
         const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1","Z13.6"];
-        // Hasnayen rule 15: every vitamin-deficiency ICD (E53.9 Vit B,
-        // E55.9 Vit D, ...) is consolidated into E56.9 (vitamin
-        // deficiency, unspecified), so that's what B12 injections link to.
+        // Rule 15 (auto-consolidating vitamin-deficiency ICDs to E56.9)
+        // has been removed, but E56.9/D51.9 remain valid link targets for
+        // B12 injections if either is already on the chart.
         const b12ICDs = ["D51.9","E56.9"];
 
         Object.assign(rules, {
@@ -4658,7 +4675,7 @@
     const AL_EXCLUDED_ICDS_99214 = new Set([
         "E66.9", "E66.01", "E66.09", "E66.3",   // obesity
         "F17.210", "F17.200", "F17.220",        // smoking
-        "E55.9", "E56.9"                         // vitamin deficiency (rule 15 consolidates these to E56.9)
+        "E55.9", "E56.9"                         // vitamin deficiency codes (rule 15 consolidation removed)
     ]);
     const AL_CHRONIC_PREFIXES_99214 = ["E11", "I10", "E78", "E03"]; // diabetes, hypertension, hyperlipidemia, hypothyroidism
 
@@ -5005,7 +5022,8 @@
         // Auto Link table above (E78.5, R00.2, R06.02, R07.9, I10, R00.1,
         // then Z13.6 as the last-resort link target).
         const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1","Z13.6"];
-        // Hasnayen rule 15: vitamin-deficiency ICDs consolidated to E56.9.
+        // Rule 15 (auto-consolidating vitamin-deficiency ICDs to E56.9)
+        // has been removed; E56.9/D51.9 remain valid link targets for B12.
         const b12ICDs = ["D51.9","E56.9"];
 
         Object.assign(rules, {
