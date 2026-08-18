@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.15
+// @name         Hasnayen Medical SmartCoder v1.17
 // @namespace    http://tampermonkey.net/
-// @version      1.15
+// @version      1.17
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,37 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.17 (2026-08-18) - Two fixes:
+//   - Preventive Counseling (99401) gap rule 3 corrected: the
+//     payer-specific gap (60 days Healthfirst / 30 days elsewhere) only
+//     applies between two 99401 occurrences. A plain Preventive visit
+//     (993xx/AWV) now only blocks 99401 for a flat 30 days regardless of
+//     payer, instead of the longer Healthfirst gap being wrongly applied
+//     to a preventive VISIT that isn't itself Preventive Counseling.
+//   - BUG FIX: clickAnyYesButton() (both copies) only matched plain
+//     <button> elements with exact "yes" text in one copy, and only
+//     <button>/<a> in the other — eCW's "Remove CPT"/"Remove ICD" confirm
+//     popup could render its Yes button as something outside that set and
+//     get left sitting on screen asking the user to confirm instead of
+//     being auto-clicked, even though the code was already on the
+//     delete list. Now also matches input[type="button"/"submit"].
+//
+// 1.16 (2026-08-18) - Several rule fixes/additions:
+//   - Medicaid (incl. New York State Medicaid): G0444/G0442 already on
+//     the chart are now actively removed — this payer never bills them,
+//     and they were previously exempt from the delete diff.
+//   - BP codes (3074F/3075F/3078F/3079F): an already-present code is no
+//     longer kept unconditionally — it's now deleted whenever I10 isn't
+//     on the chart, same as the add-side requirement.
+//   - 3046F/3050F added to the always-delete CPT list (al_deleteUnwantedCodes).
+//   - 3044F/3051F (diabetes) and 3048F (hyperlipidemia) are now managed:
+//     kept on the chart only while a qualifying diabetes/hyperlipidemia
+//     ICD is present, deleted otherwise. Never auto-added.
+//   - Office-visit E&M: 99214 is no longer auto-added under any
+//     condition — 99213 is always the default add (F/U labs still uses
+//     99212 via the per-visit-type override). An existing office-visit
+//     code on the chart is still never touched (rule 1).
+//
 // 1.15 (2026-08-18) - Rule update: BMI Z68.xx and 3008F are no longer
 //   proposed for deletion when a BMI value is documented on the
 //   encounter, even without a preventive visit or Obesity Counseling
@@ -356,7 +387,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.15';
+    const SCRIPT_VERSION = '1.17';
 
     let panel = null;
     let tab = null;
@@ -1047,6 +1078,14 @@
     return !!insurance && /^empire\b/i.test(insurance.trim());
     }
 
+    // Medicaid (incl. "New York State Medicaid") — matches anywhere in the
+    // name, same test isHasnayenCounselingBlockedIns already uses for
+    // Medicaid, so G0444/G0442 removal below stays consistent with the
+    // existing add-side exclusion.
+    function isMedicaidInsurance(insurance) {
+        return !!insurance && /medicaid/i.test(insurance.trim());
+    }
+
     // Eligible unless the payer is on Hasnayen's rule-2 exclusion list.
     // Bronx's list was Medicaid/Medicare (start-anchored, MetroPlus
     // carved out) + UHC. Rule 2's list for Hasnayen is Medicaid / NYS
@@ -1521,7 +1560,8 @@
         'G8510', 'G8431', 'G9622', '3016F',
         'G9275', 'G9276', '1036F', '1000F',
         'G0136', 'G9744',
-        '99051'   // Hasnayen rule 23 — weekend/holiday visit code
+        '99051',  // Hasnayen rule 23 — weekend/holiday visit code
+        '3044F', '3051F', '3048F'   // kept only while their qualifying ICD is present — see computeAnalysis
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
 
@@ -1666,14 +1706,24 @@
     }
 
     // Same selector set the working ICD script uses for eCW's bootbox confirm dialog.
+    // Widened to also catch confirm dialogs whose Yes/No buttons aren't
+    // plain <button data-bb-handler> bootbox markup — eCW's "Remove
+    // CPT"/"Remove ICD" popups can render the Yes button as an <a>,
+    // <input type="button">/"submit">, or a plain <button> with no special
+    // attributes at all. Previously only 'button, a' were checked (and one
+    // of the two copies of this function only checked 'button'), so those
+    // dialogs were left sitting on screen asking the user to click Yes
+    // themselves instead of being auto-confirmed like every other delete.
     function clickAnyYesButton() {
         const yesBtn =
             document.querySelector('button[data-bb-handler="Yes"].btn-yes') ||
             document.querySelector('#balloon-alertMessage-tpl-yes') ||
             document.querySelector('.bootbox .btn-primary') ||
-            Array.from(document.querySelectorAll('button, a')).find(
-                b => b.offsetParent !== null && ['yes', 'delete'].includes(b.textContent.trim().toLowerCase())
-            );
+            Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]')).find(b => {
+                if (b.offsetParent === null) return false;
+                const label = (b.value || b.textContent || '').trim().toLowerCase();
+                return label === 'yes' || label === 'delete';
+            });
         if (yesBtn) { yesBtn.click(); return true; }
         return false;
     }
@@ -2124,10 +2174,10 @@
         // BP" is present (plus a BP value this encounter and I10 on the
         // chart), the corresponding code is used — no check against
         // whether it was previously billed this year. An already-present
-        // BP code is NEVER simply deleted; if we can't confirm/compute the
-        // correct code (no "Controlling BP" in CC, no BP value this
-        // encounter, or no I10) we leave whatever is currently on the
-        // chart untouched. ----
+        // BP code is kept untouched ONLY while I10 (essential hypertension)
+        // is on the chart; if I10 isn't present, any existing BP code is
+        // deleted (I10 is a hard requirement, not just a gate on adding a
+        // new one). ----
         {
             // Accept the common typo "controllin bp" (missing trailing "g")
             // as equivalent to "controlling bp".
@@ -2137,17 +2187,16 @@
             const existingCptCodesBp = getCPTRows().map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
             const existingSysCode = sysCodes.find(c => existingCptCodesBp.includes(c));
             const existingDiaCode = diaCodes.find(c => existingCptCodesBp.includes(c));
+            const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
 
             // Hasnayen rule 13: BP (and BMI) codes only apply on a
             // PREVENTIVE visit, and the BP-tracking code is only added
-            // when ICD I10 (essential hypertension) is on the chart
-            // (the hasI10 check below, already in Bronx). Bronx's
-            // "Controlling BP in the CC" requirement and its high-BP
-            // exclusion cutoffs are kept exactly as they were.
+            // when ICD I10 (essential hypertension) is on the chart.
+            // Bronx's "Controlling BP in the CC" requirement and its
+            // high-BP exclusion cutoffs are kept exactly as they were.
             let sysTarget = null, diaTarget = null;
-            if (bp && ccHasControllingBP && hasPreventiveVisit) {
+            if (bp && ccHasControllingBP && hasPreventiveVisit && hasI10) {
                 const [sys, dia] = bp.split('/').map(n => parseInt(n));
-                const hasI10 = getICDRows().some(r => r.code.toUpperCase() === 'I10');
                 // Bronx rule: if EITHER systolic or diastolic is out of
                 // range (sys > 139 or dia > 89), no BP code is suggested at
                 // all this encounter — not even for the reading that is in
@@ -2156,7 +2205,7 @@
                 const sysOutOfRange = !isNaN(sys) && sys > 139;
                 const diaOutOfRange = !isNaN(dia) && dia > 89;
                 const bpInRange = !sysOutOfRange && !diaOutOfRange;
-                if (hasI10 && bpInRange) {
+                if (bpInRange) {
                     if (!isNaN(sys)) sysTarget = sys <= 129 ? '3074F' : '3075F';
                     if (!isNaN(dia)) diaTarget = dia <= 79 ? '3078F' : '3079F';
                 }
@@ -2164,13 +2213,13 @@
 
             if (sysTarget) {
                 desired.set(sysTarget, `Systolic BP (Controlling BP)`);
-            } else if (existingSysCode) {
+            } else if (existingSysCode && hasI10) {
                 desired.set(existingSysCode, 'Already on chart — BP code not removed');
             }
 
             if (diaTarget) {
                 desired.set(diaTarget, `Diastolic BP (Controlling BP)`);
-            } else if (existingDiaCode) {
+            } else if (existingDiaCode && hasI10) {
                 desired.set(existingDiaCode, 'Already on chart — BP code not removed');
             }
         }
@@ -2322,6 +2371,24 @@
             [...EMPIRE_ALCOHOL_CODES, ...EMPIRE_TOBACCO_CODES].forEach(code => desired.delete(code));
         }
 
+        // ---- 3044F/3051F (diabetes) and 3048F (hyperlipidemia): kept only
+        // while a qualifying ICD is present, deleted otherwise ----
+        // Never auto-added — only preserved (via `desired`, since all
+        // three are in MANAGED_CODES) when already on the chart AND the
+        // matching diagnosis family is present. If the qualifying ICD
+        // isn't there, they're left out of `desired` and the MANAGED_CODES
+        // diff below flags them for removal.
+        const hasDiabetesICDForFCodes = getICDRows().some(e => /^E(0[89]|1[013])\b/i.test(e.code));
+        const hasHyperlipidemiaICDForFCodes = getICDRows().some(e => /^E78\b/i.test(e.code));
+        ['3044F', '3051F'].forEach(code => {
+            if (hasDiabetesICDForFCodes && rawCPTCodesNow.includes(code)) {
+                desired.set(code, 'Diabetes ICD present — kept on chart');
+            }
+        });
+        if (hasHyperlipidemiaICDForFCodes && rawCPTCodesNow.includes('3048F')) {
+            desired.set('3048F', 'Hyperlipidemia ICD present — kept on chart');
+        }
+
         const toAdd = [];
         desired.forEach((reason, code) => {
             if (!currentCodes.has(code)) toAdd.push({ code, reason, kind: 'cpt' });
@@ -2410,6 +2477,21 @@
             if (empireZ139) {
                 toDelete.push({ code: empireZ139.code, row: empireZ139.row, kind: 'icd', reason: 'Empire plan — alcohol screening ICD not used for this payer' });
             }
+        }
+
+        // Medicaid (incl. "New York State Medicaid"): G0444/G0442 are never
+        // billed for this payer, same as the add-side exclusion above
+        // (annualGCodesEligible/isHasnayenCounselingBlockedIns). G0444/
+        // G0442 are deliberately NOT in MANAGED_CODES (so other payers'
+        // already-billed once/year codes are never swept up), so a
+        // Medicaid-specific removal is needed here to actually clear them
+        // off an existing chart instead of just blocking new adds.
+        if (isMedicaidInsurance(insurance)) {
+            currentRows.forEach(r => {
+                if ((r.code === 'G0444' || r.code === 'G0442') && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Medicaid — G0444/G0442 not billable for this payer' });
+                }
+            });
         }
 
         // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
@@ -2708,44 +2790,15 @@
                 // Hasnayen: always 99213 when we're the ones adding it — no
                 // vitals-based downgrade to 99212 (that was a Bronx-only
                 // rule and does not apply here).
-                // Rule 1 / rule 17 / rule 27: 99214 is only ever placed by
-                // us when a qualifying chronic disease is on the ICD list
-                // AND 99214 hasn't been used within the 1-month window —
-                // the same chronic-disease + date-window gating Bronx used
-                // (CHRONIC_DISEASE_ICD_CODES + codeUsedInLastDays). It is
-                // fully disallowed for Fidelis (rule 17) and never placed
-                // alongside a preventive code (rule 27) — 99213 in both
-                // cases.
-                const qualifying = getICDRows().filter(e => {
-                    const c = e.code.toUpperCase();
-                    if (/^F17/.test(c)) return false;
-                    if (/^E5[3-6]/.test(c)) return false;
-                    if (/^D51/.test(c)) return false;
-                    if (/^E66/.test(c)) return false;
-                    if (/^Z/.test(c)) return false;
-                    return true;
-                });
-                const chronicCount = qualifying.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
-                const fidelisBlocks99214 = isFidelisIns(insurance);
-                const preventiveBlocks99214 = hasPreventiveVisit || hasPreventiveVisitRaw;
-                if (chronicCount >= 1 &&
-                    !fidelisBlocks99214 &&
-                    !preventiveBlocks99214 &&
-                    !codeUsedInLastDays('99214', 30)) {
-                    ovCode = '99214';
-                    ovReason = `${chronicCount} chronic dx present, DOS within the 1-month window — 99214`;
-                } else {
-                    ovCode = '99213';
-                    // Only mention 99214 in the reason when it was actually
-                    // in play (chronic dx present, within the 1-month
-                    // window) and Fidelis/preventive is why it's not used —
-                    // otherwise this is a plain, ordinary 99213 add and the
-                    // reason shouldn't reference 99214 at all.
-                    const chronicWouldQualify = chronicCount >= 1 && !codeUsedInLastDays('99214', 30);
-                    if (chronicWouldQualify && fidelisBlocks99214) ovReason = 'Fidelis Care does not use 99214 — 99213 used instead';
-                    else if (chronicWouldQualify && preventiveBlocks99214) ovReason = 'Preventive visit — 99213 used instead of 99214';
-                    else ovReason = 'Established visit — 99213 (default)';
-                }
+                // Rule update (2026-08-18): 99214 is NEVER auto-added by
+                // this engine anymore, regardless of chronic disease count
+                // — 99213 is always the default add. F/U labs still uses
+                // 99212 via the visitInfo.ov branch above. If the practice
+                // already has an office-visit code on the chart, rule 1
+                // still applies further down and nothing here is added at
+                // all.
+                ovCode = '99213';
+                ovReason = 'Established visit — 99213 (default)';
             }
 
             // ---- Rule 17 override of rule 1: Fidelis + existing 99214 ----
@@ -4253,7 +4306,8 @@
         const cptsToDelete = new Set([
             'G9432', 'G8783', 'G9920', 'G9820', '4013F',
             'G9744', 'G9903', '4000F', '1034F', '3062F',
-            '3725F', 'H0049', '99000', '99001', 'H0001',
+            '3725F', 'H0049', '99000', '99001',
+            '3046F', '3050F',
             ...al_getAgeRestrictedCPTs()
         ]);
         const icdsToDelete = new Set([
@@ -4278,14 +4332,20 @@
             });
         }
 
+        // Widened the same way as the top-level clickAnyYesButton — this
+        // copy only checked plain <button> text before, which is why the
+        // "Remove CPT"/"Remove ICD" confirm popup could sit on screen
+        // during al_deleteUnwantedCodes instead of auto-confirming.
         function clickAnyYesButton() {
             const yesBtn =
                 document.querySelector('button[data-bb-handler="Yes"].btn-yes') ||
                 document.querySelector('#balloon-alertMessage-tpl-yes') ||
                 document.querySelector('.bootbox .btn-primary') ||
-                Array.from(document.querySelectorAll('button')).find(
-                    b => b.textContent.trim().toLowerCase() === 'yes'
-                );
+                Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]')).find(b => {
+                    if (b.offsetParent === null) return false;
+                    const label = (b.value || b.textContent || '').trim().toLowerCase();
+                    return label === 'yes' || label === 'delete';
+                });
             if (yesBtn) { yesBtn.click(); return true; }
             return false;
         }
@@ -5905,14 +5965,25 @@
         const counselingGapDays = hasnayenCounselingGapDays(insuranceNorm);
         const pcVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         let pc = { disabled: false, title: 'Preventive Counseling' };
-        const pcRecentHit = findCodeUsedInLastDays([...PREVENTIVE_ALL_CODES, '99401'], counselingGapDays);
+        // Rule 3 correction: the payer-specific gap (60 days Healthfirst /
+        // 30 days everywhere else) is specifically the gap required
+        // between two Preventive COUNSELING (99401) occurrences. A plain
+        // Preventive visit (993xx/AWV) is not Preventive Counseling — it
+        // only blocks 99401 for a flat 30 days, regardless of payer. So a
+        // Preventive visit 30+ days ago no longer blocks 99401 even for
+        // Healthfirst, but a prior 99401 still needs the full 60-day gap
+        // for Healthfirst.
+        const priorCounselingHit = findCodeUsedInLastDays(['99401'], counselingGapDays);
+        const priorPreventiveHit = findCodeUsedInLastDays(PREVENTIVE_ALL_CODES, 30);
+        const pcRecentHit = priorCounselingHit || priorPreventiveHit;
         if (pcRecentHit) {
             // Report exactly which one was actually billed, and when — never
             // a generic "Preventive or Preventive Counseling" message, since
             // that reads as ambiguous/wrong when only one of the two occurred.
             const isCounselingHit = pcRecentHit.code === '99401';
             const label = isCounselingHit ? 'Preventive Counseling (99401)' : `Preventive (${pcRecentHit.code})`;
-            pc = { disabled: true, title: `${label} billed on ${pcRecentHit.date} — within the ${counselingGapDays}-day gap` };
+            const gapUsed = isCounselingHit ? counselingGapDays : 30;
+            pc = { disabled: true, title: `${label} billed on ${pcRecentHit.date} — within the ${gapUsed}-day gap` };
         } else if (isPreventiveCounselBlockedIns(insuranceNorm)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insuranceNorm || 'this insurance'}` };
         } else if (!hasChronicDiseaseThisEncounter) {
