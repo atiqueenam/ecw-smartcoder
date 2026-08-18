@@ -4253,7 +4253,7 @@
         const cptsToDelete = new Set([
             'G9432', 'G8783', 'G9920', 'G9820', '4013F',
             'G9744', 'G9903', '4000F', '1034F', '3062F',
-            '3725F', 'H0049', '99000', '99001',
+            '3725F', 'H0049', '99000', '99001', 'H0001',
             ...al_getAgeRestrictedCPTs()
         ]);
         const icdsToDelete = new Set([
