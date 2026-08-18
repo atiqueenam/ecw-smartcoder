@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.50
+// @name         Getwell SmartCoder by ATQ v5.52
 // @namespace    http://tampermonkey.net/
-// @version      5.50
+// @version      5.52
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,24 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.52 (2026-08-18) - isStraightMedicareIns() broadened: any insurance
+//   name whose FIRST word is "Medicare" (e.g. "Medicare Healthfirst",
+//   "Medicare Advantage") is now treated as straight Medicare, not just
+//   an exact "Medicare"/"Medicare Part A/B" match. A payer name that
+//   mentions "Medicare" WITHOUT starting with it (e.g. "Healthfirst
+//   Medicare") is still commercial Medicare and gets the G0438/G0439
+//   auto-add rule from 5.51, unchanged.
+//
+// 5.51 (2026-08-18) - Preventive quick action: commercial Medicare (a
+//   payer whose name mentions "Medicare" but isn't straight/plain
+//   Medicare — e.g. a Medicare Advantage plan branded under a
+//   commercial carrier) now gets G0438 (new patient) / G0439
+//   (established) added automatically, same as VNS Choice — no more
+//   manual-add reminder for these. Straight/plain Medicare (insurance
+//   name IS "Medicare"/"Medicare Part A/B", nothing else) is unchanged:
+//   still just a reminder to add G0402/G0438/G0439 manually, since which
+//   one applies depends on visit history this script can't confirm.
+//
 // 5.50 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
 //   enabled with no BMI documented at all, only failing after being
 //   clicked ("BMI not found on this page — skipped"). Now fades up
@@ -3063,6 +3081,28 @@
         return !!insurance && /medicare/i.test(insurance);
     }
 
+    // "Straight" Medicare — i.e. the insurance name's FIRST word is
+    // "Medicare", whatever comes after it (rule update 2026-08-18: any
+    // insurance starting with "Medicare" is now treated the same as plain
+    // Medicare for these rules, including something like "Medicare
+    // Healthfirst" or "Medicare Advantage"). Only a payer name that
+    // mentions "Medicare" WITHOUT starting with it (e.g. "Healthfirst
+    // Medicare", "Humana Medicare Advantage") is treated as commercial
+    // Medicare instead — those get the G0438/G0439 auto-add rule above,
+    // not this straight-Medicare manual-reminder path.
+    // Ported from clients/hasnayen/smartcoder.js's isStraightMedicareIns.
+    function isStraightMedicareIns(insurance) {
+        if (!insurance) return false;
+        let name = insurance.trim();
+        // Strip a trailing parenthetical annotation (and any punctuation/
+        // whitespace it leaves behind) — e.g. "Medicare Part B (Traditional)",
+        // "MEDICARE (ID 123456)".
+        name = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+        // Normalize stray dashes/extra spacing between words.
+        name = name.replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+        return /^medicare\b/i.test(name);
+    }
+
     // Established = at least one PRIOR encounter exists in patient history
     // (i.e. more than just today's current visit). No history at all, or
     // only today's own encounter, means New Patient.
@@ -5357,10 +5397,25 @@
                 showQuickNotice(result.ok
                     ? `VNS Choice — added ${vnsCode} (${established ? 'Established' : 'New'} Patient).`
                     : `VNS Choice — could not add ${vnsCode} automatically (${result.message}).`);
+            } else if (isMedicare && !isStraightMedicareIns(insurance)) {
+                // Commercial Medicare (e.g. a Medicare Advantage plan
+                // branded under a commercial carrier — "medicare" appears
+                // in the name but it's not straight/plain Medicare): add
+                // G0438 (new patient) / G0439 (established) automatically,
+                // same as VNS Choice above. Never G0402 (retired) and
+                // never the 993xx code.
+                const commercialMedicareCode = established ? 'G0439' : 'G0438';
+                await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
+                await deleteCPTCodesByCode(MEDICARE_AWV_CODES.filter(c => c !== commercialMedicareCode));
+                const result = await addSingleCPT(commercialMedicareCode);
+                showQuickNotice(result.ok
+                    ? `Commercial Medicare — added ${commercialMedicareCode} (${established ? 'Established' : 'New'} Patient).`
+                    : `Commercial Medicare — could not add ${commercialMedicareCode} automatically (${result.message}).`);
             } else if (isMedicare) {
-                // Medicare (straight or commercial): which of G0402/G0438/
-                // G0439 applies depends on visit history we can't reliably
+                // Straight/plain Medicare only: which of G0402/G0438/G0439
+                // applies depends on visit history we can't reliably
                 // confirm — never guess, just remind. Never the 993xx code.
+                // Unchanged from before.
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
                 showQuickNotice("Medicare detected — add G0402 (first visit) / G0438 (2nd-year visit) / G0439 (subsequent visits) manually.");
             } else if (emCode) {
