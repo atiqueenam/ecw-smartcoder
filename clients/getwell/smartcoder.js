@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.52
+// @name         Getwell SmartCoder by ATQ v5.53
 // @namespace    http://tampermonkey.net/
-// @version      5.52
+// @version      5.53
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.53 (2026-08-18) - BUG FIX: computeAnalysis's local
+//   PREVENTIVE_VISIT_CODES set was missing G0402 (Medicare's
+//   "Welcome to Medicare"/Initial Preventive Physical Exam code) —
+//   it only had G0438/G0439. A chart billed with G0402 was wrongly
+//   treated as having NO preventive visit at all, so Analyze deleted
+//   the preventive bundle ICDs (Z00.01/Z00.121, Z71.3/Z71.82/89) and
+//   other preventive-gated codes even though G0402 was right there on
+//   the chart. G0402 added to the set.
+//
 // 5.52 (2026-08-18) - isStraightMedicareIns() broadened: any insurance
 //   name whose FIRST word is "Medicare" (e.g. "Medicare Healthfirst",
 //   "Medicare Advantage") is now treated as straight Medicare, not just
@@ -2085,10 +2094,20 @@
         // Preventive or Counseling code can survive a televisit either.
         const gating = computeQuickActionGating(insurance, flags, text);
 
+        // BUG FIX (2026-08-18): this set was missing G0402 (the Medicare
+        // "Welcome to Medicare" / Initial Preventive Physical Exam code) —
+        // it only had G0438/G0439 from the Medicare AWV family. A chart
+        // billed with G0402 was therefore treated as having NO preventive
+        // visit at all, which cascaded into deleting the preventive bundle
+        // ICDs (Z00.01/Z00.121, Z71.3/Z71.82/Z71.89) and other
+        // preventive-gated codes even though a valid preventive E&M code
+        // (G0402) was sitting right there on the chart. Built from the
+        // same two lists everywhere else in this file uses for "preventive
+        // or Medicare AWV" so it can't drift out of sync again.
         const PREVENTIVE_VISIT_CODES = new Set([
             '99381', '99382', '99383', '99384', '99385', '99386', '99387',
             '99391', '99392', '99393', '99394', '99395', '99396', '99397',
-            'G0438', 'G0439'
+            'G0402', 'G0438', 'G0439'
         ]);
         const hasPreventiveVisitRaw = rawCPTCodesNow.some(c => PREVENTIVE_VISIT_CODES.has(c));
         // If the PV button is faded (for ANY reason — already billed this
