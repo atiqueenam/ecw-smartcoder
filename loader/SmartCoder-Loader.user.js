@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder by ATQ
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.2.7
+// @version      1.2.6
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
