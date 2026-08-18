@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.18
+// @name         Hasnayen Medical SmartCoder v1.19
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,19 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.19 (2026-08-18) - BUG FIX: evaluateAlcohol()'s section filter only
+//   matched a combined "Drug/Alcohol" widget label — SCREENING_LABEL_RE
+//   also recognizes a standalone "Alcohol:" heading as its own label, but
+//   evaluateAlcohol() never accepted it. A chart whose alcohol screening
+//   widget is titled just "Alcohol:" got tokenized correctly but then
+//   silently excluded, so hasAlc came back null even though the screening
+//   was genuinely documented — which meant NOTHING alcohol-related (not
+//   the immediate result code G9622/3016F, nor the annual G0442 code)
+//   ever got suggested, no matter what insurance/visit-type/billing-
+//   history gates would have otherwise allowed. Also fixed the identical
+//   latent bug in evaluateTobacco(), which excluded a standalone
+//   "Tobacco:" label the same way.
+//
 // 1.18 (2026-08-18) - F/U labs office-visit override changed from 99212
 //   to 99213 — this practice doesn't use 99212 at all. Same protection
 //   as every other office-visit rule: 99213 is only added when there is
@@ -393,7 +406,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.18';
+    const SCRIPT_VERSION = '1.21';
 
     let panel = null;
     let tab = null;
@@ -1349,8 +1362,14 @@
     // (category absent, or present but left blank — e.g. "(Smoking):"
     // with nothing filled in — which isn't a screening result and
     // shouldn't be shown as one).
+    // BUG FIX (2026-08-18): same class of bug as evaluateAlcohol below —
+    // SCREENING_LABEL_RE also recognizes a standalone "Tobacco:" heading
+    // as its own section label, distinct from "Tobacco Use"/"Tobacco
+    // Control (Standard)", but this filter never included it. Added so a
+    // chart whose widget is titled just "Tobacco:" isn't silently treated
+    // as having no tobacco screening at all.
     function evaluateTobacco(sections) {
-        const tobSections = sections.filter(s => s.label === 'Tobacco Use' || s.label === 'Tobacco Control (Standard)');
+        const tobSections = sections.filter(s => s.label === 'Tobacco Use' || s.label === 'Tobacco Control (Standard)' || s.label === 'Tobacco');
         if (!tobSections.length) return null;
 
         const combined = tobSections.map(s => s.content).join(' ').trim();
@@ -1402,15 +1421,26 @@
 
     // Returns true = confirmed negative alcohol screen, false = confirmed
     // positive, null = no usable alcohol answer on this note. Only
-    // "Drug/Alcohol" category items that are actually about alcohol count
-    // — the same category label also carries Domestic Violence / drug-only
-    // content that has nothing to do with alcohol use. The alcohol/drink
-    // wording is usually only in the item's subtype ("(Alcohol Screen)",
-    // "(AUDIT-C (Standard))") rather than repeated in the answer text
-    // itself, so both are checked.
+    // "Drug/Alcohol" (or a standalone "Alcohol") category items that are
+    // actually about alcohol count — the same category label also carries
+    // Domestic Violence / drug-only content that has nothing to do with
+    // alcohol use. The alcohol/drink wording is usually only in the item's
+    // subtype ("(Alcohol Screen)", "(AUDIT-C (Standard))") rather than
+    // repeated in the answer text itself, so both are checked.
+    //
+    // BUG FIX (2026-08-18): SCREENING_LABEL_RE (above) has always
+    // recognized a standalone "Alcohol:" heading as its own section label,
+    // distinct from the combined "Drug/Alcohol:" label — but this filter
+    // only ever matched the combined label, so a chart whose widget is
+    // titled just "Alcohol:" got tokenized correctly into a section and
+    // then silently excluded here. hasAlc came back null even though the
+    // screening was genuinely documented, which meant NOTHING alcohol-
+    // related (not the immediate result code G9622/3016F, nor the annual
+    // G0442 code) ever got suggested, regardless of insurance, visit type,
+    // or billing history — those gates never even got a chance to run.
     function evaluateAlcohol(sections) {
         const relevant = sections.filter(s =>
-            /^Drugs?\/Alcohol$/.test(s.label) &&
+            /^(Drugs?\/Alcohol|Alcohol)$/.test(s.label) &&
             (/alcohol|audit-?c/i.test(s.subtype) || /alcohol|drink/i.test(s.content))
         );
         if (!relevant.length) return null;
