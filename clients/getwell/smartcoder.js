@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.53-diag
+// @name         Getwell SmartCoder by ATQ v5.54
 // @namespace    http://tampermonkey.net/
-// @version      5.53.1
+// @version      5.54
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,24 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.54 (2026-08-18) - ICD delete retry for the "deletes, then bounces
+//   back a moment later" case (seen with Z13.89): eCW's backend can lag
+//   behind the DOM when a delete is immediately followed by another
+//   add/delete on the same grid (the automation's pace, not a manual
+//   single click), so the row disappears then gets re-rendered from a
+//   not-yet-updated list. Instead of accepting the first bounce-back as
+//   final, new deleteICDRowWithRetry() re-attempts the delete up to 4
+//   times with an increasing settle wait (900ms/1600ms/2300ms/3000ms)
+//   after each click, re-reading the row fresh each attempt. Wired into
+//   both the main delete pass and the recheck pass (recheck pass no
+//   longer skips a code that failed on the first pass). Also logs each
+//   attempt to the console ("[Getwell SmartCoder][ICD-delete][<code>]")
+//   so a still-failing case can be diagnosed live: if the click itself
+//   never succeeds, it's a UI/selector issue; if it deletes-then-
+//   reappears on every attempt even with the longest wait, the code is
+//   almost certainly linked outside the billing grid (e.g. Assessment/
+//   Problem List) and needs removing from there directly, not billing.
+//
 // 5.53 (2026-08-18) - BUG FIX: computeAnalysis's local
 //   PREVENTIVE_VISIT_CODES set was missing G0402 (Medicare's
 //   "Welcome to Medicare"/Initial Preventive Physical Exam code) —
@@ -1740,59 +1758,85 @@
     }
 
     function deleteOneICDRow(row, expectedCode, callback) {
-        const dlog = (msg) => console.log(`[Getwell SmartCoder][DIAG][ICD-delete][${expectedCode || '?'}] ${msg}`);
-        dlog('deleteOneICDRow called');
-        if (!row || !document.body.contains(row)) { dlog('row missing/detached from DOM at call time — treating as already gone (callback(true))'); callback(true); return; }
+        if (!row || !document.body.contains(row)) { callback(true); return; }
 
         // Same reuse risk as the CPT grid — re-verify before deleting.
         let actualCode = row.querySelector('td:nth-child(3)')?.textContent.trim();
-        dlog(`row's actual code column reads "${actualCode}"`);
         if (expectedCode && actualCode && actualCode.toUpperCase() !== expectedCode.toUpperCase()) {
-            dlog(`MISMATCH — expected "${expectedCode}" but row shows "${actualCode}". Re-finding row by code...`);
             const entry = getICDRows().find(r => r.code.toUpperCase() === expectedCode.toUpperCase());
-            if (!entry) { dlog(`could not find a row for "${expectedCode}" anywhere on the grid — callback(false)`); callback(false); return; }
+            if (!entry) { callback(false); return; }
             row = entry.row;
-            dlog('re-found row, continuing with that one');
         }
 
         const code = row.querySelector('td:nth-child(3)')?.textContent.trim();
         const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
-        if (!delBtn) { dlog('NO delete button/icon found on this row (selector "button, i.blue-delete, .blue-delete" matched nothing) — callback(false)'); callback(false); return; }
-        dlog(`delete icon found (tag=${delBtn.tagName}, class="${delBtn.className}") — clicking it now`);
+        if (!delBtn) { callback(false); return; }
 
         // If a confirm dialog from a PREVIOUS delete is still sitting open
         // (its poll window ran out before eCW finished rendering it), its
         // backdrop blocks every click on the page — including the one
         // we're about to make — which is exactly what "stuck" looks like.
         // Clear it first (best-effort, harmless no-op if nothing's open).
-        const clearedStale = clickAnyYesButton();
-        if (clearedStale) dlog('found and cleared a STALE confirm dialog left open from a previous action before clicking delete');
+        clickAnyYesButton();
 
         delBtn.click();
         const start = Date.now();
-        let confirmSeen = false;
         const confirmTimer = setInterval(() => {
             if (clickAnyYesButton()) {
-                confirmSeen = true;
                 clearInterval(confirmTimer);
-                dlog(`confirm dialog appeared and "Delete"/Yes was clicked after ${Date.now() - start}ms — now waiting for the row to leave the DOM (up to 6000ms)`);
-                const waitStart = Date.now();
                 waitUntilGoneCPT(() => {
                     return getICDRows().find(r => r.code === code);
-                }, 6000, (ok) => {
-                    dlog(ok
-                        ? `row confirmed GONE from DOM after ${Date.now() - waitStart}ms — callback(true)`
-                        : `row STILL PRESENT in DOM after 6000ms wait post-confirm — callback(false) (the confirm click registered, but the grid never actually dropped the row)`);
-                    callback(ok);
-                });
+                }, 6000, callback);
                 return;
             }
             if (Date.now() - start > 6000) {
                 clearInterval(confirmTimer);
-                dlog(`NO confirm dialog ("Delete"/"Yes" button) was ever detected within 6000ms after clicking the delete icon — callback(false). This means either the confirm popup never opened, or clickAnyYesButton()'s selectors didn't match it.`);
                 callback(false);
             }
         }, 100);
+    }
+
+    // Some ICD deletes visually succeed (row vanishes, confirm click
+    // worked) but bounce back a moment later — eCW's backend hadn't
+    // actually committed the delete yet when something else (usually the
+    // next add in the same run) touched the grid and it re-rendered from
+    // a not-yet-updated list. Manual single deletes don't hit this because
+    // nothing else happens to the grid right after; the automation's
+    // delete-then-add pace can outrun eCW's save. Rather than accept the
+    // first bounce-back as final, retry the delete itself a few times with
+    // an increasing settle wait after each attempt, re-reading the row
+    // fresh each time (never reusing a stale DOM reference across
+    // attempts). Falls back to reporting failure only if it still won't
+    // hold after all attempts.
+    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
+        const log = (msg) => console.log(`[Getwell SmartCoder][ICD-delete][${code}] ${msg}`);
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
+            if (!entry) { log(`attempt ${attempt}: row not found on grid — already gone, treating as success`); return { ok: true }; }
+
+            log(`attempt ${attempt}: row found, clicking delete + confirm...`);
+            const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
+            if (!clicked) {
+                log(`attempt ${attempt}: delete click/confirm itself failed (no confirm dialog handled, or DOM gone check timed out) — retrying`);
+                // Confirm click/timeout failed outright — brief pause, then
+                // retry from scratch with a fresh row lookup.
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+
+            const settleMs = 200 + attempt * 700;
+            log(`attempt ${attempt}: delete click succeeded (row left DOM) — waiting ${settleMs}ms for eCW to settle before re-checking`);
+            // Give eCW's backend real time to commit before trusting the
+            // DOM absence. Escalate the wait each retry (900ms, 1600ms,
+            // 2300ms, 3000ms) in case the save is just slow, not broken.
+            await new Promise(r => setTimeout(r, settleMs));
+
+            if (!findICDRowByCodeFast(code)) { log(`attempt ${attempt}: still gone after settle wait — confirmed deleted`); return { ok: true }; }
+            log(`attempt ${attempt}: row is BACK after the settle wait — eCW re-added/re-rendered it (likely backend hadn't committed the delete, or it's linked elsewhere, e.g. Assessment/Problem List). Retrying...`);
+            // Still there (or back) — loop and try again.
+        }
+        log(`gave up after ${maxAttempts} attempts — row keeps coming back. Check the console log above: if the delete click itself failed every time, it's a UI/selector issue; if it deletes-then-reappears every time even with the longest settle wait, the code is almost certainly linked outside the billing grid (Assessment/Problem List) and needs removing from there directly.`);
+        return { ok: false };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -5634,8 +5678,7 @@
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                result = { ok };
+                result = await deleteICDRowWithRetry(item.code);
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -5701,21 +5744,16 @@
         }
 
         await Promise.all(actionLog.filter(e => e.status === 'success').map(async entry => {
-            console.log(`[Getwell SmartCoder][DIAG][stability-check][${entry.code}] starting 4500ms poll (every 400ms) after logged success for action="${entry.action}" kind="${entry.kind}"`);
             const checkFn = entry.kind === 'icd'
                 ? () => !!findICDRowByCodeFast(entry.code)
                 : () => !!getCPTRowByCode(entry.code);
-            const t0 = Date.now();
             const stillPresent = await pollUntilStable(checkFn, 4500, 400);
-            console.log(`[Getwell SmartCoder][DIAG][stability-check][${entry.code}] settled after ${Date.now() - t0}ms — stillPresent=${stillPresent}`);
             if (entry.action === 'add' && !stillPresent) {
                 entry.status = 'fail';
                 entry.message = 'Row disappeared after a moment — likely rejected by a background check (duplicate, modifier, or insurance rule). Not actually added.';
-                console.log(`[Getwell SmartCoder][DIAG][stability-check][${entry.code}] marking FAIL: add did not stick`);
             } else if (entry.action === 'delete' && stillPresent) {
                 entry.status = 'fail';
                 entry.message = 'Row reappeared after a moment — deletion did not actually stick.';
-                console.log(`[Getwell SmartCoder][DIAG][stability-check][${entry.code}] marking FAIL: delete bounced back — row is present again in the DOM right now`);
             }
         }));
         renderSnapshotBlock();
@@ -5730,11 +5768,15 @@
 
         if (recheck) {
             for (const item of recheck.toDelete) {
-                if (actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
+                // Skip codes the first pass already reported as a genuine
+                // success — but a first-pass "fail" (e.g. the ICD
+                // bounce-back case) still means it's sitting on the chart,
+                // so give it another shot here instead of leaving it as a
+                // dead-end "fail" entry.
+                if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
                 let result;
                 if (item.kind === 'icd') {
-                    const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
-                    result = { ok };
+                    result = await deleteICDRowWithRetry(item.code);
                 } else {
                     result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
                 }
