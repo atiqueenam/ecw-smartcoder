@@ -596,7 +596,7 @@
             background: rgba(255,255,255,0.18);
         }
         #ecsHeaderBtns span:hover { background: rgba(255,255,255,0.32); }
-        #ecsBody { padding: 11px 11px 0px 11px; color: #1e2937; }
+        #ecsBody { padding: 11px 11px 3px 11px; color: #1e2937; }
         .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; display:flex; align-items:center; justify-content:space-between; }
         .weekend-toggle { display:flex; align-items:center; gap:5px; cursor:pointer; text-transform:none; }
         .weekend-toggle .weekend-label { font-size: 9px; font-weight: 800; color:#64748b; }
