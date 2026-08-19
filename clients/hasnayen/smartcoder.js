@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.23
+// @name         Hasnayen Medical SmartCoder v1.25
 // @namespace    http://tampermonkey.net/
-// @version      1.23
+// @version      1.25
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,54 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.25 (2026-08-19) - Weekend rule: ALL blood/specimen-draw CPTs are now
+//   exempt from the "9-series code blocks 99051" check, not just 99000.
+//   99001 (the rarer specimen-handling sibling of 99000) was previously
+//   NOT exempt — a visit billed with 99001 instead of 99000 would block
+//   and delete 99051 even though the two codes serve the same purpose.
+//   36415 (venipuncture) never actually triggered the check (it doesn't
+//   start with "9"), but is now listed explicitly alongside 99000/99001
+//   in BLOOD_DRAW_CODES_FOR_WEEKEND so the exemption is self-documenting
+//   and won't be missed if this list needs another blood code later.
+//
+// 1.24 (2026-08-19) - Several fixes:
+//   - BUG FIX (weekend 99051 delete/re-add loop): the CC-text EKG rule
+//     used to auto-add 93000 any time "EKG"/"ECG" appeared in the Chief
+//     Complaint. 93000 is a 9-series CPT that isn't exempt from the
+//     weekend-rule's "any 9-series code blocks 99051" check, so on charts
+//     where the CC mentions EKG, 93000 kept getting auto-added, which
+//     blocked/deleted 99051; when staff deleted the unwanted 93000 (since
+//     it was never something they asked to be auto-added), the next
+//     Analyze pass saw the CC still said EKG and auto-added 93000 again —
+//     deleting 99051 again next time it was blocked and re-adding it once
+//     93000 was gone. That add/delete/add/delete cycle is exactly the
+//     "weekend code keeps deleting then re-adding" report. Fix: removed
+//     the CC-text auto-add of 93000 entirely (see 1.24 EKG note below) —
+//     93000 is no longer touched by us at all unless the practice adds it
+//     itself, which stops the oscillation.
+//   - EKG/93000: no longer auto-added from Chief Complaint text at all —
+//     this practice doesn't want us auto-adding it. If 93000 is already
+//     on the chart (added by the practice), it is left alone; 93000 was
+//     never in MANAGED_CODES so it was already never auto-deleted, only
+//     the unwanted auto-ADD is removed here. The Z13.6 EKG-link-ICD rule
+//     still runs, but now only triggers off 93000 actually being on the
+//     chart already, never off our own (now-removed) auto-add.
+//   - Z01.83: explicitly protected — if this ICD is ever on the chart, it
+//     is never proposed for deletion by this script (added a defensive
+//     exclusion in al_deleteUnwantedCodes's icdsToDelete set, and it is
+//     not, and must never be, added to any delete/prune list here).
+//   - 3049F/3050F now follow the exact same "kept only while the
+//     hyperlipidemia ICD (E78.x) is present" rule that 3048F already had
+//     — all three are LDL-management F-codes and should behave
+//     identically. Added both to MANAGED_CODES and removed 3050F from
+//     al_deleteUnwantedCodes's unconditional always-delete list (it was
+//     being hard-deleted regardless of the hyperlipidemia ICD, which
+//     contradicted the 3048F-style rule the practice wants for all three
+//     LDL codes).
+//   - Confirmed Preventive Counseling (99401) is allowed for MetroPlus at
+//     Hasnayen (isHasnayenCounselingBlockedIns already special-cases
+//     MetroPlus as allowed) — no code change needed, verified only.
+//
 // 1.23 (2026-08-18) - PERF FIX to 1.22's ICD delete retry: it was
 //   adding a settle wait after EVERY ICD delete, even ones that worked
 //   cleanly on the first try, slowing down normal deletes that never
@@ -423,7 +471,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.21';
+    const SCRIPT_VERSION = '1.25';
 
     let panel = null;
     let tab = null;
@@ -1614,7 +1662,7 @@
         'G9275', 'G9276', '1036F', '1000F',
         'G0136', 'G9744',
         '99051',  // Hasnayen rule 23 — weekend/holiday visit code
-        '3044F', '3051F', '3048F'   // kept only while their qualifying ICD is present — see computeAnalysis
+        '3044F', '3051F', '3048F', '3049F', '3050F'   // kept only while their qualifying ICD is present — see computeAnalysis
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
 
@@ -2310,27 +2358,41 @@
             }
         }
 
-        // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added; EKG → 93000 ----
-        if (/\bekg\b|\becg\b/i.test(ccText)) {
-            desired.set('93000', 'EKG mentioned in CC');
-        }
+        // ---- Blood draw / EKG in CC — 36415/99000/93000 are NOT auto-added
+        // by us at all (rule removed per practice request). 93000 is never
+        // in MANAGED_CODES, so if the practice adds it themselves it is
+        // never auto-deleted either way — we simply no longer check the CC
+        // text for "EKG"/"ECG" or propose adding 93000 ourselves. (This
+        // also fixes the weekend/99051 add-delete-add-delete flapping that
+        // was caused by this rule repeatedly re-adding 93000 — see 1.24
+        // changelog.) ----
 
         // ---- Weekend/holiday rule: CPT 99051 (Hasnayen rule 23) ----
         // Ported verbatim from clients/getwell/smartcoder.js. 99051 is
         // desired only when the Weekend toggle is on AND none of the
         // blocking conditions are met: any 9-series CPT already on the
-        // chart except 99000 and the regular office-visit E&M codes; the
-        // Medicare AWV G-codes; G0447 (Obesity); 99406 (Smoking); a
-        // televisit; the payer being part of the UHC family; or one of
-        // the high-level codes (Q0091/G0101/99497/99495/99496).
+        // chart except the blood/specimen-draw codes (36415/99000/99001 —
+        // BLOOD_DRAW_CODES_FOR_WEEKEND below) and the regular office-visit
+        // E&M codes; the Medicare AWV G-codes; G0447 (Obesity); 99406
+        // (Smoking); a televisit; the payer being part of the UHC family;
+        // or one of the high-level codes (Q0091/G0101/99497/99495/99496).
         // Analyze/Apply decides this, not the toggle itself.
         {
             const HIGH_LEVEL_BLOCKING_CODES = ['Q0091', 'G0101', '99497', '99495', '99496'];
             const hasHighLevelCode = HIGH_LEVEL_BLOCKING_CODES.some(c => rawCPTCodesNow.includes(c));
             const isUHCFamilyForWeekend = isUHCInsurance(insurance);
+            // Blood/specimen-draw CPTs never block the weekend rule — this
+            // covers every code we treat as "blood related" for this
+            // practice, not just the common 99000: 36415 (venipuncture,
+            // doesn't start with "9" so it was never caught by the 9-series
+            // check anyway) and 99001 (specimen handling — the rarer
+            // sibling of 99000, same purpose, same exemption). Whichever of
+            // these the visit happens to be billed with, weekend is never
+            // blocked by it.
+            const BLOOD_DRAW_CODES_FOR_WEEKEND = ['36415', '99000', '99001'];
             if (isWeekendEnabled()) {
                 const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
-                    /^9/.test(c) && c !== '99000' && c !== '99051' && !OFFICE_VISIT_EM_CODES.includes(c));
+                    /^9/.test(c) && !BLOOD_DRAW_CODES_FOR_WEEKEND.includes(c) && c !== '99051' && !OFFICE_VISIT_EM_CODES.includes(c));
                 const weekendBlocked = has9CodeExceptExempt ||
                     MEDICARE_AWV_CODES.some(c => rawCPTCodesNow.includes(c)) ||
                     rawCPTCodesNow.includes('G0447') ||
@@ -2457,13 +2519,15 @@
             [...EMPIRE_ALCOHOL_CODES, ...EMPIRE_TOBACCO_CODES].forEach(code => desired.delete(code));
         }
 
-        // ---- 3044F/3051F (diabetes) and 3048F (hyperlipidemia): kept only
-        // while a qualifying ICD is present, deleted otherwise ----
-        // Never auto-added — only preserved (via `desired`, since all
-        // three are in MANAGED_CODES) when already on the chart AND the
-        // matching diagnosis family is present. If the qualifying ICD
-        // isn't there, they're left out of `desired` and the MANAGED_CODES
-        // diff below flags them for removal.
+        // ---- 3044F/3051F (diabetes) and 3048F/3049F/3050F (hyperlipidemia/
+        // LDL) — kept only while a qualifying ICD is present, deleted
+        // otherwise ----
+        // Never auto-added — only preserved (via `desired`, since all five
+        // are in MANAGED_CODES) when already on the chart AND the matching
+        // diagnosis family is present. If the qualifying ICD isn't there,
+        // they're left out of `desired` and the MANAGED_CODES diff below
+        // flags them for removal. 3048F/3049F/3050F are all LDL-management
+        // F-codes — each maintains the exact same hyperlipidemia-based rule.
         const hasDiabetesICDForFCodes = getICDRows().some(e => /^E(0[89]|1[013])\b/i.test(e.code));
         const hasHyperlipidemiaICDForFCodes = getICDRows().some(e => /^E78\b/i.test(e.code));
         ['3044F', '3051F'].forEach(code => {
@@ -2471,9 +2535,11 @@
                 desired.set(code, 'Diabetes ICD present — kept on chart');
             }
         });
-        if (hasHyperlipidemiaICDForFCodes && rawCPTCodesNow.includes('3048F')) {
-            desired.set('3048F', 'Hyperlipidemia ICD present — kept on chart');
-        }
+        ['3048F', '3049F', '3050F'].forEach(code => {
+            if (hasHyperlipidemiaICDForFCodes && rawCPTCodesNow.includes(code)) {
+                desired.set(code, 'Hyperlipidemia ICD present — kept on chart');
+            }
+        });
 
         const toAdd = [];
         desired.forEach((reason, code) => {
@@ -4403,13 +4469,23 @@
             'G9432', 'G8783', 'G9920', 'G9820', '4013F',
             'G9744', 'G9903', '4000F', '1034F', '3062F',
             '3725F', 'H0049', '99000', '99001',
-            '3046F', '3050F',
+            '3046F',
+            // 3050F removed from this always-delete list — it's one of
+            // the three LDL/hyperlipidemia F-codes (3048F/3049F/3050F)
+            // that computeAnalysis now manages via the hyperlipidemia ICD
+            // rule (kept while E78.x is on the chart, deleted otherwise),
+            // same as 3048F already was. Hard-deleting it here regardless
+            // of that ICD contradicted the rule.
             ...al_getAgeRestrictedCPTs()
         ]);
+        // NEVER_DELETE_ICDS: defensive guard — these ICDs must never end
+        // up in icdsToDelete (now or from a future edit). Z01.83: once
+        // added to a chart it is always kept, never auto-removed by us.
+        const NEVER_DELETE_ICDS = new Set(['Z01.83']);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
             'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6', 'Z71.9', 'Z00.00'
-        ]);
+        ].filter(code => !NEVER_DELETE_ICDS.has(code)));
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
         function al_getICDRows() { return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')); }
