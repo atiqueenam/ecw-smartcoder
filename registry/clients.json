@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-19T10:26:55.870Z",
+  "generatedAt": "2026-08-19T10:28:35.150Z",
   "clients": [
     {
       "id": "bronx",
@@ -44,7 +44,7 @@
       ],
       "version": "1.26",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "2ebd2c37b91afe0742a7d70a6806fe97c6e207cbec2c197bafd47c03818352d3"
+      "sha256": "c3206308b92164f0e2b2ab57909126adad96a99550eeae3fb1c311641b0dd4ab"
     }
   ]
 }
