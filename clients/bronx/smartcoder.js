@@ -792,7 +792,7 @@
             background: rgba(255,255,255,0.18);
         }
         #ecsHeaderBtns span:hover { background: rgba(255,255,255,0.32); }
-        #ecsBody { padding: 11px; color: #1e2937; }
+        #ecsBody { padding: 11px 11px 4px 11px; color: #1e2937; }
         .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; display:flex; align-items:center; justify-content:space-between; }
         .top-info { display: flex; flex-direction: column; gap: 2px; margin-bottom: 9px; font-size: 11px; }
         .link-btn-row { gap: 6px; }
