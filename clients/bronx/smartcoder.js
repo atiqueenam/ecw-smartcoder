@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.72
+// @name         Bronx Health SmartCoder v1.73
 // @namespace    http://tampermonkey.net/
-// @version      1.72
+// @version      1.73
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,28 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.73 (2026-08-19) - Two fixes:
+//   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
+//     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
+//     isn't actually Medicaid/Medicare) was being wrongly treated as real
+//     Medicaid/Medicare by isPreventiveCounselBlockedIns() (blocked P/C),
+//     the Obesity Counseling gating check, and the OB quick-action's own
+//     redundant Medicaid check — all three used an unanchored
+//     /medicaid/i.test(...) or isAnyMedicareIns() (bare /medicare/i), which
+//     matches that word ANYWHERE in the name. Added isMedicaidInsurance()
+//     (start-anchored, same pattern as the existing isMedicaidOrMedicareIns/
+//     isStraightMedicareIns) and switched all three call sites to it (and
+//     to isStraightMedicareIns() for the Medicare half) — a payer's name
+//     now has to actually BEGIN with "Medicaid"/"Medicare" to be treated
+//     as one. (isAnyMedicareIns()'s vaccine-admin-code gating is
+//     deliberately left as-is — Medicare Advantage plans that don't start
+//     with the word "Medicare" still need the Medicare-only vaccine G-codes,
+//     same as before this fix.)
+//   - Obesity Counseling (G0447) gap changed from a flat 30 days to 14
+//     days: previously blocked for 30 days after the last G0447, now
+//     blocked only through 13 days since last use and usable again once
+//     the gap reaches 14+ days.
+//
 // 1.72 (2026-08-18) - PERF FIX to 1.71's ICD delete retry: it was adding a settle wait after EVERY ICD delete, even ones that worked cleanly on the first try, slowing down normal deletes that never had a problem. Now the wait only happens AFTER a bounce-back is actually detected, before the next retry — a clean delete returns immediately, same speed as before 1.71.
 //
 // 1.71 (2026-08-18) - BUG FIX: ICD deletes (e.g. Z13.89/Z13.31) could
@@ -1278,6 +1300,23 @@
         // it) even though it's administratively Medicaid — never exclude it.
         if (/metro\s*plus/i.test(name)) return false;
         return /^\s*medicaid\b/i.test(name) || /^\s*medicare\b/i.test(name);
+    }
+
+    // Medicaid-only, same start-anchored matching as isMedicaidOrMedicareIns
+    // above (and MetroPlus stays exempt for the same reason). BUG FIX: a
+    // couple of call sites (Obesity Counseling gating, Preventive
+    // Counseling's payer block) used a bare /medicaid/i.test(name) with no
+    // anchor, which matches "medicaid" ANYWHERE in the name — so a payer
+    // literally named e.g. "ABCD Medicaid" or "ABCD Medicare" (not actually
+    // Medicaid/Medicare, just a branded plan that happens to contain that
+    // word) was being wrongly treated as Medicaid and blocked. This
+    // start-anchored version only matches when the name actually BEGINS
+    // with "Medicaid".
+    function isMedicaidInsurance(insurance) {
+        if (!insurance) return false;
+        const name = insurance.trim();
+        if (/metro\s*plus/i.test(name)) return false;
+        return /^\s*medicaid\b/i.test(name);
     }
 
     function isUHCInsurance(insurance) {
@@ -5677,9 +5716,14 @@
             ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
         } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
-        } else if (codeUsedInLastDays('G0447', 30)) {
-            ob = { disabled: true, title: 'Obesity counseling (G0447) billed in the last 30 days' };
-        } else if (insuranceNorm && /medicaid/i.test(insuranceNorm)) {
+        } else if (codeUsedInLastDays('G0447', 13)) {
+            // Rule: G0447 needs a 14-day gap from its last use — blocked
+            // while the gap is 13 days or less, usable again once the gap
+            // reaches 14+ days. codeUsedInLastDays(code, days) blocks while
+            // diffDays <= days, so days=13 is the correct threshold (13
+            // blocks, 14 doesn't).
+            ob = { disabled: true, title: 'Obesity counseling (G0447) billed within the last 13 days — needs a 14-day gap' };
+        } else if (isMedicaidInsurance(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
@@ -5816,11 +5860,19 @@
         if (!insurance) return false;
         const name = insurance.trim();
         //if (/metro\s*plus/i.test(name)) return true;
-        if (/medicaid/i.test(name)) return true;
+        // BUG FIX: both the Medicaid and Medicare checks here used to be
+        // unanchored (/medicaid/i / isAnyMedicareIns's bare /medicare/i),
+        // which matches that word ANYWHERE in the payer name — so a payer
+        // named e.g. "ABCD Medicaid" or "ABCD Medicare" (not actually
+        // Medicaid/Medicare) was wrongly blocked here. isMedicaidInsurance
+        // and isStraightMedicareIns are both start-anchored (name must
+        // actually BEGIN with "Medicaid"/"Medicare"), same fix pattern as
+        // the Obesity Counseling gating above.
+        if (isMedicaidInsurance(name)) return true;
         if (isUHCInsurance(name)) return true;
         if (isNycePPOIns(name)) return true;
         if (/molina/i.test(name)) return true;
-        if (isAnyMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
+        if (isStraightMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
         return false;
     }
 
@@ -5895,9 +5947,12 @@
         quickActionRunning = true;
         try {
             const text = getEncounterText();
-            // Obesity counseling can't be applied for Medicaid.
+            // Obesity counseling can't be applied for Medicaid. Same
+            // start-anchored check as the gating above (isMedicaidInsurance)
+            // — a bare /medicaid/i.test() here would also wrongly catch a
+            // payer like "ABCD Medicaid" that merely contains the word.
             const insurance = parseInsuranceFromPage(text);
-            if (insurance && /medicaid/i.test(insurance.trim())) {
+            if (insurance && isMedicaidInsurance(insurance.trim())) {
                 showQuickNotice(`Obesity Counseling not applicable for Medicaid (${insurance}) — skipped.`);
                 return;
             }
