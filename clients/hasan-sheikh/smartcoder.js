@@ -575,6 +575,12 @@
 (function () {
     'use strict';
 
+    // Small, unobtrusive version readout so you can confirm which build is
+    // actually running in this browser vs. the latest pushed to the repo,
+    // without touching the loader at all — this just reads the @version
+    // already declared in this file's own userscript header above.
+    const SCRIPT_VERSION = '1.85';
+
     let panel = null;
     let tab = null;
     let isDraggingPanel = false;
@@ -667,6 +673,10 @@
         .top-info { display: flex; flex-direction: column; gap: 2px; margin-bottom: 9px; font-size: 11px; }
         .link-btn-row { gap: 6px; }
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
+        .ecs-script-version {
+            font-size: 9px; color: #94a3b8; text-align: center;
+            margin: 4px 0; line-height: 1; letter-spacing: .2px;
+        }
         .link-btn {
             flex: 1 1 0; min-width: 0; border: 0; border-radius: 7px; padding: 6px 4px;
             font-size: 9.5px; font-weight: 700; letter-spacing: .2px; color: #fff; cursor: pointer;
@@ -5940,6 +5950,7 @@
                 <button id="ecsObesityBtn" class="qa-btn qa-obesity" title="${escapeHtml(qaGating.ob.title)}" ${(quickActionRunning || qaGating.ob.disabled) ? 'disabled' : ''}>OB</button>
             </div>
             ${renderAnalysisSection()}
+            <div class="ecs-script-version" title="Version of this client script currently loaded in this browser">v${SCRIPT_VERSION}</div>
         `;
 
         const body = document.getElementById('ecsBody');
