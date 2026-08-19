@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.25
+// @name         Hasnayen Medical SmartCoder v1.26
 // @namespace    http://tampermonkey.net/
-// @version      1.25
+// @version      1.26
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,31 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.26 (2026-08-19) - Ported the same two fixes just applied to Bronx:
+//   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
+//     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
+//     isn't actually Medicaid/Medicare) was being wrongly treated as real
+//     Medicaid/Medicare in three places: isHasnayenCounselingBlockedIns()
+//     (99401 payer block), the Obesity Counseling (OB) gating check, and
+//     the OB quick-action's own redundant Medicaid re-check. All three
+//     used an unanchored /medicaid/i.test(...) or isAnyMedicareIns() (bare
+//     /medicare/i) match. isMedicaidInsurance() is now start-anchored
+//     (matching isMedicaidOrMedicareIns()'s existing pattern, MetroPlus
+//     carve-out included) and isHasnayenCounselingBlockedIns()'s Medicare
+//     check now uses the already-anchored isStraightMedicareIns() instead
+//     of isAnyMedicareIns() — a payer's name now has to actually BEGIN
+//     with "Medicaid"/"Medicare" to be treated as one. G0444/G0442's
+//     Medicaid removal (which already called isMedicaidInsurance())
+//     automatically gets the same fix for free. (isAnyMedicareIns()'s
+//     vaccine-admin-code gating is deliberately left as-is — unrelated to
+//     this fix, same as Bronx.)
+//   - Obesity Counseling (G0447) gap for non-Healthfirst payers changed
+//     from a flat 30 days to 14 days (new hasnayenObesityGapDays() —
+//     separate from the unchanged 60/30-day hasnayenCounselingGapDays()
+//     used by 99401): blocked through 13 days since the last G0447, usable
+//     again once the gap reaches 14+ days. Healthfirst's 60-day gap is
+//     unchanged.
+//
 // 1.25 (2026-08-19) - Weekend rule: ALL blood/specimen-draw CPTs are now
 //   exempt from the "9-series code blocks 99051" check, not just 99000.
 //   99001 (the rarer specimen-handling sibling of 99000) was previously
@@ -471,7 +496,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.25';
+    const SCRIPT_VERSION = '1.26';
 
     let panel = null;
     let tab = null;
@@ -571,7 +596,7 @@
             background: rgba(255,255,255,0.18);
         }
         #ecsHeaderBtns span:hover { background: rgba(255,255,255,0.32); }
-        #ecsBody { padding: 11px; color: #1e2937; }
+        #ecsBody { padding: 11px 11px 4px 11px; color: #1e2937; }
         .snapshot-header { font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 7px; display:flex; align-items:center; justify-content:space-between; }
         .weekend-toggle { display:flex; align-items:center; gap:5px; cursor:pointer; text-transform:none; }
         .weekend-toggle .weekend-label { font-size: 9px; font-weight: 800; color:#64748b; }
@@ -592,7 +617,7 @@
         .qa-row.link-btn-row { margin-top: 0; margin-bottom: 12px; }
         .ecs-script-version {
             font-size: 9px; color: #94a3b8; text-align: center;
-            margin: 10px 0 0 0; line-height: 1; letter-spacing: .2px;
+            margin: 4px 0; line-height: 1; letter-spacing: .2px;
         }
         .link-btn {
             flex: 1 1 0; min-width: 0; border: 0; border-radius: 7px; padding: 6px 4px;
@@ -1162,12 +1187,22 @@
     return !!insurance && /^empire\b/i.test(insurance.trim());
     }
 
-    // Medicaid (incl. "New York State Medicaid") — matches anywhere in the
-    // name, same test isHasnayenCounselingBlockedIns already uses for
-    // Medicaid, so G0444/G0442 removal below stays consistent with the
-    // existing add-side exclusion.
+    // Medicaid (incl. "New York State Medicaid") — start-anchored, same
+    // test isHasnayenCounselingBlockedIns now uses for Medicaid, so
+    // G0444/G0442 removal below stays consistent with the existing
+    // add-side exclusion.
+    // BUG FIX: this used to match "medicaid" ANYWHERE in the payer name
+    // (a bare /medicaid/i.test with no anchor), so a payer literally named
+    // e.g. "ABCD Medicaid" (not actually Medicaid) was wrongly treated as
+    // Medicaid. Now the name has to actually BEGIN with "Medicaid" —
+    // same anchored pattern as isMedicaidOrMedicareIns() above, including
+    // the MetroPlus carve-out (MetroPlus is administratively Medicaid but
+    // G0444/G0442/99401 ARE billable for it, so it must never match here).
     function isMedicaidInsurance(insurance) {
-        return !!insurance && /medicaid/i.test(insurance.trim());
+        if (!insurance) return false;
+        const name = insurance.trim();
+        if (/metro\s*plus/i.test(name)) return false;
+        return /^\s*medicaid\b/i.test(name);
     }
 
     // Eligible unless the payer is on Hasnayen's rule-2 exclusion list.
@@ -3502,8 +3537,16 @@
         // MetroPlus is explicitly ALLOWED (rules 2 + 10) — check it first
         // so nothing below can accidentally sweep it up.
         if (/metro\s*plus/i.test(name)) return false;
-        if (/medicaid/i.test(name)) return true;          // incl. "New York State Medicaid"
-        if (isAnyMedicareIns(name)) return true;
+        // BUG FIX: both checks below used to be unanchored (bare
+        // /medicaid/i and isAnyMedicareIns's bare /medicare/i), matching
+        // that word ANYWHERE in the payer name — so a payer named e.g.
+        // "ABCD Medicaid" or "ABCD Medicare" (not actually Medicaid/
+        // Medicare) was wrongly blocked from Preventive Counseling.
+        // isMedicaidInsurance/isStraightMedicareIns are both start-
+        // anchored — the name must actually BEGIN with "Medicaid"/
+        // "Medicare" now.
+        if (isMedicaidInsurance(name)) return true;          // incl. "New York State Medicaid"
+        if (isStraightMedicareIns(name)) return true;
         if (isWellcareIns(name)) return true;
         if (isFidelisIns(name)) return true;
         if (isUHCInsurance(name)) return true;            // UHC family incl. UMR / Oxford
@@ -3546,6 +3589,17 @@
     // other payer that allows the code at all.
     function hasnayenCounselingGapDays(insurance) {
         return isHealthfirstIns(insurance) ? 60 : 30;
+    }
+
+    // Obesity Counseling (G0447) gap — separate from the 99401 gap above.
+    // Healthfirst keeps its 60-day (2-month) gap; every other payer's gap
+    // is now 14 days: findCodeUsedInLastDays(codes, days) blocks while
+    // diffDays <= days, so 13 is the threshold that blocks through 13 days
+    // since last use and allows it again once the gap reaches 14+ days —
+    // was previously a flat 30 days (blocked through day 30) for all
+    // non-Healthfirst payers.
+    function hasnayenObesityGapDays(insurance) {
+        return isHealthfirstIns(insurance) ? 60 : 13;
     }
 
     function isAnyMedicareIns(insurance) {
@@ -6135,6 +6189,7 @@
         // block P/C.
         const hasChronicDiseaseThisEncounter = getICDRows().some(r => CHRONIC_DISEASE_ICD_CODES.has((r.code || '').toUpperCase()));
         const counselingGapDays = hasnayenCounselingGapDays(insuranceNorm);
+        const obGapDays = hasnayenObesityGapDays(insuranceNorm);
         const pcVisitInfo = hasnayenVisitTypeInfo(getVisitType());
         let pc = { disabled: false, title: 'Preventive Counseling' };
         // Rule 3 correction: the payer-specific gap (60 days Healthfirst /
@@ -6238,15 +6293,15 @@
             ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
         } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
-        } else if (findCodeUsedInLastDays(['G0447'], counselingGapDays)) {
-            // Hasnayen rule 4: same 2-month (Healthfirst) / 1-month (all
-            // other payers) gap pattern as 99401. Unlike 99401, G0447 may
-            // be ADDED by us when the gap and criteria are satisfied (the
-            // OB quick action does that); when the criteria aren't met and
-            // it's inside the window, computeAnalysis removes it.
-            const obHit = findCodeUsedInLastDays(['G0447'], counselingGapDays);
-            ob = { disabled: true, title: `Obesity counseling (G0447) billed on ${obHit.date} — within the ${counselingGapDays}-day gap` };
-        } else if (insuranceNorm && /medicaid/i.test(insuranceNorm)) {
+        } else if (findCodeUsedInLastDays(['G0447'], obGapDays)) {
+            // Hasnayen rule 4: 2-month (Healthfirst) / 14-day (all other
+            // payers) gap. Unlike 99401, G0447 may be ADDED by us when the
+            // gap and criteria are satisfied (the OB quick action does
+            // that); when the criteria aren't met and it's inside the
+            // window, computeAnalysis removes it.
+            const obHit = findCodeUsedInLastDays(['G0447'], obGapDays);
+            ob = { disabled: true, title: `Obesity counseling (G0447) billed on ${obHit.date} — within the ${obGapDays + 1}-day gap` };
+        } else if (isMedicaidInsurance(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
@@ -6469,9 +6524,12 @@
         quickActionRunning = true;
         try {
             const text = getEncounterText();
-            // Obesity counseling can't be applied for Medicaid.
+            // Obesity counseling can't be applied for Medicaid. Same
+            // start-anchored check as the gating above (isMedicaidInsurance)
+            // — a bare /medicaid/i.test() here would also wrongly catch a
+            // payer like "ABCD Medicaid" that merely contains the word.
             const insurance = parseInsuranceFromPage(text);
-            if (insurance && /medicaid/i.test(insurance.trim())) {
+            if (insurance && isMedicaidInsurance(insurance.trim())) {
                 showQuickNotice(`Obesity Counseling not applicable for Medicaid (${insurance}) — skipped.`);
                 return;
             }
