@@ -223,6 +223,32 @@
 
 
 /* ============================================================
+   SCRIPT VERSION — single source of truth
+   Reads this file's own "@version" line (in the userscript header
+   comment at the very top of this file) at runtime, so the footer
+   badge below always matches the header without a second number to
+   keep in sync by hand. Captured here, at the true top level of the
+   file (before any inner "use strict" module), because
+   arguments.callee — the only way to get at this whole file's own
+   source text, comments included, when the loader runs it via
+   `new Function("window", fileText)` — throws in strict mode.
+   ============================================================ */
+var __smartCoderOwnSource = '';
+try { __smartCoderOwnSource = arguments.callee.toString(); } catch (_) { /* not run as a bare Function body */ }
+function __smartCoderReadVersion(fallback) {
+    try {
+        var match = __smartCoderOwnSource.match(/\/\/ @version\s+([^\s\r\n]+)/);
+        if (match) return match[1];
+    } catch (_) {}
+    try {
+        if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) {
+            return GM_info.script.version; // standalone Tampermonkey install
+        }
+    } catch (_) {}
+    return fallback; // last-resort literal, only used if both methods above fail
+}
+
+/* ============================================================
    MODULE 1 — PATIENT HISTORY
    This is your original history script, logic untouched.
    Its button stays exactly where it was (docked into the
@@ -496,7 +522,7 @@
     // actually running in this browser vs. the latest pushed to the repo,
     // without touching the loader at all — this just reads the @version
     // already declared in this file's own userscript header above.
-    const SCRIPT_VERSION = '1.26';
+    const SCRIPT_VERSION = __smartCoderReadVersion('1.26');
 
     let panel = null;
     let tab = null;
