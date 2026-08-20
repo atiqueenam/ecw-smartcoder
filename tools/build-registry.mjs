@@ -58,9 +58,28 @@ for (const directoryEntry of directoryEntries) {
   }
 
   const scriptFile = path.join(clientDirectory, config.entry);
-  const scriptBytes = await readFile(scriptFile);
+  const originalSource = await readFile(scriptFile, "utf8");
+  const version = config.version.trim();
+
+  // Single source of truth: client.json's "version" field. Every place the
+  // version is duplicated inside the client script (the userscript
+  // "@version" tag, a trailing "vX.Y" in the "@name" tag if present, and the
+  // "SCRIPT_VERSION" constant that drives the on-screen footer badge) is
+  // rewritten here to match, so nobody has to remember to bump three spots
+  // by hand for every release, for every client.
+  const syncedSource = originalSource
+    .replace(/(^\/\/ @version\s+).*/m, `$1${version}`)
+    .replace(/(^\/\/ @name\s+.*?\s+v)[0-9][^\s]*/m, `$1${version}`)
+    .replace(/(const SCRIPT_VERSION\s*=\s*['"]).*?(['"])/, `$1${version}$2`);
+
+  if (syncedSource !== originalSource) {
+    await writeFile(scriptFile, syncedSource, "utf8");
+    console.log(`${config.id}: synced script version to ${version}.`);
+  }
+
+  const scriptBytes = Buffer.from(syncedSource, "utf8");
   // Compile as a function to catch JavaScript syntax errors before publishing.
-  new Function(scriptBytes.toString("utf8"));
+  new Function(syncedSource);
   const sha256 = createHash("sha256").update(scriptBytes).digest("hex");
 
   clients.push({
