@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.55
+// @name         Getwell SmartCoder by ATQ v5.56
 // @namespace    http://tampermonkey.net/
-// @version      5.55
+// @version      5.56
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.56 (2026-08-20) - BUG FIX: isGetwellCommercialInsurance() missed
+//   "Other Blue Plans Empire BCBS - N" (and similar "Other Blue Plans
+//   ... Empire BCBS" variants) — it doesn't start with "Empire" or
+//   "Blue Cross", so neither existing check caught it, and the
+//   commercial-insurance + Preventive visit -> no office visit rule
+//   silently skipped it. Added a check that treats any insurance name
+//   containing both "empire" and "bcbs" as commercial (it's an
+//   Empire-branded BCBS plan), without touching the two existing
+//   anchored checks or any other payer classification.
+//
 // 5.55 (2026-08-18) - PERF FIX to 5.54's ICD delete retry: it was
 //   adding a settle wait after EVERY ICD delete, even ones that
 //   worked cleanly on the first try, slowing down normal deletes
@@ -1364,6 +1374,12 @@
         // "Blue Cross of California", etc. — anything starting "Blue Cross".
         if (/^blue\s+cross\b/.test(name)) return true;
         if (/^empire\b/.test(name)) return true; // Empire BCBS and similar Empire-branded plans
+        // "Other Blue Plans Empire BCBS - N" (and similar "Other Blue
+        // Plans ... Empire BCBS" variants) — an Empire-branded BCBS plan
+        // that doesn't start with "Empire" or "Blue Cross", so it's missed
+        // by the two checks above. Matched on "empire" + "bcbs" both
+        // appearing in the name so unrelated payers aren't swept in.
+        if (/\bempire\b/.test(name) && /\bbcbs\b/.test(name)) return true;
         return false;
     }
 
