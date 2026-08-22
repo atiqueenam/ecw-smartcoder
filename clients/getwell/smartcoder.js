@@ -3584,7 +3584,7 @@ function __smartCoderReadVersion(fallback) {
             "99401": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
             "99402": { type: "multiICD", icds: [["Z71.3"], ["Z71.82","Z71.89"]] },
             "99406": { type: "multiICD", icds: [["F17"], ["Z71.6"]] },
-            "G0447": { type: "multiICD", icds: [["E66.9"], ["Z68"]] },
+            "G0447": { type: "multiICD", icds: [["E66.9","E66.01","E66.09"], ["Z68"]] },
             "G8418": { type: "customICDCollector", icdList: bmiOnlyICDs, fallback: "al_officeVisit" },
             "G8417": { type: "customICDCollector", icdList: bmiOnlyICDs, fallback: "al_officeVisit" },
             "G8420": { type: "customICDCollector", icdList: bmiOnlyICDs, fallback: "al_officeVisit" },
