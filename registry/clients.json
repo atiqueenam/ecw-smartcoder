@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-20T05:48:43.032Z",
+  "generatedAt": "2026-08-20T06:14:37.431Z",
   "clients": [
     {
       "id": "bronx",
@@ -11,7 +11,7 @@
       ],
       "version": "1.73",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "169803c856684a0732645386e0484a1e5527478c7fd0e755751d4d1a9a398ed5"
+      "sha256": "14110baeb363356510686a5914d87e4ea73674085d13ebe539b2e45fb54d11a0"
     },
     {
       "id": "getwell",
@@ -22,7 +22,7 @@
       ],
       "version": "5.56",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "8b40dc49340c902113e37834d25ecbe1c98cc70c2e768fa3eb9965288e9eba05"
+      "sha256": "be08d97442b7ba598c2f631abc60b1191211c244873d8d171984d355084363f4"
     },
     {
       "id": "hasan-sheikh",
@@ -33,7 +33,7 @@
       ],
       "version": "1.85",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "566c7af4eb18676aa06e58ec336f14fe64cb177299da1cafce4692f147c465f2"
+      "sha256": "16b1261e7c3b8f803dd406668545a12fbc5009f56e2c99295df0ff1e19f2b501"
     },
     {
       "id": "hasnayen",
@@ -44,7 +44,7 @@
       ],
       "version": "1.26",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "c3206308b92164f0e2b2ab57909126adad96a99550eeae3fb1c311641b0dd4ab"
+      "sha256": "04fcff1859dec542e364ed230093246edec3ebce623aff3616ef538baa2ebdef"
     }
   ]
 }
