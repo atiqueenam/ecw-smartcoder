@@ -1283,7 +1283,7 @@ function __smartCoderReadVersion(fallback) {
         "G89.0", "G89.2", "G89.3", "G89.4", "G89.21", "G89.22", "G89.29",
         "G50.1", "G56.0", "G57.0",
         "R10.0", "R10.2", "R10.30", "R10.4", "M17.0",
-        "N94.4", "N94.5", "N94.6",
+        "N94.4", "N94.5", "N94.6","M72.2",
         "R52.81", "R52.82", "R52.89", "M54.16", "M10.9", "M17.12", "M79.10",
         "T14.0", "T79.8XXA",
         "K52.9",
@@ -1296,7 +1296,7 @@ function __smartCoderReadVersion(fallback) {
     // pain joint findings. Everything else under M is pain-related unless
     // listed here.
     const NON_PAIN_M_EXACT_CODES = new Set([
-        "M67.4", "M72.0", "M72.2", "M79.3",
+        "M67.4", "M72.0", "M79.3",
         "M81.0", "M81.6", "M81.8",
         "M22.0", "M22.1", "M24.4", "M24.5", "M24.6", "M25.6", "M62.4", "M62.81", "M89.7"
     ]);
