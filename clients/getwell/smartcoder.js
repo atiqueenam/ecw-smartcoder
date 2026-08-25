@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.67
+// @name         Getwell SmartCoder by ATQ v5.68
 // @namespace    http://tampermonkey.net/
-// @version      5.67
+// @version      5.68
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,31 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.68 (2026-08-25) - Reported from live use: 5.66/5.67 sometimes left the
+//   CDSS modal open on screen, plus the trigger machinery had grown too
+//   complex to trust ("increased code lines a lot but didn't do any
+//   effective work"). Rewrote the whole CDSS section:
+//   REAL BUG FIXED — the modal staying open: 5.66 closed the modal the
+//   instant the intercepted JSON arrived, which can be BEFORE the close
+//   button has even rendered into the DOM yet. findCdssCloseButton()
+//   returning null was silently treated as "nothing to close" (the code
+//   was `if (closeBtn) closeBtn.click()`, no retry) — leaving the modal
+//   open with nothing left to close it. Fixed: now waits (briefly, up to
+//   3s) for the close button to actually exist before giving up, with an
+//   Escape-key/generic-.close fallback if it somehow still can't be found,
+//   so a real patient chart is never left with a stuck invisible modal.
+//   SIMPLIFIED BACK DOWN — per direct feedback that "cdss after history
+//   was a good choice" and the extra "rules" (multiple trigger points in
+//   checkAndUpdate + openPanel + a runAnalysis last-resort, in-flight
+//   promise-sharing, an isLoading() gate debate, an auto-refresh-after-
+//   late-arrival hook) were bloat without real benefit. Removed all of
+//   that in favor of ONE rule: maybeStartCdssAfterHistory(), called only
+//   from checkAndUpdate — once patient-history finishes loading, start
+//   CDSS immediately, once per patient, full stop. The JSON-intercept
+//   speed fix from 5.66 (reading getPatientAlertData.jsp's response
+//   directly instead of waiting for the table to render) is kept — that
+//   part was correct and is what actually makes the check fast — it's
+//   just no longer wrapped in extra scheduling logic on top.
 // 5.67 (2026-08-25) - Two more fixes from live feedback on 5.66:
 //   1) Sequential-wait bug: primeCdssCancerScreeningCache() refused to
 //      start while historyApi.isLoading() was true — meaning CDSS's own
@@ -1428,116 +1453,49 @@ function __smartCoderReadVersion(fallback) {
     // never a frame where it's visible, then the modal's own Close button
     // is clicked once scraping is done and the hiding class is removed.
     // Never runs while the Billing tab is up (CDSS isn't reachable from
-    // there) — only while looking at the SOAP note — so the result is
-    // cached per patient for computeAnalysis to read later, once the user
-    // has moved on to Billing/Analyze.
-    // 5.66: the actual fix for "still takes too much time". A live network
-    // capture confirmed the CDSS modal's own Angular controller fetches its
-    // data from a plain JSON endpoint — getPatientAlertData.jsp — rather
-    // than rendering the table from something already on the page. That
-    // means the real cost was never "opening a modal", it was "waiting for
-    // Angular to finish rendering a table we didn't actually need to look
-    // at" — the JSON arrives well before the table finishes painting.
-    // getPatientAlertData.jsp's URL includes a per-request "pd" token we
-    // have no way to construct ourselves (not a value safe to hardcode or
-    // guess at), so we still can't call it cold without the app's own
-    // help — but we don't have to: a lightweight, always-on fetch/XHR patch
-    // installed once below lets us grab the JSON the INSTANT the browser
-    // receives it, from whichever caller actually requested it — our own
-    // invisible click below, or (best case, zero extra cost at all) eCW's
-    // own page if it ever fires this same call itself for some other
-    // widget (e.g. an alert-count badge). Either way, scrapeCdssCancerScreeningInvisibly()
-    // no longer waits for the DOM table to render at all: it takes the
-    // network JSON the moment it lands and closes the modal immediately,
-    // which is what actually shortens both the wait AND the hidden-modal
-    // window (less time hidden = less that can possibly flash). The old
-    // DOM-table scrape (parseCdssCancerRows) stays in place as a fallback
-    // only, in case this endpoint ever moves to a transport this patch
-    // doesn't see.
-    let interceptedAlertDataByKey = new Map(); // patient key -> { json, ts }
-    let alertDataWaitersByKey = new Map();     // patient key -> [resolve fns] waiting on the NEXT capture for that key
+    // there) — only while looking at the SOAP note.
+    //
+    // 5.68: rewritten from scratch after live use of 5.63-5.67 found a
+    // real regression — the modal was being left open. Root cause: a live
+    // network capture (5.66) showed the modal's own data comes from a
+    // plain JSON endpoint, getPatientAlertData.jsp, which we intercept via
+    // a fetch/XHR patch below to read the moment it arrives — often BEFORE
+    // Angular finishes rendering the table. 5.66 used that to close the
+    // modal the instant the JSON landed, but findCdssCloseButton() can
+    // return null if the close button hasn't rendered into the DOM yet at
+    // that exact instant — and the old code just silently skipped clicking
+    // it (`if (closeBtn) closeBtn.click()`, no retry), leaving the modal
+    // open with nothing left to close it. Fixed below by actually waiting
+    // (briefly) for the close button to exist before giving up.
+    //
+    // 5.63-5.67 also grew a lot of machinery — multiple trigger points
+    // (checkAndUpdate + openPanel + a runAnalysis "last resort"),
+    // in-flight promise sharing, an isLoading() gate, an auto-refresh-
+    // after-late-arrival hook — trying to squeeze out every last bit of
+    // timing. That's simplified back down to ONE rule, matching how this
+    // worked before and reportedly worked fine: once patient-history
+    // finishes loading, start the CDSS check immediately, once per
+    // patient. The JSON intercept (the actual speed fix) stays, so the
+    // check itself is still fast — it just isn't wrapped in extra
+    // scheduling logic.
+    let cdssCancerCache = null;      // { colorectal, cervical, breast } | null
+    let cdssCancerCacheKey = "";     // patient key this cache belongs to
+    let cdssScrapeInFlight = false;  // true while a scrape is actively running (single-flight — only ever one at a time)
+    let cdssTriggeredForKey = "";    // patient key CDSS has already been started for (whether or not it finished) — once-per-patient guard
+
+    // ---- Network intercept for getPatientAlertData.jsp (see 5.66 note above) ----
+    let interceptedAlertJsonByKey = new Map(); // patient key -> the JSON last seen for it
 
     function handleInterceptedAlertJson(json) {
         const historyApi = window.__ecwPatientHistory;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
         if (!key) return;
-        interceptedAlertDataByKey.set(key, { json, ts: Date.now() });
-        if (interceptedAlertDataByKey.size > 20) {
-            // Simple unbounded-growth guard for very long sessions — this
-            // is a short-lived per-patient cache, not meant to accumulate
-            // forever. Mirrors ENCOUNTER_CACHE_MAX's approach elsewhere.
-            interceptedAlertDataByKey.clear();
-            interceptedAlertDataByKey.set(key, { json, ts: Date.now() });
-        }
-        const waiters = alertDataWaitersByKey.get(key);
-        if (waiters) {
-            alertDataWaitersByKey.delete(key);
-            waiters.slice().forEach(resolve => resolve(json));
-        }
+        interceptedAlertJsonByKey.set(key, json);
+        if (interceptedAlertJsonByKey.size > 20) interceptedAlertJsonByKey.clear(); // simple unbounded-growth guard for long sessions
     }
 
-    function waitForInterceptedAlertData(key, timeoutMs) {
-        if (!key) return Promise.resolve(null);
-        const cached = interceptedAlertDataByKey.get(key);
-        if (cached) return Promise.resolve(cached.json);
-        return new Promise(resolve => {
-            let settled = false;
-            const finish = (val) => {
-                if (settled) return;
-                settled = true;
-                const arr = alertDataWaitersByKey.get(key);
-                if (arr) {
-                    const idx = arr.indexOf(finish);
-                    if (idx !== -1) arr.splice(idx, 1);
-                    if (!arr.length) alertDataWaitersByKey.delete(key);
-                }
-                resolve(val);
-            };
-            const arr = alertDataWaitersByKey.get(key) || [];
-            arr.push(finish);
-            alertDataWaitersByKey.set(key, arr);
-            setTimeout(() => finish(null), timeoutMs);
-        });
-    }
-
-    // Small cancellable poll — like waitForElement below, but with an
-    // explicit cancel() so we can stop it the instant the JSON intercept
-    // wins the race, instead of leaving a stray setInterval running for up
-    // to 6s that could re-hide unrelated UI that opens later (hideNewBodyChildren
-    // hides ANY new top-level body node, which is only safe while we're
-    // still actually mid-scrape).
-    function pollUntilCancellable(finder, timeoutMs, intervalMs) {
-        let cancelled = false;
-        let timer = null;
-        const promise = new Promise(resolve => {
-            const start = Date.now();
-            timer = setInterval(() => {
-                if (cancelled) { clearInterval(timer); resolve(null); return; }
-                const el = finder();
-                if (el) { clearInterval(timer); resolve(el); return; }
-                if (Date.now() - start > timeoutMs) { clearInterval(timer); resolve(null); }
-            }, intervalMs || 100);
-        });
-        return { promise, cancel: () => { cancelled = true; if (timer) clearInterval(timer); } };
-    }
-
-    (function installAlertDataInterceptors() {
+    (function installAlertDataInterceptor() {
         const isAlertUrl = (url) => typeof url === 'string' && url.toLowerCase().indexOf('getpatientalertdata.jsp') !== -1;
-
-        if (window.fetch && !window.fetch.__docproAlertPatched) {
-            const origFetch = window.fetch.bind(window);
-            const patched = function (input, init) {
-                const url = (typeof input === 'string') ? input : ((input && input.url) || '');
-                const p = origFetch(input, init);
-                if (!isAlertUrl(url)) return p;
-                return p.then(res => {
-                    try { res.clone().json().then(handleInterceptedAlertJson).catch(() => {}); } catch {}
-                    return res;
-                });
-            };
-            patched.__docproAlertPatched = true;
-            window.fetch = patched;
-        }
 
         // Angular's $http traditionally rides on XMLHttpRequest, not
         // fetch, in apps of this vintage — this is the patch that actually
@@ -1563,15 +1521,30 @@ function __smartCoderReadVersion(fallback) {
             };
             XMLHttpRequest.prototype.__docproAlertPatched = true;
         }
+
+        // Defensive fallback in case this ever rides on fetch instead.
+        if (window.fetch && !window.fetch.__docproAlertPatched) {
+            const origFetch = window.fetch.bind(window);
+            const patched = function (input, init) {
+                const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+                const p = origFetch(input, init);
+                if (!isAlertUrl(url)) return p;
+                return p.then(res => {
+                    try { res.clone().json().then(handleInterceptedAlertJson).catch(() => {}); } catch {}
+                    return res;
+                });
+            };
+            patched.__docproAlertPatched = true;
+            window.fetch = patched;
+        }
     })();
 
     // getPatientAlertData.jsp's PopHealth.alertList entries (per a live
     // capture) carry alertName ("Colorectal Cancer Screening ..." etc.),
     // lastDoneDate (seen as ISO YYYY-MM-DD), and a numeric alertStatus
     // (1 = compliant/"green" in every sample observed; anything else is
-    // treated as not-compliant — same "only a genuinely green row counts"
-    // rule as the DOM version, just never assuming compliant unless we
-    // positively recognize the compliant code).
+    // treated as not-compliant — only a positively-recognized compliant
+    // code ever counts, same rule as the DOM version below).
     function parseCdssCancerRowsFromJson(json) {
         const result = { colorectal: null, cervical: null, breast: null };
         const list = (json && json.PopHealth && Array.isArray(json.PopHealth.alertList)) ? json.PopHealth.alertList : [];
@@ -1587,21 +1560,11 @@ function __smartCoderReadVersion(fallback) {
             if (/^colorectal cancer screening\b/i.test(name)) key = 'colorectal';
             else if (/^breast cancer screening\b/i.test(name)) key = 'breast';
             else if (/^cervical cancer screening\b/i.test(name)) key = 'cervical';
-            if (!key || result[key]) return; // first matching entry wins, same as the DOM version
-            result[key] = {
-                date: toUsDate(item.lastDoneDate),
-                compliant: item.alertStatus === 1
-            };
+            if (!key || result[key]) return; // first matching entry wins
+            result[key] = { date: toUsDate(item.lastDoneDate), compliant: item.alertStatus === 1 };
         });
         return result;
     }
-
-    let cdssCancerCache = null;       // { colorectal, cervical, breast } | null — see parseCdssCancerRows / parseCdssCancerRowsFromJson
-    let cdssCancerCacheKey = "";      // patient key this cache belongs to
-    let cdssScrapeInFlight = false;   // de-dupe: guards against overlapping scrapes
-    let cdssScrapeInFlightKey = "";   // which patient key the in-flight scrape (if any) is for
-    let cdssScrapeInFlightPromise = null; // so a second caller (e.g. runAnalysis) can await the SAME in-flight scrape instead of missing it
-    let cdssScrapeAttemptedKey = "";  // a scrape was started (and finished, one way or another — done/failed/skipped) at least once for this key — lets the UI tell "never got a chance to check" apart from "checked, found nothing"
 
     const CDSS_HIDE_STYLE_ID = 'docproCdssHideCSS';
     const CDSS_HIDE_HTML_CLASS = 'docpro-cdss-scraping';
@@ -1635,10 +1598,9 @@ function __smartCoderReadVersion(fallback) {
     }
 
     // The 3 cancer-screening measures render as CDSS's "PopHealth" rows
-    // (td[data-column-key="alert"] etc.) under the default "All" tab, so
-    // no tab-switch is needed — plain CDSS/Practice-Configured/Registry
-    // rows have no data-column-key attribute at all, which is what tells
-    // the two apart.
+    // (td[data-column-key="alert"] etc.) under the default "All" tab —
+    // kept as a fallback for parseCdssCancerRowsFromJson, in case the JSON
+    // intercept above ever misses (a transport change on eCW's side).
     function parseCdssCancerRows(table) {
         const result = { colorectal: null, cervical: null, breast: null };
         const rows = table.querySelectorAll('tbody tr');
@@ -1658,21 +1620,20 @@ function __smartCoderReadVersion(fallback) {
             const isRed = !!statusCell?.querySelector('.icon-manred');
             result[key] = {
                 date: /^\d{2}\/\d{2}\/\d{4}$/.test(lastDoneText) ? lastDoneText : null,
-                // Red (Noncompliant) is never accepted no matter the date —
-                // only a genuinely green (Compliant) row counts.
-                compliant: isGreen && !isRed
+                compliant: isGreen && !isRed // only a genuinely green row ever counts
             };
         });
         return result;
     }
 
-    // Root cause of the earlier lag/visible-popup: this hid only elements
-    // matching guessed class names (.modal/.modal-backdrop). If eCW's CDSS
-    // dialog (or something it opens alongside it, e.g. a loading spinner)
-    // uses different markup, that guess misses it entirely and it flashes
-    // on screen. Fixed by hiding ANY new top-level node under <body> —
-    // whatever it's called — the instant it appears, via a MutationObserver
-    // plus inline styles (highest specificity, no selector to get wrong).
+    // Opens the CDSS modal invisibly, reads the cancer-screening rows, and
+    // closes it. Prefers the network-JSON intercept (fast — no need to
+    // wait for the table to render); falls back to scraping the DOM table
+    // if the JSON doesn't show up. Either way, closing is now WAIT-based,
+    // not immediate-and-hope: the 5.66 regression was closing the instant
+    // data arrived without confirming the close button actually existed
+    // yet, silently leaving the modal open when it didn't. Fixed by
+    // polling briefly for the close button before giving up on it.
     async function scrapeCdssCancerScreeningInvisibly() {
         const link = findCdssTopPanelLink();
         if (!link) return null;
@@ -1698,71 +1659,58 @@ function __smartCoderReadVersion(fallback) {
         const observer = new MutationObserver(hideNewBodyChildren);
         observer.observe(document.body, { childList: true });
 
-        // Started before we await anything, so both run concurrently — the
-        // DOM poll is a fallback safety net, not a fallback that only
-        // starts after the JSON path already failed.
-        const domPoll = pollUntilCancellable(() => {
-            hideNewBodyChildren(); // catch anything that shows up mid-wait
-            const t = document.getElementById('alertsMainTbl1');
-            // Wait for actual PopHealth rows, not just the empty table
-            // shell — their presence is the signal the alert data has
-            // actually arrived.
-            return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
-        }, 6000, 100);
-
+        let result = null;
         try {
             link.click();
             hideNewBodyChildren(); // in case the modal was inserted synchronously
 
-            // Primary path: the network JSON, which lands well before
-            // Angular finishes rendering the table — see the comment above
-            // parseCdssCancerRowsFromJson for why this is the actual fix
-            // for the reported lag, not just another reshuffle of it.
-            const json = await waitForInterceptedAlertData(key, 6000);
-            if (json) {
-                domPoll.cancel(); // no longer need the DOM fallback — stop it so it can't linger and re-hide unrelated UI later
-                return parseCdssCancerRowsFromJson(json);
-            }
+            const alreadyHave = key ? interceptedAlertJsonByKey.get(key) : null;
+            const json = alreadyHave || await waitForElement(() => {
+                hideNewBodyChildren();
+                const j = key ? interceptedAlertJsonByKey.get(key) : null;
+                return j || null;
+            }, 6000, 50);
 
-            // JSON intercept didn't land in time (unusual — would mean
-            // eCW served this over a transport our fetch/XHR patch isn't
-            // watching). Fall back to whatever the DOM poll — already
-            // running this whole time — finds.
-            const table = await domPoll.promise;
-            return table ? parseCdssCancerRows(table) : null;
+            if (json) {
+                result = parseCdssCancerRowsFromJson(json);
+            } else {
+                // JSON never showed up in time — fall back to the DOM table.
+                const table = await waitForElement(() => {
+                    hideNewBodyChildren();
+                    const t = document.getElementById('alertsMainTbl1');
+                    return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
+                }, 6000, 100);
+                result = table ? parseCdssCancerRows(table) : null;
+            }
         } catch {
-            return null;
+            result = null;
         } finally {
-            domPoll.cancel();
             observer.disconnect();
-            // Always try to close the modal, even if scraping failed/timed
-            // out, so nothing is left open.
-            const closeBtn = findCdssCloseButton();
-            if (closeBtn) closeBtn.click();
-            // Root cause of "CDSS tab becomes visible for some time": a
-            // FIXED 150ms wait here assumed Bootstrap's close transition
-            // (and Angular's own teardown) always finishes within 150ms.
-            // Under real load it doesn't always, and un-hiding while a
-            // node is still mid-close-animation (or hasn't been removed/
-            // ng-hide'd yet) let it flash on screen for the remainder of
-            // that animation. Instead, actually wait for each hidden node
-            // to either leave the DOM or pick up eCW's own hidden state
-            // (display:none/ng-hide), polling briefly rather than assuming
-            // a fixed duration, with a bounded max wait so a stuck modal
-            // can never hang this indefinitely.
-            const stillNeedsHiding = (node) => {
-                if (!node.isConnected) return false; // removed from DOM entirely
-                const cs = window.getComputedStyle(node);
-                return cs.display !== 'none'; // eCW's own hide mechanism has taken over
-            };
+            // Wait (briefly) for the close button to actually exist before
+            // giving up on clicking it — this is the fix for the modal
+            // being left open: the close button may not have rendered yet
+            // at the exact moment we got our data, especially now that the
+            // JSON path can resolve faster than the modal shell finishes.
+            const closeBtn = await waitForElement(findCdssCloseButton, 3000, 50);
+            if (closeBtn) {
+                closeBtn.click();
+            } else {
+                // Last-resort fallbacks so a real patient chart is never
+                // left with a stuck invisible modal sitting over it.
+                const anyClose = document.querySelector('.modal.in .close, .modal[style*="display: block"] .close');
+                if (anyClose) anyClose.click();
+                else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            }
+            // Wait for each hidden node to either leave the DOM or pick up
+            // eCW's own hidden state (display:none/ng-hide) before
+            // un-hiding — a fixed short wait here previously let a
+            // still-animating close flash on screen for whatever was left
+            // of the transition.
+            const stillNeedsHiding = (node) => node.isConnected && window.getComputedStyle(node).display !== 'none';
             const waitStart = Date.now();
             while (hiddenNodes.some(stillNeedsHiding) && Date.now() - waitStart < 2000) {
                 await new Promise(r => setTimeout(r, 50));
             }
-            // Restore anything still around (closeModal() normally removes
-            // these nodes from the DOM entirely, but if eCW instead just
-            // toggles a class on some of them, put those back exactly as
-            // found rather than leaving them permanently invisible).
             hiddenNodes.forEach(node => {
                 if (!node.isConnected) return;
                 node.style.removeProperty('visibility');
@@ -1771,216 +1719,50 @@ function __smartCoderReadVersion(fallback) {
             });
             document.documentElement.classList.remove(CDSS_HIDE_HTML_CLASS);
         }
+        return result;
     }
 
-    // 5.63: 5.62 made this on-demand-only, triggered from runAnalysis()
-    // (i.e. when "Analyze Codes" is clicked). That turned out to be a
-    // dead end reported back from real use: Analyze is only ever clicked
-    // from the Billing tab (the whole point of Analyze is to compare
-    // proposed codes against what's already on the billing grids), and
-    // CDSS's own modal isn't reachable once Billing's grids are up — so
-    // on-demand-at-Analyze-time was *always* too late, and CDSS silently
-    // never contributed to a single Analyze run.
-    //
-    // CDSS data is only reachable while still on the SOAP/chart view, and
-    // Analyze is only clickable from Billing — so by construction this
-    // has to be prefetched into cdssCancerCache *before* the user leaves
-    // the chart view, then simply read back (never re-fetched) once
-    // they're on Billing and click Analyze. There's no on-demand version
-    // of this that can work.
-    //
-    // Given that, the sustainable design is: keep it a one-shot-per-
-    // patient background prefetch (so it still runs invisibly while
-    // charting, same as 5.59-5.61), but give it two independent chances
-    // to start as early as possible, so a quick "open panel -> straight to
-    // Billing" doesn't outrun it:
-    //   1. primeCdssCancerScreeningCache(), called from checkAndUpdate
-    //      (same idle-deferred, once-per-patient scheduling as 5.61 —
-    //      never competes with the chart's own initial paint).
-    //   2. The SAME function called immediately (fire-and-forget, no
-    //      idle/delay) from openPanel() — opening Coding Snapshot is an
-    //      explicit signal the user is about to code this patient, so
-    //      that's worth starting right away rather than waiting for an
-    //      idle gap that may not come before they click into Billing.
-    // Both are no-ops if a scrape is already in flight or already cached
-    // for this patient, so there's never more than one real scrape per
-    // patient no matter how many times either fires.
-    //
-    // computeAnalysis() still only ever reads whatever's in the cache —
-    // if the user reaches Billing and clicks Analyze before either
-    // prefetch finished (or before either got a chance to run at all —
-    // e.g. history was still loading), CDSS just doesn't contribute to
-    // that Analyze run, exactly as before: it's additive-only and never
-    // required, so nothing breaks — it's a best-effort prefetch, not a
-    // blocking dependency.
-    let cdssScrapeScheduledForKey = "";
-
-    // 5.64: fixes a real bug found from live use — "colorectal took too
-    // long to show up in Analyze". Previously, if a background prefetch
-    // was already running when runAnalysis() made its own "last resort"
-    // call, that call saw cdssScrapeInFlight===true and just returned
-    // immediately (a plain no-op) INSTEAD of waiting for the already-
-    // running scrape to finish. So Analyze would proceed without CDSS
-    // data even though a scrape was seconds from completing — the user
-    // had to click Analyze again later to pick it up. Fixed by tracking
-    // the in-flight scrape's own promise (cdssScrapeInFlightPromise), so
-    // any caller — the original starter or a later one — awaits the
-    // SAME scrape instead of a second one racing or silently giving up.
-    function primeCdssCancerScreeningCache(immediate) {
+    // ONE simple rule: once patient-history finishes loading, start the
+    // CDSS check immediately, once per patient. Called from checkAndUpdate
+    // (the existing ~2.5s main loop) — no idle callbacks, no separate
+    // "immediate" trigger points, no promise-sharing. Never runs while
+    // Billing's grids are up (CDSS isn't reachable from there).
+    function maybeStartCdssAfterHistory() {
+        if (cdssScrapeInFlight) return;
         const historyApi = window.__ecwPatientHistory;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key || key === cdssCancerCacheKey || key === cdssTriggeredForKey) return;
+        if (historyApi.isLoading && historyApi.isLoading()) return; // wait for history to actually finish, then go — no earlier, no later
+        if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
 
-        // A scrape for this exact patient is already running — hand back
-        // that SAME promise so the caller actually waits for it instead of
-        // treating "already in flight" as "nothing to do here".
-        if (cdssScrapeInFlight && cdssScrapeInFlightKey === key && key) {
-            return cdssScrapeInFlightPromise;
-        }
-        if (cdssScrapeInFlight) return null; // in-flight for a *different* patient (stale) — don't interfere with it
-
-        // 5.67: NOT gated on historyApi.isLoading() any more. That gate was
-        // making CDSS wait for the ENTIRE patient-history fetch (which pools
-        // several encounter requests and can legitimately take a while) to
-        // finish before even starting its own single, now-lightweight JSON
-        // request — stacking two independent, unrelated waits back-to-back
-        // instead of letting them run side by side. currentPatientKey (what
-        // getCurrentKey() returns) is set the MOMENT history loading starts,
-        // not when it finishes — see loadPatientHistoryOnce — so there was
-        // never a real reason to wait for history to be done; CDSS doesn't
-        // read history data at all, only the patient key. Removing this
-        // gate lets the two run concurrently, which is most of "the
-        // waiting time is way too much longer" once history parsing itself
-        // takes any real time.
-        if (!key || key === cdssCancerCacheKey) return null;
-        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
-        if (hasBillingGrid) return null; // CDSS isn't reachable from Billing — only ever prime while still on the chart
-        if (cdssScrapeScheduledForKey === key && !immediate) return null; // already scheduled (idle timer pending) for this patient
-
-        const start = async () => {
-            // Re-check everything — time may have passed, and the user
-            // may have switched patients, opened Billing, etc. (Deliberately
-            // NOT re-checking isLoading() here either — see above.)
-            const stillKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-            if (stillKey !== key || key === cdssCancerCacheKey) return;
-            if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
-
-            cdssScrapeInFlight = true;
-            cdssScrapeInFlightKey = key;
-            try {
-                const result = await scrapeCdssCancerScreeningInvisibly();
-                const finalKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-                if (finalKey === key) {
-                    cdssCancerCache = result;
-                    cdssCancerCacheKey = key;
-                    // Real time-saver: if the coder already clicked Analyze
-                    // before this finished (so the panel is showing a
-                    // result computed without CDSS — cdssStatus wasn't
-                    // 'done'), silently recompute and refresh the panel now
-                    // that CDSS data just arrived, instead of leaving a
-                    // stale result sitting there until they think to click
-                    // Analyze a second time. No-ops harmlessly if the panel
-                    // isn't even open, or Analyze hasn't been run, or an
-                    // apply/re-analyze is already in progress.
-                    maybeAutoRefreshAnalysisAfterCdss(key);
-                }
-            } finally {
-                cdssScrapeAttemptedKey = key;
-                cdssScrapeInFlight = false;
-                cdssScrapeInFlightKey = "";
-                cdssScrapeInFlightPromise = null;
+        cdssTriggeredForKey = key;
+        cdssScrapeInFlight = true;
+        scrapeCdssCancerScreeningInvisibly().then(result => {
+            const finalKey = (historyApi.getCurrentKey && historyApi.getCurrentKey()) || '';
+            if (finalKey === key) {
+                cdssCancerCache = result;
+                cdssCancerCacheKey = key;
             }
-        };
-
-        cdssScrapeScheduledForKey = key;
-
-        if (immediate) {
-            // Explicit "I'm about to code this patient" signal (panel just
-            // opened, or runAnalysis's last-resort check) — start right
-            // away rather than waiting for idle, so a fast switch into
-            // Billing right after doesn't outrun it.
-            const p = start();
-            cdssScrapeInFlightPromise = p;
-            return p;
-        }
-
-        const runIdle = (fn) => {
-            if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 800 });
-            else setTimeout(fn, 150);
-        };
-        // A short fixed delay first so this never fires in the very same
-        // tick as a fresh chart/encounter load, then hop to an idle
-        // callback so it still yields to genuinely urgent chart work —
-        // but capped much tighter than before (was 2s fixed + up to 2s
-        // idle timeout = up to 4s of pure waiting before the read even
-        // started). That was needlessly conservative: a coder can
-        // realistically reach Billing and click Analyze within a few
-        // seconds of opening a chart, so waiting up to 4s before even
-        // starting was itself a big part of "took too long to show up".
-        // openPanel()'s immediate call remains the primary fast path;
-        // this is just the fallback for when Coding Snapshot is opened
-        // after CDSS should've already started, or never opened at all
-        // before Analyze (edge case caught by ensureCdssCancerScreeningForAnalysis).
-        setTimeout(() => runIdle(() => { cdssScrapeInFlightPromise = start(); }), 400);
-        return null; // background path: nothing to await synchronously — status is exposed via getCdssCancerScreeningStatus()
+        }).finally(() => {
+            cdssScrapeInFlight = false;
+        });
     }
 
     // Exposes what's going on with the CDSS cancer-screening check for the
-    // CURRENT patient, so the UI (renderAnalysisSection) can tell the coder
-    // outright whether cancer-screening compliance was actually considered
-    // in a given Analyze run — instead of an empty "Nothing to add" for
-    // cancer-screening codes reading as "nothing needed" when it might
-    // really mean "CDSS hadn't been read yet". Returns one of:
-    //   'done'      — cache is populated for this patient; CDSS was checked
-    //   'checking'  — a scrape for this patient is running right now
-    //   'unreachable' — Billing's grids are up and CDSS was never reached
-    //                   for this patient (no chart-view visit happened, or
-    //                   didn't last long enough to prefetch)
-    //   'pending'   — not yet attempted, but still reachable (still on the
-    //                   chart view; e.g. the idle-deferred prefetch hasn't
-    //                   fired yet)
+    // CURRENT patient, so the UI (renderAnalysisSection) can tell the
+    // coder outright whether cancer-screening compliance was actually
+    // considered in a given Analyze run — an empty "Nothing to add" for
+    // cancer-screening codes looks identical whether CDSS genuinely shows
+    // nothing due, or CDSS just hadn't been read yet.
     function getCdssCancerScreeningStatus() {
         const historyApi = window.__ecwPatientHistory;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
         if (!key) return 'pending';
         if (key === cdssCancerCacheKey) return 'done';
-        if (cdssScrapeInFlight && cdssScrapeInFlightKey === key) return 'checking';
+        if (cdssScrapeInFlight && cdssTriggeredForKey === key) return 'checking';
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (hasBillingGrid) return 'unreachable';
-        return 'pending';
-    }
-
-    // Last-resort attempt from runAnalysis(): if CDSS is still 'pending' or
-    // 'checking' for this patient, this either starts it (pending, and
-    // we're still on the chart view where it's reachable) or awaits the
-    // already-running scrape (checking) — see the promise-sharing fix
-    // above. Normally a fast no-op: the background prefetch (checkAndUpdate
-    // / openPanel) has almost always already finished by the time Analyze
-    // is clicked.
-    async function ensureCdssCancerScreeningForAnalysis() {
-        await primeCdssCancerScreeningCache(true);
-    }
-
-    // 5.65: a real time-saver rather than just a status label. If the
-    // coder already clicked Analyze before CDSS finished (the panel shows
-    // a result with cdssStatus !== 'done'), don't make them notice that
-    // and click Analyze again — the moment CDSS data actually lands, quietly
-    // recompute and refresh the panel in place. Guarded so it never fights
-    // an apply in progress, a fresh manual Analyze already running, or a
-    // patient switch that happened in between.
-    function maybeAutoRefreshAnalysisAfterCdss(key) {
-        if (!analysisState || analysisState.error) return;
-        if (analysisState.cdssStatus === 'done') return; // this result already had CDSS — nothing stale to fix
-        if (analysisRunning || actionRunning) return; // don't step on an in-progress Analyze/Apply
-        const historyApi = window.__ecwPatientHistory;
-        const currentKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-        if (currentKey !== key) return; // user has moved on to a different patient — stale, don't touch their screen
-        try {
-            analysisState = computeAnalysis();
-        } catch (err) {
-            console.error('[Getwell SmartCoder] auto-refresh after CDSS failed (non-fatal):', err);
-            return; // leave the existing (pre-CDSS) analysisState showing rather than replace it with nothing
-        }
-        renderSnapshotBlock();
+        return 'pending'; // still on the chart view, history not done loading yet
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
@@ -3287,7 +3069,7 @@ function __smartCoderReadVersion(fallback) {
 
             // ---- Also check CDSS (PopHealth) cancer-screening measures ----
             // Same 3 codes, same time windows — but sourced from eCW's own
-            // CDSS compliance data (see primeCdssCancerScreeningCache,
+            // CDSS compliance data (see maybeStartCdssAfterHistory,
             // invisible background prefetch) instead of the chart's HEALTH
             // PROMOTION section above. Only a cache already populated for
             // THIS patient is used. A Noncompliant (red) row is never
@@ -6557,22 +6339,12 @@ function __smartCoderReadVersion(fallback) {
         if (analysisRunning || actionRunning) return;
         analysisRunning = true;
         renderSnapshotBlock();
-        setTimeout(async () => {
-            try {
-                // Normally a no-op: CDSS was already prefetched in the
-                // background while the user was still on the chart (see
-                // primeCdssCancerScreeningCache, called from checkAndUpdate
-                // and openPanel). This is just a last-resort safety net for
-                // the edge case where Analyze gets clicked before that
-                // finished (or before it got a chance to run) and we're
-                // still on the SOAP view — see ensureCdssCancerScreeningForAnalysis.
-                // If it isn't reachable (e.g. already on Billing) or times
-                // out, computeAnalysis just proceeds without it exactly as
-                // before — CDSS is additive-only, never required.
-                await ensureCdssCancerScreeningForAnalysis();
-            } catch (err) {
-                console.error('[Getwell SmartCoder] CDSS cancer-screening read failed (non-fatal):', err);
-            }
+        setTimeout(() => {
+            // CDSS cancer-screening data (if any) comes from whatever
+            // maybeStartCdssAfterHistory already cached in the background
+            // — see that function's comment. computeAnalysis just reads
+            // the cache as-is; if it's not there yet, this Analyze run
+            // simply proceeds without it (additive-only, never required).
             try {
                 analysisState = computeAnalysis();
             } catch (err) {
@@ -7203,13 +6975,6 @@ function __smartCoderReadVersion(fallback) {
         actionRunning = false;
         panel.style.display = 'block';
         renderSnapshotBlock();
-        // Explicit "about to code this patient" signal — give the CDSS
-        // prefetch an immediate head start (instead of waiting for the
-        // idle-deferred background attempt in checkAndUpdate) since the
-        // user is likely to switch into Billing and click Analyze soon,
-        // and CDSS can only be read while still on this (chart) view.
-        // Fire-and-forget: no-ops instantly if already cached/in-flight.
-        primeCdssCancerScreeningCache(true);
     }
 
     function closePanelToTab() {
@@ -7234,15 +6999,11 @@ function __smartCoderReadVersion(fallback) {
         if (onChart) {
             if (!isPanelOpen()) showTab();
             if (isPanelOpen()) renderSnapshotBlock();
-            // Fire-and-forget: internally schedules/no-ops on its own
-            // (new patient? history done? not already on Billing? already
-            // cached/in-flight?). Idle-deferred so it never competes with
-            // the chart's own initial paint — see primeCdssCancerScreeningCache.
-            // CDSS is only reachable from here (the SOAP/chart view), never
-            // from Billing, which is why this has to stay a background
-            // prefetch rather than something triggered at Analyze time —
-            // see the comment above primeCdssCancerScreeningCache for why.
-            primeCdssCancerScreeningCache(false);
+            // Single rule: once history is done loading, start CDSS. See
+            // maybeStartCdssAfterHistory's comment for why this has to be
+            // a background prefetch (CDSS isn't reachable once Billing is
+            // up, which is where Analyze gets clicked from).
+            maybeStartCdssAfterHistory();
         } else {
             hideTab();
             if (panel) panel.style.display = 'none';
