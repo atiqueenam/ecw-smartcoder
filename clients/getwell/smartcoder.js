@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.59
+// @name         Getwell SmartCoder by ATQ v5.61
 // @namespace    http://tampermonkey.net/
-// @version      5.59
+// @version      5.61
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,33 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.61 (2026-08-25) - Re-enabled the automatic CDSS invisible-scrape
+//   trigger (disabled in 5.60) with an actual fix instead of leaving it
+//   off: the old hiding mechanism only hid elements matching guessed
+//   class names (.modal/.modal-backdrop) — if eCW's CDSS dialog (or
+//   something it opens alongside it, e.g. a loading spinner) uses
+//   different markup, that guess misses it and it flashes on screen,
+//   which is what "popup is showing" was. scrapeCdssCancerScreeningInvisibly()
+//   now hides ANY new top-level node under <body> the instant it
+//   appears — via a MutationObserver plus inline styles, so it doesn't
+//   depend on knowing eCW's exact class names — and restores whatever's
+//   still around afterward instead of assuming closeModal() removed it.
+//   Separately, maybeScrapeCdssCancerScreening() now waits 2s then hops
+//   to requestIdleCallback before actually opening the modal, so this
+//   heavy one-time-per-patient render never competes with the chart's
+//   own initial paint — that overlap was the "everything so laggy" part.
+//   Still runs at most once per patient, never while Billing is open.
+// 5.60 (2026-08-25) - HOTFIX: disabled the automatic CDSS invisible-scrape
+//   trigger added in 5.59 (maybeScrapeCdssCancerScreening() call in
+//   checkAndUpdate) — it was making the chart noticeably laggy and a
+//   popup was showing through, meaning the CSS-hide wasn't fully
+//   containing whatever eCW opens alongside the CDSS modal. The scraping
+//   code itself is left in place (unused for now) rather than ripped
+//   out, so it can be root-caused and re-enabled properly instead of
+//   rebuilt from scratch. computeAnalysis's CDSS check is now always a
+//   no-op (cache never populates) — cancer screening from the chart's
+//   own HEALTH PROMOTION section is unaffected and still works exactly
+//   as before 5.59.
 // 5.59 (2026-08-25) - NEW RULE: cancer screening (colorectal/breast/
 //   cervical) now also checks eCW's own CDSS "PopHealth" HEDIS measures,
 //   not just the chart's HEALTH PROMOTION AND DISEASE PREVENTION section.
@@ -1316,35 +1343,69 @@ function __smartCoderReadVersion(fallback) {
         return result;
     }
 
+    // Root cause of the earlier lag/visible-popup: this hid only elements
+    // matching guessed class names (.modal/.modal-backdrop). If eCW's CDSS
+    // dialog (or something it opens alongside it, e.g. a loading spinner)
+    // uses different markup, that guess misses it entirely and it flashes
+    // on screen. Fixed by hiding ANY new top-level node under <body> —
+    // whatever it's called — the instant it appears, via a MutationObserver
+    // plus inline styles (highest specificity, no selector to get wrong).
     async function scrapeCdssCancerScreeningInvisibly() {
         const link = findCdssTopPanelLink();
         if (!link) return null;
 
+        const preExistingBodyChildren = new Set(Array.from(document.body.children));
+        const hiddenNodes = [];
+        function hideNewBodyChildren() {
+            Array.from(document.body.children).forEach(node => {
+                if (preExistingBodyChildren.has(node) || hiddenNodes.includes(node)) return;
+                node.style.setProperty('visibility', 'hidden', 'important');
+                node.style.setProperty('opacity', '0', 'important');
+                node.style.setProperty('pointer-events', 'none', 'important');
+                hiddenNodes.push(node);
+            });
+        }
+        // Belt-and-suspenders: also keep the old class-based CSS rule in
+        // case something CDSS opens isn't a direct child of <body>.
         ensureCdssHideStyle();
         document.documentElement.classList.add(CDSS_HIDE_HTML_CLASS);
+        const observer = new MutationObserver(hideNewBodyChildren);
+        observer.observe(document.body, { childList: true });
+
         try {
             link.click();
+            hideNewBodyChildren(); // in case the modal was inserted synchronously
 
             const table = await waitForElement(() => {
+                hideNewBodyChildren(); // catch anything that shows up mid-wait
                 const t = document.getElementById('alertsMainTbl1');
                 // Wait for actual PopHealth rows, not just the empty table
                 // shell — their presence is the signal the alert data has
                 // actually arrived.
                 return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
-            }, 8000);
+            }, 6000);
 
             return table ? parseCdssCancerRows(table) : null;
         } catch {
             return null;
         } finally {
-            // Always try to close the modal and remove the hiding flag,
-            // even if scraping failed/timed out, so nothing is left open
-            // or hidden indefinitely.
+            observer.disconnect();
+            // Always try to close the modal, even if scraping failed/timed
+            // out, so nothing is left open.
             const closeBtn = findCdssCloseButton();
             if (closeBtn) closeBtn.click();
             // Give Angular a tick to process the close before un-hiding —
             // so a closing transition never gets a chance to flash.
             await new Promise(r => setTimeout(r, 150));
+            // Restore anything still around (closeModal() normally removes
+            // these nodes from the DOM entirely, but if eCW instead just
+            // toggles a class on some of them, put those back exactly as
+            // found rather than leaving them permanently invisible).
+            hiddenNodes.forEach(node => {
+                node.style.removeProperty('visibility');
+                node.style.removeProperty('opacity');
+                node.style.removeProperty('pointer-events');
+            });
             document.documentElement.classList.remove(CDSS_HIDE_HTML_CLASS);
         }
     }
@@ -1355,7 +1416,12 @@ function __smartCoderReadVersion(fallback) {
     // loading has finished (same "wait for history" rule the Preventive
     // quick action uses elsewhere in this file) — matches "after the page
     // loads completely and history loading is done, read CDSS
-    // automatically."
+    // automatically." Waits a couple seconds past that point (via
+    // requestIdleCallback where available) so this heavy one-time-per-
+    // patient render never competes with the chart's own initial paint —
+    // that overlap was a big part of the lag reported against the first
+    // version of this feature.
+    let cdssScrapeScheduledForKey = "";
     async function maybeScrapeCdssCancerScreening() {
         if (cdssScrapeInFlight) return;
         const historyApi = window.__ecwPatientHistory;
@@ -1364,20 +1430,37 @@ function __smartCoderReadVersion(fallback) {
         if (!key || key === cdssCancerCacheKey) return;
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (hasBillingGrid) return;
+        if (cdssScrapeScheduledForKey === key) return; // already scheduled/running for this patient
+        cdssScrapeScheduledForKey = key;
 
-        cdssScrapeInFlight = true;
-        try {
-            const result = await scrapeCdssCancerScreeningInvisibly();
-            // Only commit if still on the same patient — they may have
-            // switched charts while the scrape was in flight.
-            const stillSameKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-            if (stillSameKey === key) {
-                cdssCancerCache = result;
-                cdssCancerCacheKey = key;
+        const runIdle = (fn) => {
+            if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 2000 });
+            else setTimeout(fn, 300);
+        };
+        // Small fixed delay first so this never fires in the same tick as
+        // a fresh chart/encounter load, then hop to an idle callback so it
+        // waits for a genuine gap in whatever eCW/Angular is doing.
+        setTimeout(() => runIdle(async () => {
+            // Re-check everything — several seconds may have passed, and
+            // the user may have switched patients, opened Billing, etc.
+            if (cdssScrapeInFlight) return;
+            if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
+            const stillKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+            if (stillKey !== key || key === cdssCancerCacheKey) return;
+            if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
+
+            cdssScrapeInFlight = true;
+            try {
+                const result = await scrapeCdssCancerScreeningInvisibly();
+                const finalKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+                if (finalKey === key) {
+                    cdssCancerCache = result;
+                    cdssCancerCacheKey = key;
+                }
+            } finally {
+                cdssScrapeInFlight = false;
             }
-        } finally {
-            cdssScrapeInFlight = false;
-        }
+        }), 2000);
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
@@ -6560,9 +6643,13 @@ function __smartCoderReadVersion(fallback) {
         if (onChart) {
             if (!isPanelOpen()) showTab();
             if (isPanelOpen()) renderSnapshotBlock();
-            // Fire-and-forget: internally no-ops unless this is a new
-            // patient, history has finished loading, and we're not already
-            // on the Billing tab. See maybeScrapeCdssCancerScreening.
+            // Fire-and-forget: internally schedules/no-ops on its own
+            // (new patient? history done? not already on Billing?). See
+            // maybeScrapeCdssCancerScreening — re-enabled in 5.61 with a
+            // body-mutation-based hide (catches anything eCW opens,
+            // regardless of its class names) and a delayed/idle-callback
+            // start so it never competes with the chart's own initial
+            // render, fixing the lag/visible-popup from 5.59.
             maybeScrapeCdssCancerScreening();
         } else {
             hideTab();
