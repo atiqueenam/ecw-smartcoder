@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.70
+// @name         Getwell SmartCoder by ATQ v5.71
 // @namespace    http://tampermonkey.net/
-// @version      5.70
+// @version      5.71
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,23 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.71 (2026-08-25) - "CDSS opening/closing still visibly flashes on
+//   screen, must never be seen." Root cause: the hiding logic only hid
+//   elements matching guessed selectors/positions — CSS targeting
+//   .modal/.modal-backdrop, plus a MutationObserver that only hid new
+//   *direct children of document.body*. eCW's actual CDSS dialog markup
+//   is custom (IDs like alertsMainTbl1, not Bootstrap classes) and there
+//   was no guarantee it's a direct body child either, so either
+//   assumption failing let a real flash through on a live patient chart.
+//   Fix: hide the ENTIRE page instead of guessing at the dialog's markup.
+//   The docpro-cdss-scraping class now sets visibility:hidden directly on
+//   <html>; visibility is inherited by every descendant regardless of
+//   its class name or where it's mounted, so nothing on the page can be
+//   visible for the whole scrape, guaranteed. This also let us delete the
+//   per-node hideNewBodyChildren()/MutationObserver/stillNeedsHiding-
+//   polling logic entirely (no longer needed once the whole page is
+//   hidden) in favor of one fixed short wait before revealing the page
+//   again — less code, more reliable.
 // 5.70 (2026-08-25) - "The extension is continuously looking for something
 //   every 2/3 seconds, making everything laggy" — found two real,
 //   general-purpose sources of that, unrelated to CDSS this time:
@@ -1600,15 +1617,19 @@ function __smartCoderReadVersion(fallback) {
         if (document.getElementById(CDSS_HIDE_STYLE_ID)) return;
         const style = document.createElement('style');
         style.id = CDSS_HIDE_STYLE_ID;
-        // visibility/opacity (never display:none) so eCW/Angular still lays
-        // out and populates the modal exactly as normal — it just never
-        // becomes visible or clickable to the person using the chart.
+        // Hide the WHOLE page (via <html>), not just guessed-at selectors
+        // like .modal/.modal-backdrop. eCW's CDSS dialog markup is custom
+        // (IDs like alertsMainTbl1, not Bootstrap classes) and may not be
+        // a direct child of <body> either, so any selector- or
+        // node-tracking approach can miss it and let a flash through.
+        // visibility is inherited by every descendant regardless of its
+        // class name or where it's mounted, so this is markup-agnostic and
+        // guaranteed to hide anything eCW inserts. visibility (never
+        // display:none) still lets Angular lay out/measure/populate the
+        // modal normally, and .click() still fires on hidden elements.
         style.textContent = `
-            html.${CDSS_HIDE_HTML_CLASS} .modal,
-            html.${CDSS_HIDE_HTML_CLASS} .modal-backdrop {
+            html.${CDSS_HIDE_HTML_CLASS} {
                 visibility: hidden !important;
-                opacity: 0 !important;
-                pointer-events: none !important;
             }
         `;
         document.head.appendChild(style);
@@ -1656,11 +1677,21 @@ function __smartCoderReadVersion(fallback) {
     // Opens the CDSS modal invisibly, reads the cancer-screening rows, and
     // closes it. Prefers the network-JSON intercept (fast — no need to
     // wait for the table to render); falls back to scraping the DOM table
-    // if the JSON doesn't show up. Either way, closing is now WAIT-based,
-    // not immediate-and-hope: the 5.66 regression was closing the instant
-    // data arrived without confirming the close button actually existed
-    // yet, silently leaving the modal open when it didn't. Fixed by
-    // polling briefly for the close button before giving up on it.
+    // if the JSON doesn't show up. Closing is WAIT-based, not
+    // immediate-and-hope: the 5.66 regression was closing the instant data
+    // arrived without confirming the close button actually existed yet,
+    // silently leaving the modal open when it didn't. Fixed by polling
+    // briefly for the close button before giving up on it.
+    //
+    // Hiding itself is done by making the *entire page* (<html>)
+    // visibility:hidden for the whole scrape, instead of tracking/hiding
+    // individual nodes. Per-node tracking (previous versions) assumed the
+    // dialog was a direct child of <body> using known class names
+    // (.modal/.modal-backdrop) — eCW's actual CDSS markup doesn't
+    // necessarily match either assumption, which is exactly how open/close
+    // kept flashing on screen. visibility:hidden on <html> is inherited by
+    // every descendant no matter its class or where it's mounted, so
+    // nothing can ever be visible during the scrape, guaranteed.
     async function scrapeCdssCancerScreeningInvisibly() {
         const link = findCdssTopPanelLink();
         if (!link) return null;
@@ -1668,32 +1699,15 @@ function __smartCoderReadVersion(fallback) {
         const historyApi = window.__ecwPatientHistory;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
 
-        const preExistingBodyChildren = new Set(Array.from(document.body.children));
-        const hiddenNodes = [];
-        function hideNewBodyChildren() {
-            Array.from(document.body.children).forEach(node => {
-                if (preExistingBodyChildren.has(node) || hiddenNodes.includes(node)) return;
-                node.style.setProperty('visibility', 'hidden', 'important');
-                node.style.setProperty('opacity', '0', 'important');
-                node.style.setProperty('pointer-events', 'none', 'important');
-                hiddenNodes.push(node);
-            });
-        }
-        // Belt-and-suspenders: also keep the old class-based CSS rule in
-        // case something CDSS opens isn't a direct child of <body>.
         ensureCdssHideStyle();
         document.documentElement.classList.add(CDSS_HIDE_HTML_CLASS);
-        const observer = new MutationObserver(hideNewBodyChildren);
-        observer.observe(document.body, { childList: true });
 
         let result = null;
         try {
             link.click();
-            hideNewBodyChildren(); // in case the modal was inserted synchronously
 
             const alreadyHave = key ? interceptedAlertJsonByKey.get(key) : null;
             const json = alreadyHave || await waitForElement(() => {
-                hideNewBodyChildren();
                 const j = key ? interceptedAlertJsonByKey.get(key) : null;
                 return j || null;
             }, 6000, 50);
@@ -1703,7 +1717,6 @@ function __smartCoderReadVersion(fallback) {
             } else {
                 // JSON never showed up in time — fall back to the DOM table.
                 const table = await waitForElement(() => {
-                    hideNewBodyChildren();
                     const t = document.getElementById('alertsMainTbl1');
                     return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
                 }, 6000, 100);
@@ -1712,7 +1725,6 @@ function __smartCoderReadVersion(fallback) {
         } catch {
             result = null;
         } finally {
-            observer.disconnect();
             // Wait (briefly) for the close button to actually exist before
             // giving up on clicking it — this is the fix for the modal
             // being left open: the close button may not have rendered yet
@@ -1728,22 +1740,10 @@ function __smartCoderReadVersion(fallback) {
                 if (anyClose) anyClose.click();
                 else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
             }
-            // Wait for each hidden node to either leave the DOM or pick up
-            // eCW's own hidden state (display:none/ng-hide) before
-            // un-hiding — a fixed short wait here previously let a
-            // still-animating close flash on screen for whatever was left
-            // of the transition.
-            const stillNeedsHiding = (node) => node.isConnected && window.getComputedStyle(node).display !== 'none';
-            const waitStart = Date.now();
-            while (hiddenNodes.some(stillNeedsHiding) && Date.now() - waitStart < 2000) {
-                await new Promise(r => setTimeout(r, 50));
-            }
-            hiddenNodes.forEach(node => {
-                if (!node.isConnected) return;
-                node.style.removeProperty('visibility');
-                node.style.removeProperty('opacity');
-                node.style.removeProperty('pointer-events');
-            });
+            // Give the close animation/removal a brief moment to finish
+            // while the page is still hidden, then reveal it again. Nothing
+            // can flash during this wait — the whole page is invisible.
+            await new Promise(r => setTimeout(r, 150));
             document.documentElement.classList.remove(CDSS_HIDE_HTML_CLASS);
         }
         return result;
