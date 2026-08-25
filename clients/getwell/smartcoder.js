@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.56
+// @name         Getwell SmartCoder by ATQ v5.58
 // @namespace    http://tampermonkey.net/
-// @version      5.56
+// @version      5.58
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,22 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.58 (2026-08-25) - BUG FIX: isGetwellCommercialInsurance() missed "The
+//   Empire Plan" (and any Empire-branded name prefixed with "The ") because
+//   the "^empire" check requires the name to start with "empire" — "The
+//   Empire Plan" starts with "the", so it fell through and was never
+//   treated as commercial. Now strips a leading "the " before the checks
+//   run, so "The Empire Plan" matches the same as "Empire Plan"/"Empire
+//   BCBS". Verified: "The Empire Plan", "Empire Plan", "The Empire Plan -
+//   PPO" all now return true.
+// 5.57 (2026-08-25) - FIX: 99214 reuse gap was effectively 15 days (blocked
+//   a prior 99214 used exactly 15 days ago), while the Getwell rule is a
+//   14-day gap — once 14 days have passed since the last 99214, it can be
+//   billed again. was99214UsedWithinDays() is now called with 13 (blocks
+//   diffDays 0-13, allows 14+) instead of 15. Confirmed the Empire Plan /
+//   Empire BCBS commercial-insurance office-visit gating already applies
+//   here via isGetwellCommercialInsurance()'s "^empire" and
+//   "empire"+"bcbs" checks — no change needed there.
 // 5.56 (2026-08-20) - BUG FIX: isGetwellCommercialInsurance() missed
 //   "Other Blue Plans Empire BCBS - N" (and similar "Other Blue Plans
 //   ... Empire BCBS" variants) — it doesn't start with "Empire" or
@@ -1392,14 +1408,19 @@ function __smartCoderReadVersion(fallback) {
         const name = insurance.trim().toLowerCase()
             .replace(/[.,]/g, '')
             .replace(/[\s-]+/g, ' ')
-            .trim();
+            .trim()
+            // Strip a leading "the " so "The Empire Plan" is matched the
+            // same as "Empire Plan" / "Empire BCBS" below — without this,
+            // the "^empire" check never fires for "The Empire Plan" since
+            // the name starts with "the", not "empire".
+            .replace(/^the\s+/, '');
         if (/^aetna\b/.test(name)) return true;
         if (/^cigna\b/.test(name)) return true;
         if (/^bcbs\b/.test(name)) return true;
         // Covers "Blue Cross Blue Shield", "Blue Cross Blue Shield of NY",
         // "Blue Cross of California", etc. — anything starting "Blue Cross".
         if (/^blue\s+cross\b/.test(name)) return true;
-        if (/^empire\b/.test(name)) return true; // Empire BCBS and similar Empire-branded plans
+        if (/^empire\b/.test(name)) return true; // Empire BCBS, Empire Plan, The Empire Plan, and similar Empire-branded plans
         // "Other Blue Plans Empire BCBS - N" (and similar "Other Blue
         // Plans ... Empire BCBS" variants) — an Empire-branded BCBS plan
         // that doesn't start with "Empire" or "Blue Cross", so it's missed
@@ -3435,8 +3456,11 @@ function __smartCoderReadVersion(fallback) {
         if (!normalPathEligible && !threeChronicPathEligible) return '99213';
 
         // Otherwise eligible for 99214 — but not if it was already used
-        // within the past 30 days; downgrade to 99213 instead.
-        if (was99214UsedWithinDays(getCurrentDosDate(), 15)) return '99213';
+        // too recently. Getwell rule: a 14-day gap since the prior 99214
+        // is enough to bill it again, so only block when the prior 99214
+        // fell within the last 13 days (diffDays 0-13); a diffDays of 14+
+        // is allowed. Downgrade to 99213 when blocked.
+        if (was99214UsedWithinDays(getCurrentDosDate(), 13)) return '99213';
         return '99214';
     }
 
