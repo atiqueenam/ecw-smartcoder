@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.68
+// @name         Getwell SmartCoder by ATQ v5.70
 // @namespace    http://tampermonkey.net/
-// @version      5.68
+// @version      5.70
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,32 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.70 (2026-08-25) - "The extension is continuously looking for something
+//   every 2/3 seconds, making everything laggy" — found two real,
+//   general-purpose sources of that, unrelated to CDSS this time:
+//   1) isPatientChart() ran document.body.innerText on EVERY 2.5s
+//      checkAndUpdate tick, for as long as the user was anywhere on a
+//      chart page (which is most of the time this extension runs at
+//      all). .innerText forces the browser to fully compute page layout
+//      — a genuinely expensive synchronous operation — so this was a
+//      real, periodic layout-thrash on a timer. Fixed: skip it entirely
+//      while on the Billing tab (no SOAP text exists there anyway, so it
+//      was never actually needed to answer "are we on the chart" in that
+//      case); on the SOAP view, throttled to at most once every 8s
+//      instead of every 2.5s tick, trusting the cached result in between
+//      (a fresh scan still happens immediately on switching patients).
+//   2) renderSnapshotBlock() rebuilt the whole panel's innerHTML from
+//      scratch on every tick, even when the generated markup was
+//      byte-for-byte identical to what was already on screen — forcing
+//      an unnecessary re-parse/re-layout of the panel each time. Now
+//      skips the DOM write entirely when nothing actually changed.
+// 5.69 (2026-08-25) - The CDSS status badge (5.67) spelled its message out
+//   as a full sentence, which wrapped to 2-3 lines in the panel's narrow
+//   width and ate a large chunk of the limited vertical space above "TO
+//   ADD"/"TO REMOVE". Cut down to a short single-line badge ("✓ CDSS
+//   checked", "⚠ CDSS not checked (chart-only result)", etc.) with tighter
+//   padding/line-height; the full explanation moved into a title=""
+//   tooltip (hover to see it) instead of being permanently on-screen.
 // 5.68 (2026-08-25) - Reported from live use: 5.66/5.67 sometimes left the
 //   CDSS modal open on screen, plus the trigger machinery had grown too
 //   complex to trust ("increased code lines a lot but didn't do any
@@ -931,6 +957,7 @@ function __smartCoderReadVersion(fallback) {
     const PANEL_POS_KEY = 'ecs_panel_pos';
 
     // ---- Auto-coding analysis state ----
+    let lastRenderedSnapshotHtml = null; // memoized panel HTML — see renderSnapshotBlock; skips the DOM rewrite when nothing changed
     let analysisState = null;   // { toAdd:[{code,reason}], toDelete:[{code,row,reason}] }
     let analysisRunning = false;
     let actionRunning = false;
@@ -1135,15 +1162,15 @@ function __smartCoderReadVersion(fallback) {
            tinted banner consistent with the rest of the panel's rounded/
            padded components (buttons, diff rows). */
         .ecs-cdss-badge {
-            display: flex; align-items: flex-start; gap: 6px;
-            margin-top: 8px; padding: 6px 8px; border-radius: 7px;
-            font-size: 10.5px; font-weight: 600; line-height: 1.45;
+            display: flex; align-items: center; gap: 4px;
+            margin-top: 4px; padding: 2px 6px; border-radius: 5px;
+            font-size: 9.5px; font-weight: 600; line-height: 1.35;
         }
         .ecs-cdss-badge .ecs-cdss-icon { flex: 0 0 auto; }
         .ecs-cdss-badge--done { background: #ecfdf5; color: #047857; }
         .ecs-cdss-badge--checking { background: #fffbeb; color: #92400e; }
-        .ecs-cdss-badge--warn { background: #fef2f2; color: #b91c1c; }
-        .ecs-cdss-badge-inline { margin-top: 6px; padding: 4px 8px; font-size: 10px; font-weight: 700; }
+        .ecs-cdss-badge--warn { background: #fef2f2; color: #b91c1c; align-items: flex-start; padding: 3px 6px; }
+        .ecs-cdss-badge-inline { margin-top: 4px; }
         .ecs-log-row { font-size: 11px; padding: 2px 0; color: #334155; }
         .ecs-spinner-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #475569; }
         .ecs-mini-spin {
@@ -6515,20 +6542,24 @@ function __smartCoderReadVersion(fallback) {
     // (and wrongly) conclude no cancer screening is needed, then go apply
     // codes from Billing without it. This makes that distinction explicit
     // instead of silent.
+    // Kept as short single-line badges (full explanation lives in the
+    // title="" tooltip, not inline) — an earlier version spelled the whole
+    // sentence out in the panel itself and wrapped to 2-3 lines, eating a
+    // large chunk of the panel's limited vertical space.
     function cdssStatusBannerHtml(status) {
         if (status === 'done') {
-            return `<div class="ecs-cdss-badge ecs-cdss-badge--done"><span class="ecs-cdss-icon">✓</span><span>CDSS cancer-screening check included in this result</span></div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--done" title="CDSS cancer-screening compliance was checked and is reflected in this result."><span class="ecs-cdss-icon">✓</span><span>CDSS checked</span></div>`;
         }
         if (status === 'checking') {
-            return `<div class="ecs-cdss-badge ecs-cdss-badge--checking"><span class="ecs-cdss-icon">⏳</span><span>CDSS cancer-screening check is still running — this result may not include it yet. Click Analyze again in a few seconds to pick it up.</span></div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--checking" title="CDSS cancer-screening check is still running and may not be reflected yet — re-Analyze in a few seconds to pick it up."><span class="ecs-cdss-icon">⏳</span><span>CDSS checking… re-Analyze shortly</span></div>`;
         }
         if (status === 'unreachable') {
-            return `<div class="ecs-cdss-badge ecs-cdss-badge--warn"><span class="ecs-cdss-icon">⚠</span><span>CDSS cancer-screening was NOT checked for this patient (only reachable from the chart view, not Billing) — this result reflects the chart's HEALTH PROMOTION section only. Reopen this patient's chart tab briefly, then re-Analyze, to include CDSS.</span></div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--warn" title="CDSS isn't reachable from Billing, so it was never checked for this patient — this result reflects the chart's HEALTH PROMOTION section only. Revisit this patient's chart tab, then re-Analyze, to include CDSS."><span class="ecs-cdss-icon">⚠</span><span>CDSS not checked (chart-only result)</span></div>`;
         }
         // 'pending' — reachable but never attempted yet (e.g. Coding
         // Snapshot was opened and Analyze clicked immediately, before the
         // background prefetch had a chance to run at all).
-        return `<div class="ecs-cdss-badge ecs-cdss-badge--checking"><span class="ecs-cdss-icon">⚠</span><span>CDSS cancer-screening has not been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it.</span></div>`;
+        return `<div class="ecs-cdss-badge ecs-cdss-badge--checking" title="CDSS cancer-screening hasn't been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it."><span class="ecs-cdss-icon">⚠</span><span>CDSS not checked yet — re-Analyze shortly</span></div>`;
     }
 
     function renderAnalysisSection() {
@@ -6597,8 +6628,8 @@ function __smartCoderReadVersion(fallback) {
         // there's visibility into it even before the coder clicks Analyze.
         const idleCdssHint = (() => {
             const status = getCdssCancerScreeningStatus();
-            if (status === 'done') return `<div class="ecs-cdss-badge ecs-cdss-badge--done ecs-cdss-badge-inline"><span class="ecs-cdss-icon">✓</span><span>CDSS cancer-screening data ready</span></div>`;
-            if (status === 'checking') return `<div class="ecs-cdss-badge ecs-cdss-badge--checking ecs-cdss-badge-inline"><span class="ecs-cdss-icon">⏳</span><span>Reading CDSS cancer-screening data…</span></div>`;
+            if (status === 'done') return `<div class="ecs-cdss-badge ecs-cdss-badge--done ecs-cdss-badge-inline" title="CDSS cancer-screening data is ready."><span class="ecs-cdss-icon">✓</span><span>CDSS ready</span></div>`;
+            if (status === 'checking') return `<div class="ecs-cdss-badge ecs-cdss-badge--checking ecs-cdss-badge-inline" title="Reading CDSS cancer-screening data…"><span class="ecs-cdss-icon">⏳</span><span>CDSS checking…</span></div>`;
             return '';
         })();
         return `<div class="ecs-analysis">
@@ -6733,6 +6764,17 @@ function __smartCoderReadVersion(fallback) {
 
         const body = document.getElementById('ecsBody');
         if (body) {
+            // renderSnapshotBlock was rebuilding this innerHTML wholesale
+            // on every single checkAndUpdate tick (every 2.5s) REGARDLESS
+            // of whether anything actually changed — a real source of
+            // periodic jank ("loading issue every 2/3 seconds"): a full
+            // innerHTML rewrite forces the browser to re-parse and re-lay-
+            // out the whole panel every time, even when the generated
+            // markup is byte-for-byte identical to what's already there.
+            // Skip the DOM write entirely when nothing changed.
+            if (html === lastRenderedSnapshotHtml) return;
+            lastRenderedSnapshotHtml = html;
+
             // Periodic re-renders (checkAndUpdate's setInterval, action progress,
             // etc.) rebuild this innerHTML wholesale, which was resetting the
             // Proposed-changes list back to the top mid-scroll. Snapshot the
@@ -6758,42 +6800,68 @@ function __smartCoderReadVersion(fallback) {
             .replace(/'/g, "&#039;");
     }
 
+    let lastSoapScanTime = 0;
+    const SOAP_SCAN_THROTTLE_MS = 8000; // see isPatientChart
+
     function isPatientChart() {
         // .innerText forces the browser to compute full page layout — a
-        // genuinely expensive operation — and this was running every 2.5s
-        // unconditionally from the very first page load, even on pages
-        // that obviously aren't a patient chart (login, dashboard, etc.).
-        // Cheap pre-check first: if neither the encounter dropdown nor
-        // either billing grid exists at all, we're definitely not in a
-        // chart/coding context, so skip the expensive scan entirely.
+        // genuinely expensive operation — and this was running every
+        // single 2.5s tick unconditionally, for the entire time anyone was
+        // on a chart page (which is most of the time this extension is
+        // running at all). That periodic layout-thrash is what "loading
+        // issue every 2/3 seconds" was — not a network request, a
+        // synchronous browser reflow happening on a timer. Cheap pre-check
+        // first: if neither the encounter dropdown nor either billing grid
+        // exists at all, we're definitely not in a chart/coding context,
+        // so skip everything below entirely.
         const hasEncDropdown = !!document.getElementById('encDropDownItem');
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (!hasEncDropdown && !hasBillingGrid) {
             return false;
         }
 
-        // SOAP-note text means we're on the progress-note view. The billing
-        // grids (#billingTbl2 ICD / #billingTbl4 CPT) mean we're on the
-        // ICD/CPT coding tab — which doesn't have any "Chief Complaint(s)/
-        // HPI:/Assessment:/Plan:" text on it at all, so without this check
-        // the panel (and the Proposed changes list on it) was being hidden
-        // the moment the user switched into the coding tab.
-        const liveText = document.body.innerText || "";
-        const hasSoapText = /Chief Complaint\(s\)|HPI:|Assessment:|Plan:/i.test(liveText);
+        // The Billing/ICD-CPT coding tab has no SOAP-note text on it at
+        // all, so the expensive scan below is never needed to answer
+        // "are we on the chart" while billingTbl2/4 exist — skip it
+        // outright. This alone removes the layout-forcing scan for the
+        // entire time someone is on Billing (coding, running Analyze,
+        // applying changes) — a big chunk of real usage.
+        if (hasBillingGrid) return true;
 
         // Drop the cached note text if we've moved to a different
         // patient/encounter, so the billing tab never shows stale data
-        // left over from someone else's chart.
+        // left over from someone else's chart — and force an immediate
+        // fresh scan for the new patient rather than waiting out the
+        // throttle below.
         const key = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
             ? (window.__ecwPatientHistory.getCurrentKey() || "")
             : "";
         if (key !== cachedEncounterKey) {
             cachedEncounterText = "";
             cachedEncounterKey = key;
+            lastSoapScanTime = 0;
         }
+
+        // Once we already know we're on this patient's SOAP view, a fresh
+        // .innerText read only needs to happen occasionally to keep the
+        // snapshot panel's live fields (BP, chief complaint, etc.)
+        // reasonably current — not on every single tick. If we're on the
+        // chart at all (hasEncDropdown, checked above) and we already
+        // have cached SOAP text for this patient, trust it between scans.
+        const now = Date.now();
+        if (cachedEncounterText && now - lastSoapScanTime < SOAP_SCAN_THROTTLE_MS) {
+            return true;
+        }
+        lastSoapScanTime = now;
+
+        // SOAP-note text means we're on the progress-note view — this is
+        // the one unavoidable layout-forcing read, now throttled to at
+        // most once every SOAP_SCAN_THROTTLE_MS instead of every tick.
+        const liveText = document.body.innerText || "";
+        const hasSoapText = /Chief Complaint\(s\)|HPI:|Assessment:|Plan:/i.test(liveText);
         if (hasSoapText) cachedEncounterText = liveText;
 
-        return hasSoapText || hasBillingGrid;
+        return hasSoapText;
     }
 
     // The stable "what does the note say" text: the cached copy from the
