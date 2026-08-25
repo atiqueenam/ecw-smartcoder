@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.73
+// @name         Getwell SmartCoder by ATQ v5.74
 // @namespace    http://tampermonkey.net/
-// @version      5.73
+// @version      5.74
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,19 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.74 (2026-08-25) - Blood draw/blood work (36415/99000) can now come
+//   from the HPI, not just the CC. Previously only a CC mention of
+//   "blood draw"/"blood work" triggered these two codes — a real blood
+//   draw described only in the HPI (a common pattern: "daughter called
+//   in... blood work was obtained today for routine monitoring") was
+//   silently missed. HPI mentions are held to a stricter bar than CC
+//   ones, though, since HPI often narrates PAST or FUTURE draws too, not
+//   just today's: a mention only counts when it's tied to today's visit
+//   (a "today"/"this visit"/"now" wording in the same sentence, or
+//   elsewhere in the HPI when that sentence has no conflicting marker)
+//   and is NOT tied to an explicit date, "ago", "last week", "scheduled",
+//   "at the hospital", etc. — any of those next to the mention rules it
+//   out even if "today" appears elsewhere in the note.
 // 5.73 (2026-08-25) - New cross-client billing-exclusivity rules:
 //   1) 99401/99406 are never billed together with 99214 — if both are
 //      applicable, 99214 wins and 99401/99406 is removed (applies to
@@ -3044,12 +3057,66 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
-        // ---- Chief Complaint: blood draw / blood work ----
+        // ---- Chief Complaint / HPI: blood draw / blood work ----
+        // A CC mention is always "today" by definition (the CC is why the
+        // patient is here this encounter), so any CC mention of blood
+        // draw/work qualifies outright — unchanged from before.
+        //
+        // HPI is different: it's often a narrative that ALSO covers past
+        // visits, other providers, or a plan for a FUTURE draw ("blood
+        // work is scheduled for next week", "labs were drawn 3 days ago
+        // at the hospital"), so an HPI mention only qualifies when it's
+        // actually about blood work done AT today's encounter (the DOS).
+        // Handled sentence-by-sentence so an unrelated "today" elsewhere
+        // in a long HPI (e.g. "presents today for follow up") doesn't
+        // wrongly qualify a blood-work mention from a different, clearly
+        // past/future sentence, and a past/future date next to the
+        // blood-work mention itself always excludes it even if the word
+        // "today" appears somewhere else in the note.
         const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
         const ccText = ccRaw ? ccRaw[1] : '';
-        if (/blood\s*draw|blood\s*work/i.test(ccText)) {
-            desired.set('36415', 'Blood draw/blood work in CC');
-            desired.set('99000', 'Blood draw/blood work in CC');
+        const hpiRaw = text.match(/\bHPI:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|Assessment|Plan|Review|Physical\s+Exam|Vital|Social\s+History|Family\s+History|Medical\s+History|Surgical\s+History|Chief\s+Complaint)\b|$)/i);
+        const hpiText = hpiRaw ? hpiRaw[1] : '';
+
+        const BLOOD_WORK_RE = /\bblood\s*(?:draw|work)\b/i;
+        // "Today" or an equivalent same-visit indicator — deliberately
+        // broad, per the request to catch any wording that indicates the
+        // draw happened at this encounter, not just the literal word
+        // "today".
+        const TODAY_INDICATOR_RE = /\btoday\b|\bthis\s+(?:visit|encounter|appointment)\b|\bat\s+(?:this|today'?s)\s+(?:visit|encounter|appointment)\b|\bduring\s+(?:this|today'?s)\s+visit\b|\bobtained\s+today\b|\bdone\s+today\b|\bdrawn\s+today\b|\bcollected\s+today\b|\bin[- ]office\s+today\b|\bhere\s+today\b|\bnow\b/i;
+        // Anything that puts the draw somewhere OTHER than today — an
+        // explicit calendar date, a relative past/future reference, or
+        // language describing a plan rather than something already done
+        // at this visit. Any of these next to a blood-work mention rules
+        // that mention out, regardless of "today" appearing elsewhere.
+        const NOT_TODAY_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\byesterday\b|\blast\s+(?:week|month|visit|time)\b|\b\d+\s*(?:day|week|month)s?\s+ago\b|\bago\b|\bprior\b|\bpreviously\b|\bearlier\b|\bnext\s+(?:week|month|visit|time)\b|\bupcoming\b|\bscheduled\b|\bwill\s+(?:be|need|get|have)\b|\bplan(?:ned|s)?\s+to\b|\bto\s+be\s+(?:done|drawn|obtained)\b|\bnot\s+yet\b|\bpending\b|\bat\s+(?:the\s+)?hospital\b|\bat\s+(?:the\s+)?(?:ER|emergency\s+room)\b/i;
+
+        function splitIntoSentences(str) {
+            return str.split(/(?<=[.!?;])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+        }
+
+        let bloodWorkReason = null;
+        if (BLOOD_WORK_RE.test(ccText)) {
+            bloodWorkReason = 'Blood draw/blood work in CC';
+        } else if (hpiText && BLOOD_WORK_RE.test(hpiText)) {
+            const hpiHasTodayAnywhere = TODAY_INDICATOR_RE.test(hpiText);
+            const qualifies = splitIntoSentences(hpiText).some(seg => {
+                if (!BLOOD_WORK_RE.test(seg)) return false;
+                if (NOT_TODAY_RE.test(seg)) return false; // explicit past/future/other-location next to the mention — never qualifies
+                if (TODAY_INDICATOR_RE.test(seg)) return true; // today-indicator right in the same sentence
+                // No today-indicator in THIS sentence and no conflicting
+                // past/future marker either — fall back to "today"
+                // appearing anywhere else in the HPI (e.g. "Patient
+                // presents today... blood work was obtained.").
+                return hpiHasTodayAnywhere;
+            });
+            if (qualifies) {
+                bloodWorkReason = 'Blood draw/blood work in HPI, done at today’s visit (DOS)';
+            }
+        }
+        if (bloodWorkReason) {
+            desired.set('36415', bloodWorkReason);
+            desired.set('99000', bloodWorkReason);
         }
 
         // ---- Chief Complaint: H. pylori (any spelling/spacing variant) ----
