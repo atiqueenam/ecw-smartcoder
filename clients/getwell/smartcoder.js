@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.64
+// @name         Getwell SmartCoder by ATQ v5.66
 // @namespace    http://tampermonkey.net/
-// @version      5.64
+// @version      5.66
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,47 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.66 (2026-08-25) - THE actual fix for the lag (5.65 identified the root
+//   cause but didn't have the info to fix it yet). A live network capture
+//   showed the CDSS modal's own Angular controller gets its data from a
+//   plain JSON endpoint (getPatientAlertData.jsp), not from server-side
+//   HTML the table is rendered from — so the real cost was never "open a
+//   modal", it was "wait for Angular to finish painting a table we never
+//   actually needed to look at" (its JSON arrives well before the table
+//   finishes rendering). Can't call that endpoint cold — its URL carries
+//   a per-request signed "pd" token we have no way to construct — so the
+//   click stays, but scrapeCdssCancerScreeningInvisibly() no longer waits
+//   for the DOM table at all: a lightweight always-on fetch/XHR patch
+//   (installAlertDataInterceptors) grabs the JSON the instant the browser
+//   receives it, and the modal is closed immediately once we have it —
+//   both the wait AND the hidden-modal window shrink to roughly the
+//   network round trip alone. Old DOM-table scrape kept as an automatic
+//   fallback (parseCdssCancerRows) in case this response ever comes back
+//   over a transport the patch isn't watching. Also means richer/more
+//   reliable data than icon-class DOM sniffing (measureId, a proper
+//   alertStatus code, ISO dates) at no extra cost.
+// 5.65 (2026-08-25) - Root-cause note + one real time-saver, in response
+//   to "checking still takes too much time, what's the benefit of
+//   automation if we still wait": the actual cost has never been the
+//   scheduling around the CDSS read — it's that the read itself opens
+//   eCW's real Angular CDSS modal (network round-trip + full Angular
+//   digest/render of the PopHealth grid) and closes it again. Hiding it
+//   better (5.62-5.64) or starting it earlier doesn't remove that cost,
+//   it only relocates it. The actual fix is to stop opening the modal at
+//   all and fetch its underlying data directly instead — exactly the
+//   pattern get_patient_icd_cpt_history()/fetchEncounter() already use
+//   for patient history elsewhere in this file (a plain fetch() straight
+//   to a read-only JSP endpoint, parsed with DOMParser, no UI touched at
+//   all). That requires knowing the actual endpoint CDSS's own modal
+//   calls, which needs one live network capture to identify — not done
+//   in this pass. Until then, added maybeAutoRefreshAnalysisAfterCdss():
+//   if Analyze was clicked before the background CDSS prefetch finished
+//   (analysisState.cdssStatus !== 'done'), the panel now silently
+//   recomputes and refreshes itself the moment CDSS data actually lands,
+//   instead of leaving a stale result sitting there until the coder
+//   thinks to click Analyze again — a real reduction in clicks/attention
+//   spent waiting, even though the underlying read's own latency is
+//   unchanged pending the direct-fetch rewrite above.
 // 5.64 (2026-08-25) - Two more things found from live use of 5.63:
 //   1) REAL BUG: "colorectal took too long to appear in Analyze". Cause:
 //      when runAnalysis()'s last-resort call landed while the background
@@ -1354,7 +1395,172 @@ function __smartCoderReadVersion(fallback) {
     // there) — only while looking at the SOAP note — so the result is
     // cached per patient for computeAnalysis to read later, once the user
     // has moved on to Billing/Analyze.
-    let cdssCancerCache = null;       // { colorectal, cervical, breast } | null — see parseCdssCancerRows
+    // 5.66: the actual fix for "still takes too much time". A live network
+    // capture confirmed the CDSS modal's own Angular controller fetches its
+    // data from a plain JSON endpoint — getPatientAlertData.jsp — rather
+    // than rendering the table from something already on the page. That
+    // means the real cost was never "opening a modal", it was "waiting for
+    // Angular to finish rendering a table we didn't actually need to look
+    // at" — the JSON arrives well before the table finishes painting.
+    // getPatientAlertData.jsp's URL includes a per-request "pd" token we
+    // have no way to construct ourselves (not a value safe to hardcode or
+    // guess at), so we still can't call it cold without the app's own
+    // help — but we don't have to: a lightweight, always-on fetch/XHR patch
+    // installed once below lets us grab the JSON the INSTANT the browser
+    // receives it, from whichever caller actually requested it — our own
+    // invisible click below, or (best case, zero extra cost at all) eCW's
+    // own page if it ever fires this same call itself for some other
+    // widget (e.g. an alert-count badge). Either way, scrapeCdssCancerScreeningInvisibly()
+    // no longer waits for the DOM table to render at all: it takes the
+    // network JSON the moment it lands and closes the modal immediately,
+    // which is what actually shortens both the wait AND the hidden-modal
+    // window (less time hidden = less that can possibly flash). The old
+    // DOM-table scrape (parseCdssCancerRows) stays in place as a fallback
+    // only, in case this endpoint ever moves to a transport this patch
+    // doesn't see.
+    let interceptedAlertDataByKey = new Map(); // patient key -> { json, ts }
+    let alertDataWaitersByKey = new Map();     // patient key -> [resolve fns] waiting on the NEXT capture for that key
+
+    function handleInterceptedAlertJson(json) {
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key) return;
+        interceptedAlertDataByKey.set(key, { json, ts: Date.now() });
+        if (interceptedAlertDataByKey.size > 20) {
+            // Simple unbounded-growth guard for very long sessions — this
+            // is a short-lived per-patient cache, not meant to accumulate
+            // forever. Mirrors ENCOUNTER_CACHE_MAX's approach elsewhere.
+            interceptedAlertDataByKey.clear();
+            interceptedAlertDataByKey.set(key, { json, ts: Date.now() });
+        }
+        const waiters = alertDataWaitersByKey.get(key);
+        if (waiters) {
+            alertDataWaitersByKey.delete(key);
+            waiters.slice().forEach(resolve => resolve(json));
+        }
+    }
+
+    function waitForInterceptedAlertData(key, timeoutMs) {
+        if (!key) return Promise.resolve(null);
+        const cached = interceptedAlertDataByKey.get(key);
+        if (cached) return Promise.resolve(cached.json);
+        return new Promise(resolve => {
+            let settled = false;
+            const finish = (val) => {
+                if (settled) return;
+                settled = true;
+                const arr = alertDataWaitersByKey.get(key);
+                if (arr) {
+                    const idx = arr.indexOf(finish);
+                    if (idx !== -1) arr.splice(idx, 1);
+                    if (!arr.length) alertDataWaitersByKey.delete(key);
+                }
+                resolve(val);
+            };
+            const arr = alertDataWaitersByKey.get(key) || [];
+            arr.push(finish);
+            alertDataWaitersByKey.set(key, arr);
+            setTimeout(() => finish(null), timeoutMs);
+        });
+    }
+
+    // Small cancellable poll — like waitForElement below, but with an
+    // explicit cancel() so we can stop it the instant the JSON intercept
+    // wins the race, instead of leaving a stray setInterval running for up
+    // to 6s that could re-hide unrelated UI that opens later (hideNewBodyChildren
+    // hides ANY new top-level body node, which is only safe while we're
+    // still actually mid-scrape).
+    function pollUntilCancellable(finder, timeoutMs, intervalMs) {
+        let cancelled = false;
+        let timer = null;
+        const promise = new Promise(resolve => {
+            const start = Date.now();
+            timer = setInterval(() => {
+                if (cancelled) { clearInterval(timer); resolve(null); return; }
+                const el = finder();
+                if (el) { clearInterval(timer); resolve(el); return; }
+                if (Date.now() - start > timeoutMs) { clearInterval(timer); resolve(null); }
+            }, intervalMs || 100);
+        });
+        return { promise, cancel: () => { cancelled = true; if (timer) clearInterval(timer); } };
+    }
+
+    (function installAlertDataInterceptors() {
+        const isAlertUrl = (url) => typeof url === 'string' && url.toLowerCase().indexOf('getpatientalertdata.jsp') !== -1;
+
+        if (window.fetch && !window.fetch.__docproAlertPatched) {
+            const origFetch = window.fetch.bind(window);
+            const patched = function (input, init) {
+                const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+                const p = origFetch(input, init);
+                if (!isAlertUrl(url)) return p;
+                return p.then(res => {
+                    try { res.clone().json().then(handleInterceptedAlertJson).catch(() => {}); } catch {}
+                    return res;
+                });
+            };
+            patched.__docproAlertPatched = true;
+            window.fetch = patched;
+        }
+
+        // Angular's $http traditionally rides on XMLHttpRequest, not
+        // fetch, in apps of this vintage — this is the patch that actually
+        // matters in practice.
+        if (window.XMLHttpRequest && !XMLHttpRequest.prototype.__docproAlertPatched) {
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (method, url) {
+                try { this.__docproIsAlertCall = isAlertUrl(url); } catch { this.__docproIsAlertCall = false; }
+                return origOpen.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function () {
+                if (this.__docproIsAlertCall) {
+                    this.addEventListener('load', () => {
+                        try {
+                            if (this.status >= 200 && this.status < 300) {
+                                handleInterceptedAlertJson(JSON.parse(this.responseText));
+                            }
+                        } catch {}
+                    });
+                }
+                return origSend.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.__docproAlertPatched = true;
+        }
+    })();
+
+    // getPatientAlertData.jsp's PopHealth.alertList entries (per a live
+    // capture) carry alertName ("Colorectal Cancer Screening ..." etc.),
+    // lastDoneDate (seen as ISO YYYY-MM-DD), and a numeric alertStatus
+    // (1 = compliant/"green" in every sample observed; anything else is
+    // treated as not-compliant — same "only a genuinely green row counts"
+    // rule as the DOM version, just never assuming compliant unless we
+    // positively recognize the compliant code).
+    function parseCdssCancerRowsFromJson(json) {
+        const result = { colorectal: null, cervical: null, breast: null };
+        const list = (json && json.PopHealth && Array.isArray(json.PopHealth.alertList)) ? json.PopHealth.alertList : [];
+        const toUsDate = (raw) => {
+            if (!raw) return null;
+            const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+            if (iso) return `${iso[2]}/${iso[3]}/${iso[1]}`;
+            return /^\d{2}\/\d{2}\/\d{4}$/.test(raw) ? raw : null; // in case some sites/measures return US format instead
+        };
+        list.forEach(item => {
+            const name = String(item.alertName || '').trim();
+            let key = null;
+            if (/^colorectal cancer screening\b/i.test(name)) key = 'colorectal';
+            else if (/^breast cancer screening\b/i.test(name)) key = 'breast';
+            else if (/^cervical cancer screening\b/i.test(name)) key = 'cervical';
+            if (!key || result[key]) return; // first matching entry wins, same as the DOM version
+            result[key] = {
+                date: toUsDate(item.lastDoneDate),
+                compliant: item.alertStatus === 1
+            };
+        });
+        return result;
+    }
+
+    let cdssCancerCache = null;       // { colorectal, cervical, breast } | null — see parseCdssCancerRows / parseCdssCancerRowsFromJson
     let cdssCancerCacheKey = "";      // patient key this cache belongs to
     let cdssScrapeInFlight = false;   // de-dupe: guards against overlapping scrapes
     let cdssScrapeInFlightKey = "";   // which patient key the in-flight scrape (if any) is for
@@ -1435,6 +1641,9 @@ function __smartCoderReadVersion(fallback) {
         const link = findCdssTopPanelLink();
         if (!link) return null;
 
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+
         const preExistingBodyChildren = new Set(Array.from(document.body.children));
         const hiddenNodes = [];
         function hideNewBodyChildren() {
@@ -1453,23 +1662,42 @@ function __smartCoderReadVersion(fallback) {
         const observer = new MutationObserver(hideNewBodyChildren);
         observer.observe(document.body, { childList: true });
 
+        // Started before we await anything, so both run concurrently — the
+        // DOM poll is a fallback safety net, not a fallback that only
+        // starts after the JSON path already failed.
+        const domPoll = pollUntilCancellable(() => {
+            hideNewBodyChildren(); // catch anything that shows up mid-wait
+            const t = document.getElementById('alertsMainTbl1');
+            // Wait for actual PopHealth rows, not just the empty table
+            // shell — their presence is the signal the alert data has
+            // actually arrived.
+            return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
+        }, 6000, 100);
+
         try {
             link.click();
             hideNewBodyChildren(); // in case the modal was inserted synchronously
 
-            const table = await waitForElement(() => {
-                hideNewBodyChildren(); // catch anything that shows up mid-wait
-                const t = document.getElementById('alertsMainTbl1');
-                // Wait for actual PopHealth rows, not just the empty table
-                // shell — their presence is the signal the alert data has
-                // actually arrived.
-                return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
-            }, 6000);
+            // Primary path: the network JSON, which lands well before
+            // Angular finishes rendering the table — see the comment above
+            // parseCdssCancerRowsFromJson for why this is the actual fix
+            // for the reported lag, not just another reshuffle of it.
+            const json = await waitForInterceptedAlertData(key, 6000);
+            if (json) {
+                domPoll.cancel(); // no longer need the DOM fallback — stop it so it can't linger and re-hide unrelated UI later
+                return parseCdssCancerRowsFromJson(json);
+            }
 
+            // JSON intercept didn't land in time (unusual — would mean
+            // eCW served this over a transport our fetch/XHR patch isn't
+            // watching). Fall back to whatever the DOM poll — already
+            // running this whole time — finds.
+            const table = await domPoll.promise;
             return table ? parseCdssCancerRows(table) : null;
         } catch {
             return null;
         } finally {
+            domPoll.cancel();
             observer.disconnect();
             // Always try to close the modal, even if scraping failed/timed
             // out, so nothing is left open.
@@ -1596,6 +1824,16 @@ function __smartCoderReadVersion(fallback) {
                 if (finalKey === key) {
                     cdssCancerCache = result;
                     cdssCancerCacheKey = key;
+                    // Real time-saver: if the coder already clicked Analyze
+                    // before this finished (so the panel is showing a
+                    // result computed without CDSS — cdssStatus wasn't
+                    // 'done'), silently recompute and refresh the panel now
+                    // that CDSS data just arrived, instead of leaving a
+                    // stale result sitting there until they think to click
+                    // Analyze a second time. No-ops harmlessly if the panel
+                    // isn't even open, or Analyze hasn't been run, or an
+                    // apply/re-analyze is already in progress.
+                    maybeAutoRefreshAnalysisAfterCdss(key);
                 }
             } finally {
                 cdssScrapeAttemptedKey = key;
@@ -1672,6 +1910,29 @@ function __smartCoderReadVersion(fallback) {
     // is clicked.
     async function ensureCdssCancerScreeningForAnalysis() {
         await primeCdssCancerScreeningCache(true);
+    }
+
+    // 5.65: a real time-saver rather than just a status label. If the
+    // coder already clicked Analyze before CDSS finished (the panel shows
+    // a result with cdssStatus !== 'done'), don't make them notice that
+    // and click Analyze again — the moment CDSS data actually lands, quietly
+    // recompute and refresh the panel in place. Guarded so it never fights
+    // an apply in progress, a fresh manual Analyze already running, or a
+    // patient switch that happened in between.
+    function maybeAutoRefreshAnalysisAfterCdss(key) {
+        if (!analysisState || analysisState.error) return;
+        if (analysisState.cdssStatus === 'done') return; // this result already had CDSS — nothing stale to fix
+        if (analysisRunning || actionRunning) return; // don't step on an in-progress Analyze/Apply
+        const historyApi = window.__ecwPatientHistory;
+        const currentKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (currentKey !== key) return; // user has moved on to a different patient — stale, don't touch their screen
+        try {
+            analysisState = computeAnalysis();
+        } catch (err) {
+            console.error('[Getwell SmartCoder] auto-refresh after CDSS failed (non-fatal):', err);
+            return; // leave the existing (pre-CDSS) analysisState showing rather than replace it with nothing
+        }
+        renderSnapshotBlock();
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
