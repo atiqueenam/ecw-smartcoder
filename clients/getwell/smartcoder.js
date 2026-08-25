@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.66
+// @name         Getwell SmartCoder by ATQ v5.67
 // @namespace    http://tampermonkey.net/
-// @version      5.66
+// @version      5.67
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,27 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.67 (2026-08-25) - Two more fixes from live feedback on 5.66:
+//   1) Sequential-wait bug: primeCdssCancerScreeningCache() refused to
+//      start while historyApi.isLoading() was true — meaning CDSS's own
+//      request (now a single lightweight JSON call) waited for the ENTIRE
+//      patient-history fetch (which pools multiple encounter requests and
+//      can genuinely take a while) to finish first, stacking two
+//      unrelated waits back-to-back. That gate was never actually
+//      necessary: getCurrentKey() (what CDSS keys its cache on) is set
+//      the moment history loading STARTS, not when it finishes — see
+//      loadPatientHistoryOnce — and CDSS never reads any history data,
+//      only the patient key. Removed the isLoading() gate (both in
+//      primeCdssCancerScreeningCache's guard and inside start()) so CDSS
+//      priming now runs concurrently with history loading instead of
+//      after it — this was most of "the waiting time is way too much
+//      longer" whenever history parsing itself took any real time.
+//   2) Styling: the CDSS status line was plain unstyled text reusing
+//      .ecs-diff-empty with ad hoc inline colors, sitting right under the
+//      Analyze button with no real spacing — looked cramped/out of place.
+//      Replaced with a proper .ecs-cdss-badge component (tinted
+//      background per status, padding, icon+text layout, consistent
+//      margin) matching the rest of the panel's visual language.
 // 5.66 (2026-08-25) - THE actual fix for the lag (5.65 identified the root
 //   cause but didn't have the info to fix it yet). A live network capture
 //   showed the CDSS modal's own Angular controller gets its data from a
@@ -1083,6 +1104,21 @@ function __smartCoderReadVersion(fallback) {
         .ecs-diff-add b { color: #0f766e; }
         .ecs-diff-del b { color: #b91c1c; }
         .ecs-diff-empty { font-size: 10.5px; color: #94a3b8; }
+        /* CDSS cancer-screening status badge — was plain inline-styled text
+           reusing .ecs-diff-empty (no padding/background, easy to miss and
+           badly spaced right under the Analyze button). Now a proper
+           tinted banner consistent with the rest of the panel's rounded/
+           padded components (buttons, diff rows). */
+        .ecs-cdss-badge {
+            display: flex; align-items: flex-start; gap: 6px;
+            margin-top: 8px; padding: 6px 8px; border-radius: 7px;
+            font-size: 10.5px; font-weight: 600; line-height: 1.45;
+        }
+        .ecs-cdss-badge .ecs-cdss-icon { flex: 0 0 auto; }
+        .ecs-cdss-badge--done { background: #ecfdf5; color: #047857; }
+        .ecs-cdss-badge--checking { background: #fffbeb; color: #92400e; }
+        .ecs-cdss-badge--warn { background: #fef2f2; color: #b91c1c; }
+        .ecs-cdss-badge-inline { margin-top: 6px; padding: 4px 8px; font-size: 10px; font-weight: 700; }
         .ecs-log-row { font-size: 11px; padding: 2px 0; color: #334155; }
         .ecs-spinner-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #475569; }
         .ecs-mini-spin {
@@ -1802,7 +1838,19 @@ function __smartCoderReadVersion(fallback) {
         }
         if (cdssScrapeInFlight) return null; // in-flight for a *different* patient (stale) — don't interfere with it
 
-        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return null;
+        // 5.67: NOT gated on historyApi.isLoading() any more. That gate was
+        // making CDSS wait for the ENTIRE patient-history fetch (which pools
+        // several encounter requests and can legitimately take a while) to
+        // finish before even starting its own single, now-lightweight JSON
+        // request — stacking two independent, unrelated waits back-to-back
+        // instead of letting them run side by side. currentPatientKey (what
+        // getCurrentKey() returns) is set the MOMENT history loading starts,
+        // not when it finishes — see loadPatientHistoryOnce — so there was
+        // never a real reason to wait for history to be done; CDSS doesn't
+        // read history data at all, only the patient key. Removing this
+        // gate lets the two run concurrently, which is most of "the
+        // waiting time is way too much longer" once history parsing itself
+        // takes any real time.
         if (!key || key === cdssCancerCacheKey) return null;
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (hasBillingGrid) return null; // CDSS isn't reachable from Billing — only ever prime while still on the chart
@@ -1810,8 +1858,8 @@ function __smartCoderReadVersion(fallback) {
 
         const start = async () => {
             // Re-check everything — time may have passed, and the user
-            // may have switched patients, opened Billing, etc.
-            if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
+            // may have switched patients, opened Billing, etc. (Deliberately
+            // NOT re-checking isLoading() here either — see above.)
             const stillKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
             if (stillKey !== key || key === cdssCancerCacheKey) return;
             if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
@@ -6697,18 +6745,18 @@ function __smartCoderReadVersion(fallback) {
     // instead of silent.
     function cdssStatusBannerHtml(status) {
         if (status === 'done') {
-            return `<div class="ecs-diff-empty" style="color:#059669;">✓ CDSS cancer-screening check included in this result</div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--done"><span class="ecs-cdss-icon">✓</span><span>CDSS cancer-screening check included in this result</span></div>`;
         }
         if (status === 'checking') {
-            return `<div class="ecs-diff-empty" style="color:#b45309;">⏳ CDSS cancer-screening check is still running — this result may not include it yet. Click Analyze again in a few seconds to pick it up.</div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--checking"><span class="ecs-cdss-icon">⏳</span><span>CDSS cancer-screening check is still running — this result may not include it yet. Click Analyze again in a few seconds to pick it up.</span></div>`;
         }
         if (status === 'unreachable') {
-            return `<div class="ecs-diff-empty" style="color:#dc2626;">⚠ CDSS cancer-screening was NOT checked for this patient (only reachable from the chart view, not Billing) — this result reflects the chart's HEALTH PROMOTION section only. Reopen this patient's chart tab briefly, then re-Analyze, to include CDSS.</div>`;
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--warn"><span class="ecs-cdss-icon">⚠</span><span>CDSS cancer-screening was NOT checked for this patient (only reachable from the chart view, not Billing) — this result reflects the chart's HEALTH PROMOTION section only. Reopen this patient's chart tab briefly, then re-Analyze, to include CDSS.</span></div>`;
         }
         // 'pending' — reachable but never attempted yet (e.g. Coding
         // Snapshot was opened and Analyze clicked immediately, before the
         // background prefetch had a chance to run at all).
-        return `<div class="ecs-diff-empty" style="color:#b45309;">⚠ CDSS cancer-screening has not been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it.</div>`;
+        return `<div class="ecs-cdss-badge ecs-cdss-badge--checking"><span class="ecs-cdss-icon">⚠</span><span>CDSS cancer-screening has not been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it.</span></div>`;
     }
 
     function renderAnalysisSection() {
@@ -6777,8 +6825,8 @@ function __smartCoderReadVersion(fallback) {
         // there's visibility into it even before the coder clicks Analyze.
         const idleCdssHint = (() => {
             const status = getCdssCancerScreeningStatus();
-            if (status === 'done') return `<div class="ecs-diff-empty" style="color:#059669;font-size:11px;">✓ CDSS cancer-screening data ready</div>`;
-            if (status === 'checking') return `<div class="ecs-diff-empty" style="color:#b45309;font-size:11px;">⏳ Reading CDSS cancer-screening data…</div>`;
+            if (status === 'done') return `<div class="ecs-cdss-badge ecs-cdss-badge--done ecs-cdss-badge-inline"><span class="ecs-cdss-icon">✓</span><span>CDSS cancer-screening data ready</span></div>`;
+            if (status === 'checking') return `<div class="ecs-cdss-badge ecs-cdss-badge--checking ecs-cdss-badge-inline"><span class="ecs-cdss-icon">⏳</span><span>Reading CDSS cancer-screening data…</span></div>`;
             return '';
         })();
         return `<div class="ecs-analysis">
