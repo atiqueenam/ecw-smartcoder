@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.72
+// @name         Getwell SmartCoder by ATQ v5.73
 // @namespace    http://tampermonkey.net/
-// @version      5.72
+// @version      5.73
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.73 (2026-08-25) - New cross-client billing-exclusivity rules:
+//   1) 99401/99406 are never billed together with 99214 — if both are
+//      applicable, 99214 wins and 99401/99406 is removed (applies to
+//      every client). 2) A TCM code (99495/99496) on the chart disables
+//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
+//      Preventive itself can still apply. 3) 99214 + a TCM code together
+//      is allowed for Getwell (and Bronx) specifically — no downgrade;
+//      every other client downgrades 99214 -> 99213 when a TCM code is
+//      present (Hasan Sheikh goes further and drops the office-visit
+//      code entirely — see that client's own changelog).
 // 5.72 (2026-08-25) - "After history loading, while CDSS is checking, the
 //   whole screen goes white for a while" — a regression from 5.71's own
 //   fix. 5.71 made the entire <html> element visibility:hidden so it
@@ -3616,6 +3626,29 @@ function __smartCoderReadVersion(fallback) {
                     }
                 });
             }
+            var computedOvCodeForBilling = ovCode || null;
+        }
+
+        // ---- Billing-exclusivity rule: 99401/99406 vs 99214 ----
+        // Never billed together with 99214 — if both are applicable,
+        // 99214 wins and 99401/99406 is removed. Applies to every client.
+        // Getwell/Bronx are still allowed to bill 99214 alongside a TCM
+        // code (99495/99496) — no downgrade for those two clients.
+        {
+            const effectiveOvCode = (typeof computedOvCodeForBilling !== 'undefined' && computedOvCodeForBilling)
+                || currentRows.map(r => r.code).find(c => OFFICE_VISIT_EM_CODES.includes(c))
+                || null;
+            if (effectiveOvCode === '99214') {
+                ['99401', '99406'].forEach(code => {
+                    const row = currentRows.find(r => r.code === code);
+                    if (row && !toDelete.some(d => d.code === code)) {
+                        toDelete.push({ code, row: row.row, kind: 'cpt', reason: '99214 applies this encounter — 99401/99406 is not billed together with 99214' });
+                    }
+                    for (let i = toAdd.length - 1; i >= 0; i--) {
+                        if (toAdd[i].code === code) toAdd.splice(i, 1);
+                    }
+                });
+            }
         }
 
         // ---- L21.0 vs L21.9 (seborrheic dermatitis): correction-only ----
@@ -6163,6 +6196,17 @@ function __smartCoderReadVersion(fallback) {
             pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
             sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
             ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
+        }
+
+        // ---- TCM on chart (99495/99496): P/C, Smoking, and Obesity
+        // Counseling never apply alongside a TCM code — only Preventive
+        // (PV) can still be used, if its own rules above allow it. Runs
+        // last so it always wins, same as the no-vitals check above. ----
+        if (getCPTRows().some(r => { const c = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase(); return c === '99495' || c === '99496'; })) {
+            const tcmReason = 'TCM code (99495/99496) is on the chart — only Preventive applies, not Preventive/Smoking/Obesity Counseling';
+            pc = { disabled: true, title: tcmReason };
+            sm = { disabled: true, title: tcmReason };
+            ob = { disabled: true, title: tcmReason };
         }
 
         return { pv, pc, sm, ob };

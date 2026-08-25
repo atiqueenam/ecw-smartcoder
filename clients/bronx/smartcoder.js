@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.74
+// @name         Bronx Health SmartCoder v1.75
 // @namespace    http://tampermonkey.net/
-// @version      1.74
+// @version      1.75
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.75 (2026-08-25) - New cross-client billing-exclusivity rules:
+//   1) 99401/99406 are never billed together with 99214 — if both are
+//      applicable, 99214 wins and 99401/99406 is removed (applies to
+//      every client). 2) A TCM code (99495/99496) on the chart disables
+//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
+//      Preventive itself can still apply. 3) 99214 + a TCM code together
+//      is allowed for Bronx (and Getwell) specifically — no downgrade;
+//      every other client downgrades 99214 -> 99213 when a TCM code is
+//      present.
 // 1.74 (2026-08-25) - Two fixes:
 //   - NEW RULE: 96127 (brief emotional/behavioral assessment) vs G0444.
 //     If G0444 is on the chart, 96127 is removed. If G0444 is absent,
@@ -2993,6 +3002,10 @@ function __smartCoderReadVersion(fallback) {
         // Bronx does not follow the "commercial payer" exclusion other
         // clients use — every visit (regardless of insurance) gets an
         // office-visit E&M code suggested.
+        // Captured for the TCM/99401/99406 billing-exclusivity rules below,
+        // which need to know the office-visit code this run settled on
+        // even though `ovCode` itself is scoped to the block below.
+        let computedOvCodeForBilling = null;
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
         if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
@@ -3139,6 +3152,43 @@ function __smartCoderReadVersion(fallback) {
                     }
                 });
             }
+            computedOvCodeForBilling = ovCode;
+        }
+
+        // ---- Billing-exclusivity rules: 99401/99406 vs 99214, and TCM
+        // (99495/99496) vs office-visit codes ----
+        // Effective office-visit code for this encounter: either the one
+        // just computed above, or — if that block didn't run/apply — the
+        // one already sitting on the chart, so these rules still work
+        // even when nothing about the office-visit code itself changed.
+        {
+            const effectiveOvCode = computedOvCodeForBilling
+                || currentRows.map(r => r.code).find(c => OFFICE_VISIT_EM_CODES.includes(c))
+                || null;
+            const hasTCMOnChart = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
+
+            // Rule: 99401/99406 are never billed together with 99214 — if
+            // both are applicable, 99214 wins and 99401/99406 are removed.
+            // Applies to every client (not just Bronx).
+            if (effectiveOvCode === '99214') {
+                ['99401', '99406'].forEach(code => {
+                    const row = currentRows.find(r => r.code === code);
+                    if (row && !toDelete.some(d => d.code === code)) {
+                        toDelete.push({ code, row: row.row, kind: 'cpt', reason: '99214 applies this encounter — 99401/99406 is not billed together with 99214' });
+                    }
+                    // Also make sure a same-run auto-add of either doesn't slip through.
+                    for (let i = toAdd.length - 1; i >= 0; i--) {
+                        if (toAdd[i].code === code) toAdd.splice(i, 1);
+                    }
+                });
+            }
+
+            // Rule: Bronx and Getwell may bill 99214 alongside a TCM code
+            // (99495/99496) — no downgrade needed for these two clients.
+            // (Every other client downgrades 99214 -> 99213 when a TCM
+            // code is present; Hasan Sheikh additionally drops the office
+            // visit code entirely in that case — see that client's own
+            // file for those variants.)
         }
 
         // ---- L21.0 vs L21.9 (seborrheic dermatitis): correction-only ----
@@ -5871,6 +5921,17 @@ function __smartCoderReadVersion(fallback) {
             pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
             sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
             ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
+        }
+
+        // ---- TCM on chart (99495/99496): P/C, Smoking, and Obesity
+        // Counseling never apply alongside a TCM code — only Preventive
+        // (PV) can still be used, if its own rules above allow it. Runs
+        // last so it always wins, same as the no-vitals check above. ----
+        if (getCPTRows().some(r => { const c = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase(); return c === '99495' || c === '99496'; })) {
+            const tcmReason = 'TCM code (99495/99496) is on the chart — only Preventive applies, not Preventive/Smoking/Obesity Counseling';
+            pc = { disabled: true, title: tcmReason };
+            sm = { disabled: true, title: tcmReason };
+            ob = { disabled: true, title: tcmReason };
         }
 
         return { pv, pc, sm, ob };
