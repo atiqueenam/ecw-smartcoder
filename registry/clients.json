@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-25T03:30:52.654Z",
+  "generatedAt": "2026-08-25T04:26:08.074Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.73",
+      "version": "1.74",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "bef8d47cf783ab33e2568fa46508e95dae8f2fd10e945f455e8f06826728425b"
+      "sha256": "bd332e7b8280e651caa20b63f8455766456734c2202ee6b71ca763336de13eb1"
     },
     {
       "id": "getwell",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.26",
+      "version": "1.27",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "6bfed0c9d45fffeaaf03dd5d6540105b0b7faf1ded3fa69fbd6342c0da16dd5e"
+      "sha256": "9ab7f3a82ec494af44f7f1b6358b777c273c6fcca7d5f831642a7e4b3ca8cc7f"
     }
   ]
 }
