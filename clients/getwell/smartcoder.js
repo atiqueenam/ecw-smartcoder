@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.62
+// @name         Getwell SmartCoder by ATQ v5.63
 // @namespace    http://tampermonkey.net/
-// @version      5.62
+// @version      5.63
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,25 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.63 (2026-08-25) - 5.62 made the CDSS cancer-screening read fully
+//   on-demand, triggered from runAnalysis() ("Analyze Codes"). Reported
+//   back as broken: Analyze is only ever clicked from the Billing tab,
+//   and CDSS's modal isn't reachable once Billing's grids are up, so
+//   on-demand-at-Analyze-time meant CDSS never actually ran — the whole
+//   trigger point was unreachable by construction. Reverted to a
+//   background prefetch (CDSS can only be read from the chart/SOAP view,
+//   which is necessarily before Billing), but with two independent start
+//   points instead of one so a quick "open panel -> straight to Billing"
+//   can't outrun it: the same idle-deferred once-per-patient check as
+//   5.61 (now primeCdssCancerScreeningCache(), called from
+//   checkAndUpdate), PLUS an immediate (non-idle) fire-and-forget call
+//   the moment openPanel() runs, since opening Coding Snapshot is an
+//   explicit signal the user is about to code this patient. Both are
+//   no-ops if already cached/in-flight, so still only ever one real
+//   scrape per patient. runAnalysis still calls
+//   ensureCdssCancerScreeningForAnalysis() as a last-resort/no-op-if-
+//   unreachable safety net. The 5.62 hide/close-race fix (poll for actual
+//   removal instead of a fixed 150ms wait) is unaffected and stays as-is.
 // 5.62 (2026-08-25) - Two real fixes for the persistent CDSS lag/visible-
 //   flash reports (5.61's fix wasn't enough):
 //   1) LAG / "takes so much time" / "laggy while working": the CDSS
@@ -1456,46 +1475,109 @@ function __smartCoderReadVersion(fallback) {
         }
     }
 
-    // 5.62: on-demand only. 5.59-5.61 ran this automatically in the
-    // background for every single patient as soon as the chart loaded,
-    // via a 2.5s polling loop (checkAndUpdate) — regardless of whether
-    // the user ever opened Coding Snapshot or clicked Analyze. That's
-    // what made the chart "laggy while working" and made CDSS "take so
-    // much time": every patient paid for a real eCW modal open (network
-    // round trip + Angular rendering the PopHealth grid) whether or not
-    // that data would ever actually be used, and no amount of idle-
-    // callback deferral changes how heavy the underlying eCW work itself
-    // is once it runs.
+    // 5.63: 5.62 made this on-demand-only, triggered from runAnalysis()
+    // (i.e. when "Analyze Codes" is clicked). That turned out to be a
+    // dead end reported back from real use: Analyze is only ever clicked
+    // from the Billing tab (the whole point of Analyze is to compare
+    // proposed codes against what's already on the billing grids), and
+    // CDSS's own modal isn't reachable once Billing's grids are up — so
+    // on-demand-at-Analyze-time was *always* too late, and CDSS silently
+    // never contributed to a single Analyze run.
     //
-    // The only place cdssCancerCache is ever read is computeAnalysis(),
-    // which only runs from runAnalysis() when the user clicks "Analyze
-    // Codes". So this now runs right there instead, once, only for the
-    // patient actually being analyzed — never in the background, never
-    // for patients the user isn't actively coding. It still: never runs
-    // while Billing's grids are up (CDSS isn't reachable from there),
-    // waits for patient-history loading to finish first, only scrapes
-    // once per patient (cached after that), and stays fully invisible via
-    // scrapeCdssCancerScreeningInvisibly()'s hide/restore.
-    async function ensureCdssCancerScreeningForAnalysis() {
+    // CDSS data is only reachable while still on the SOAP/chart view, and
+    // Analyze is only clickable from Billing — so by construction this
+    // has to be prefetched into cdssCancerCache *before* the user leaves
+    // the chart view, then simply read back (never re-fetched) once
+    // they're on Billing and click Analyze. There's no on-demand version
+    // of this that can work.
+    //
+    // Given that, the sustainable design is: keep it a one-shot-per-
+    // patient background prefetch (so it still runs invisibly while
+    // charting, same as 5.59-5.61), but give it two independent chances
+    // to start as early as possible, so a quick "open panel -> straight to
+    // Billing" doesn't outrun it:
+    //   1. primeCdssCancerScreeningCache(), called from checkAndUpdate
+    //      (same idle-deferred, once-per-patient scheduling as 5.61 —
+    //      never competes with the chart's own initial paint).
+    //   2. The SAME function called immediately (fire-and-forget, no
+    //      idle/delay) from openPanel() — opening Coding Snapshot is an
+    //      explicit signal the user is about to code this patient, so
+    //      that's worth starting right away rather than waiting for an
+    //      idle gap that may not come before they click into Billing.
+    // Both are no-ops if a scrape is already in flight or already cached
+    // for this patient, so there's never more than one real scrape per
+    // patient no matter how many times either fires.
+    //
+    // computeAnalysis() still only ever reads whatever's in the cache —
+    // if the user reaches Billing and clicks Analyze before either
+    // prefetch finished (or before either got a chance to run at all —
+    // e.g. history was still loading), CDSS just doesn't contribute to
+    // that Analyze run, exactly as before: it's additive-only and never
+    // required, so nothing breaks — it's a best-effort prefetch, not a
+    // blocking dependency.
+    let cdssScrapeScheduledForKey = "";
+    function primeCdssCancerScreeningCache(immediate) {
+        if (cdssScrapeInFlight) return;
         const historyApi = window.__ecwPatientHistory;
+        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-        if (!key) return; // no identifiable patient — nothing to cache against
-        if (key === cdssCancerCacheKey) return; // already have it for this patient
-        if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return; // CDSS unreachable from Billing
-        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return; // let history finish first; Analyze can be re-clicked
+        if (!key || key === cdssCancerCacheKey) return;
+        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
+        if (hasBillingGrid) return; // CDSS isn't reachable from Billing — only ever prime while still on the chart
+        if (cdssScrapeScheduledForKey === key) return; // already scheduled/running for this patient
 
-        if (cdssScrapeInFlight) return; // another Analyze click is already scraping (shouldn't normally overlap, runAnalysis guards re-entry)
-        cdssScrapeInFlight = true;
-        try {
-            const result = await scrapeCdssCancerScreeningInvisibly();
-            const finalKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-            if (finalKey === key) {
-                cdssCancerCache = result;
-                cdssCancerCacheKey = key;
+        const start = async () => {
+            // Re-check everything — time may have passed, and the user
+            // may have switched patients, opened Billing, etc.
+            if (cdssScrapeInFlight) return;
+            if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
+            const stillKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+            if (stillKey !== key || key === cdssCancerCacheKey) return;
+            if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
+
+            cdssScrapeInFlight = true;
+            try {
+                const result = await scrapeCdssCancerScreeningInvisibly();
+                const finalKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+                if (finalKey === key) {
+                    cdssCancerCache = result;
+                    cdssCancerCacheKey = key;
+                }
+            } finally {
+                cdssScrapeInFlight = false;
             }
-        } finally {
-            cdssScrapeInFlight = false;
+        };
+
+        if (immediate) {
+            // Explicit "I'm about to code this patient" signal (panel just
+            // opened, or runAnalysis's last-resort check) — start right
+            // away rather than waiting for idle, so a fast switch into
+            // Billing right after doesn't outrun it. Returns the in-flight
+            // promise so a caller that cares (runAnalysis) can await it;
+            // openPanel's fire-and-forget call just ignores the return.
+            cdssScrapeScheduledForKey = key;
+            return start();
         }
+
+        cdssScrapeScheduledForKey = key;
+        const runIdle = (fn) => {
+            if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 2000 });
+            else setTimeout(fn, 300);
+        };
+        // Small fixed delay first so this never fires in the same tick as
+        // a fresh chart/encounter load, then hop to an idle callback so it
+        // waits for a genuine gap in whatever eCW/Angular is doing — keeps
+        // this from competing with the chart's own initial render.
+        setTimeout(() => runIdle(start), 2000);
+    }
+
+    // Last-resort attempt from runAnalysis(): normally a no-op (cache is
+    // already primed, or the user is on Billing and this correctly does
+    // nothing since CDSS isn't reachable there). Only actually does
+    // anything in the edge case where Analyze gets clicked while still on
+    // the SOAP view with priming not yet attempted.
+    async function ensureCdssCancerScreeningForAnalysis() {
+        await primeCdssCancerScreeningCache(true);
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
@@ -2795,8 +2877,8 @@ function __smartCoderReadVersion(fallback) {
 
             // ---- Also check CDSS (PopHealth) cancer-screening measures ----
             // Same 3 codes, same time windows — but sourced from eCW's own
-            // CDSS compliance data (see ensureCdssCancerScreeningForAnalysis,
-            // invisible on-demand read) instead of the chart's HEALTH
+            // CDSS compliance data (see primeCdssCancerScreeningCache,
+            // invisible background prefetch) instead of the chart's HEALTH
             // PROMOTION section above. Only a cache already populated for
             // THIS patient is used. A Noncompliant (red) row is never
             // accepted no matter the date, and a future "Last Done" date
@@ -6062,13 +6144,16 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
         setTimeout(async () => {
             try {
-                // On-demand CDSS cancer-screening read (see
-                // ensureCdssCancerScreeningForAnalysis) — only happens here,
-                // only for the patient being analyzed right now, and only
-                // once (cached after). If it fails/times out/isn't reachable
-                // (e.g. Billing is up), computeAnalysis just proceeds without
-                // it exactly as before — CDSS is additive-only, never
-                // required.
+                // Normally a no-op: CDSS was already prefetched in the
+                // background while the user was still on the chart (see
+                // primeCdssCancerScreeningCache, called from checkAndUpdate
+                // and openPanel). This is just a last-resort safety net for
+                // the edge case where Analyze gets clicked before that
+                // finished (or before it got a chance to run) and we're
+                // still on the SOAP view — see ensureCdssCancerScreeningForAnalysis.
+                // If it isn't reachable (e.g. already on Billing) or times
+                // out, computeAnalysis just proceeds without it exactly as
+                // before — CDSS is additive-only, never required.
                 await ensureCdssCancerScreeningForAnalysis();
             } catch (err) {
                 console.error('[Getwell SmartCoder] CDSS cancer-screening read failed (non-fatal):', err);
@@ -6666,6 +6751,13 @@ function __smartCoderReadVersion(fallback) {
         actionRunning = false;
         panel.style.display = 'block';
         renderSnapshotBlock();
+        // Explicit "about to code this patient" signal — give the CDSS
+        // prefetch an immediate head start (instead of waiting for the
+        // idle-deferred background attempt in checkAndUpdate) since the
+        // user is likely to switch into Billing and click Analyze soon,
+        // and CDSS can only be read while still on this (chart) view.
+        // Fire-and-forget: no-ops instantly if already cached/in-flight.
+        primeCdssCancerScreeningCache(true);
     }
 
     function closePanelToTab() {
@@ -6690,20 +6782,15 @@ function __smartCoderReadVersion(fallback) {
         if (onChart) {
             if (!isPanelOpen()) showTab();
             if (isPanelOpen()) renderSnapshotBlock();
-            // NOTE: the CDSS cancer-screening scrape is no longer kicked
-            // off from here. 5.59-5.61 ran it automatically in the
-            // background for every patient the moment the chart loaded —
-            // even for the (common) case where the user never opens
-            // Coding Snapshot / clicks Analyze at all — which is exactly
-            // what "laggy while working" and "takes so much time" were
-            // about: it made every single patient pay for a heavy real
-            // eCW modal open+render (network round-trip plus Angular
-            // rendering the PopHealth table) while they were still
-            // charting, whether or not that data would ever be used.
-            // 5.62 makes it fully on-demand instead — see
-            // ensureCdssCancerScreeningForAnalysis(), invoked from
-            // runAnalysis() only once the user actually clicks Analyze,
-            // which is the only place this cache is ever read.
+            // Fire-and-forget: internally schedules/no-ops on its own
+            // (new patient? history done? not already on Billing? already
+            // cached/in-flight?). Idle-deferred so it never competes with
+            // the chart's own initial paint — see primeCdssCancerScreeningCache.
+            // CDSS is only reachable from here (the SOAP/chart view), never
+            // from Billing, which is why this has to stay a background
+            // prefetch rather than something triggered at Analyze time —
+            // see the comment above primeCdssCancerScreeningCache for why.
+            primeCdssCancerScreeningCache(false);
         } else {
             hideTab();
             if (panel) panel.style.display = 'none';
