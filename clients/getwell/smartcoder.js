@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.71
+// @name         Getwell SmartCoder by ATQ v5.72
 // @namespace    http://tampermonkey.net/
-// @version      5.71
+// @version      5.72
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,21 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.72 (2026-08-25) - "After history loading, while CDSS is checking, the
+//   whole screen goes white for a while" — a regression from 5.71's own
+//   fix. 5.71 made the entire <html> element visibility:hidden so it
+//   wouldn't matter what markup/position the CDSS dialog used — that
+//   part worked (no more modal flash), but visibility:hidden on <html>
+//   stops the browser from painting ANYTHING under it, so the real
+//   patient chart the user was reading also disappeared for the whole
+//   scrape, replaced by a blank white viewport. That's a bigger problem
+//   than the one it fixed. Fix: stop hiding the whole page. Instead,
+//   watchAndHideCdssNodes() runs a MutationObserver on document.body
+//   with subtree:true (catches insertions at ANY depth, not just direct
+//   body children — the actual gap in the pre-5.71 per-node approach)
+//   and hides only the specific node(s) CDSS inserts. The rest of the
+//   chart stays fully visible and interactive the entire time; only the
+//   invisible CDSS dialog is affected, no matter where eCW mounts it.
 // 5.71 (2026-08-25) - "CDSS opening/closing still visibly flashes on
 //   screen, must never be seen." Root cause: the hiding logic only hid
 //   elements matching guessed selectors/positions — CSS targeting
@@ -1617,19 +1632,18 @@ function __smartCoderReadVersion(fallback) {
         if (document.getElementById(CDSS_HIDE_STYLE_ID)) return;
         const style = document.createElement('style');
         style.id = CDSS_HIDE_STYLE_ID;
-        // Hide the WHOLE page (via <html>), not just guessed-at selectors
-        // like .modal/.modal-backdrop. eCW's CDSS dialog markup is custom
-        // (IDs like alertsMainTbl1, not Bootstrap classes) and may not be
-        // a direct child of <body> either, so any selector- or
-        // node-tracking approach can miss it and let a flash through.
-        // visibility is inherited by every descendant regardless of its
-        // class name or where it's mounted, so this is markup-agnostic and
-        // guaranteed to hide anything eCW inserts. visibility (never
-        // display:none) still lets Angular lay out/measure/populate the
-        // modal normally, and .click() still fires on hidden elements.
+        // Targeted hiding only — see hideCdssInsertedNode() below for how
+        // nodes get this class. (5.71 tried hiding the whole <html>
+        // element instead, which stopped the modal from flashing but
+        // blanked the entire chart to a plain white screen for the
+        // duration — visibility:hidden on <html> suppresses painting of
+        // EVERYTHING under it, including the chart the user is reading,
+        // not just the CDSS dialog. That's worse, not better.)
         style.textContent = `
-            html.${CDSS_HIDE_HTML_CLASS} {
+            .${CDSS_HIDE_HTML_CLASS} {
                 visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
             }
         `;
         document.head.appendChild(style);
@@ -1674,6 +1688,33 @@ function __smartCoderReadVersion(fallback) {
         return result;
     }
 
+    // Hides exactly the node(s) CDSS inserts, wherever in the DOM they
+    // land — a MutationObserver on document.body with subtree:true so it
+    // catches insertions at any depth (not just direct body children,
+    // which earlier versions wrongly assumed). Only the outermost newly-
+    // added element of each mutation is hidden (never a descendant of a
+    // node already hidden this scrape) — hiding a node hides everything
+    // inside it via the CSS above, so touching only the topmost new node
+    // keeps this cheap and avoids fighting Angular over inner nodes it's
+    // still populating.
+    function watchAndHideCdssNodes() {
+        const hiddenNodes = [];
+        function hide(node) {
+            if (node.nodeType !== 1) return;
+            if (hiddenNodes.some(h => h === node || h.contains(node))) return;
+            node.classList.add(CDSS_HIDE_HTML_CLASS);
+            hiddenNodes.push(node);
+        }
+        const observer = new MutationObserver(mutations => {
+            mutations.forEach(m => m.addedNodes.forEach(hide));
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        return {
+            hiddenNodes,
+            stop() { observer.disconnect(); },
+        };
+    }
+
     // Opens the CDSS modal invisibly, reads the cancer-screening rows, and
     // closes it. Prefers the network-JSON intercept (fast — no need to
     // wait for the table to render); falls back to scraping the DOM table
@@ -1683,15 +1724,15 @@ function __smartCoderReadVersion(fallback) {
     // silently leaving the modal open when it didn't. Fixed by polling
     // briefly for the close button before giving up on it.
     //
-    // Hiding itself is done by making the *entire page* (<html>)
-    // visibility:hidden for the whole scrape, instead of tracking/hiding
-    // individual nodes. Per-node tracking (previous versions) assumed the
-    // dialog was a direct child of <body> using known class names
-    // (.modal/.modal-backdrop) — eCW's actual CDSS markup doesn't
-    // necessarily match either assumption, which is exactly how open/close
-    // kept flashing on screen. visibility:hidden on <html> is inherited by
-    // every descendant no matter its class or where it's mounted, so
-    // nothing can ever be visible during the scrape, guaranteed.
+    // Hiding: 5.71 tried making <html> itself visibility:hidden so it
+    // wouldn't matter where/how the dialog was mounted — that did stop
+    // the modal from flashing, but visibility:hidden on <html> hides
+    // EVERYTHING under it, so the chart the user was actively reading
+    // went blank white for the whole scrape, which is its own real
+    // problem. 5.72 instead hides only what CDSS actually inserts, found
+    // via a subtree-wide MutationObserver (watchAndHideCdssNodes) so it
+    // doesn't matter what class names eCW uses or how deep it nests the
+    // dialog — but it leaves the rest of the chart on screen, untouched.
     async function scrapeCdssCancerScreeningInvisibly() {
         const link = findCdssTopPanelLink();
         if (!link) return null;
@@ -1700,7 +1741,7 @@ function __smartCoderReadVersion(fallback) {
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
 
         ensureCdssHideStyle();
-        document.documentElement.classList.add(CDSS_HIDE_HTML_CLASS);
+        const watcher = watchAndHideCdssNodes();
 
         let result = null;
         try {
@@ -1725,6 +1766,7 @@ function __smartCoderReadVersion(fallback) {
         } catch {
             result = null;
         } finally {
+            watcher.stop();
             // Wait (briefly) for the close button to actually exist before
             // giving up on clicking it — this is the fix for the modal
             // being left open: the close button may not have rendered yet
@@ -1740,11 +1782,16 @@ function __smartCoderReadVersion(fallback) {
                 if (anyClose) anyClose.click();
                 else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
             }
-            // Give the close animation/removal a brief moment to finish
-            // while the page is still hidden, then reveal it again. Nothing
-            // can flash during this wait — the whole page is invisible.
-            await new Promise(r => setTimeout(r, 150));
-            document.documentElement.classList.remove(CDSS_HIDE_HTML_CLASS);
+            // Wait for each hidden node to either leave the DOM or pick up
+            // eCW's own hidden state (display:none/ng-hide) before
+            // un-hiding, so the close animation/removal never gets a
+            // chance to flash on screen.
+            const stillNeedsHiding = (node) => node.isConnected && window.getComputedStyle(node).display !== 'none';
+            const waitStart = Date.now();
+            while (watcher.hiddenNodes.some(stillNeedsHiding) && Date.now() - waitStart < 2000) {
+                await new Promise(r => setTimeout(r, 50));
+            }
+            watcher.hiddenNodes.forEach(node => node.classList.remove(CDSS_HIDE_HTML_CLASS));
         }
         return result;
     }
