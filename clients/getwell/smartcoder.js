@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.63
+// @name         Getwell SmartCoder by ATQ v5.64
 // @namespace    http://tampermonkey.net/
-// @version      5.63
+// @version      5.64
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,37 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.64 (2026-08-25) - Two more things found from live use of 5.63:
+//   1) REAL BUG: "colorectal took too long to appear in Analyze". Cause:
+//      when runAnalysis()'s last-resort call landed while the background
+//      prefetch (from checkAndUpdate/openPanel) was ALREADY running for
+//      the same patient, it saw cdssScrapeInFlight===true and just
+//      returned — a plain no-op — instead of waiting for that already-
+//      running scrape to finish. So Analyze proceeded without CDSS data
+//      even when the read was seconds from completing, and only a later,
+//      separate Analyze click would pick it up. Fixed: the in-flight
+//      scrape's own promise is now tracked (cdssScrapeInFlightPromise)
+//      and handed back to ANY caller that asks while it's running, so
+//      runAnalysis genuinely awaits the same scrape instead of treating
+//      "already running" as "nothing to do". Also tightened the
+//      background trigger's own start-up delay (was a fixed 2s PLUS up
+//      to a 2s idle-callback timeout — up to 4s of pure waiting before
+//      the read even began) down to 400ms + up to 800ms idle timeout, so
+//      it has more of the "chart -> Billing -> Analyze" window to finish
+//      in before being needed.
+//   2) SAFETY GAP: even with (1) fixed, CDSS can legitimately still be
+//      mid-read (or, if Billing was reached before it ever got a chance
+//      to run, never read at all) at the moment Analyze is clicked — and
+//      an empty cancer-screening result looks IDENTICAL whether that's
+//      because nothing is due or because CDSS just wasn't checked yet.
+//      That's a real risk of a coder reading "nothing proposed" as
+//      "no screening needed" and moving on. Added
+//      getCdssCancerScreeningStatus() ('done'/'checking'/'unreachable'/
+//      'pending') and a visible banner in the Coding Snapshot panel
+//      (cdssStatusBannerHtml) — shown with every Analyze result AND as a
+//      quiet hint before Analyze is even clicked — that says outright
+//      whether CDSS cancer-screening was actually included, so silence
+//      is never mistaken for "checked and clear".
 // 5.63 (2026-08-25) - 5.62 made the CDSS cancer-screening read fully
 //   on-demand, triggered from runAnalysis() ("Analyze Codes"). Reported
 //   back as broken: Analyze is only ever clicked from the Billing tab,
@@ -1326,6 +1357,9 @@ function __smartCoderReadVersion(fallback) {
     let cdssCancerCache = null;       // { colorectal, cervical, breast } | null — see parseCdssCancerRows
     let cdssCancerCacheKey = "";      // patient key this cache belongs to
     let cdssScrapeInFlight = false;   // de-dupe: guards against overlapping scrapes
+    let cdssScrapeInFlightKey = "";   // which patient key the in-flight scrape (if any) is for
+    let cdssScrapeInFlightPromise = null; // so a second caller (e.g. runAnalysis) can await the SAME in-flight scrape instead of missing it
+    let cdssScrapeAttemptedKey = "";  // a scrape was started (and finished, one way or another — done/failed/skipped) at least once for this key — lets the UI tell "never got a chance to check" apart from "checked, found nothing"
 
     const CDSS_HIDE_STYLE_ID = 'docproCdssHideCSS';
     const CDSS_HIDE_HTML_CLASS = 'docpro-cdss-scraping';
@@ -1516,26 +1550,46 @@ function __smartCoderReadVersion(fallback) {
     // required, so nothing breaks — it's a best-effort prefetch, not a
     // blocking dependency.
     let cdssScrapeScheduledForKey = "";
+
+    // 5.64: fixes a real bug found from live use — "colorectal took too
+    // long to show up in Analyze". Previously, if a background prefetch
+    // was already running when runAnalysis() made its own "last resort"
+    // call, that call saw cdssScrapeInFlight===true and just returned
+    // immediately (a plain no-op) INSTEAD of waiting for the already-
+    // running scrape to finish. So Analyze would proceed without CDSS
+    // data even though a scrape was seconds from completing — the user
+    // had to click Analyze again later to pick it up. Fixed by tracking
+    // the in-flight scrape's own promise (cdssScrapeInFlightPromise), so
+    // any caller — the original starter or a later one — awaits the
+    // SAME scrape instead of a second one racing or silently giving up.
     function primeCdssCancerScreeningCache(immediate) {
-        if (cdssScrapeInFlight) return;
         const historyApi = window.__ecwPatientHistory;
-        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
         const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
-        if (!key || key === cdssCancerCacheKey) return;
+
+        // A scrape for this exact patient is already running — hand back
+        // that SAME promise so the caller actually waits for it instead of
+        // treating "already in flight" as "nothing to do here".
+        if (cdssScrapeInFlight && cdssScrapeInFlightKey === key && key) {
+            return cdssScrapeInFlightPromise;
+        }
+        if (cdssScrapeInFlight) return null; // in-flight for a *different* patient (stale) — don't interfere with it
+
+        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return null;
+        if (!key || key === cdssCancerCacheKey) return null;
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
-        if (hasBillingGrid) return; // CDSS isn't reachable from Billing — only ever prime while still on the chart
-        if (cdssScrapeScheduledForKey === key) return; // already scheduled/running for this patient
+        if (hasBillingGrid) return null; // CDSS isn't reachable from Billing — only ever prime while still on the chart
+        if (cdssScrapeScheduledForKey === key && !immediate) return null; // already scheduled (idle timer pending) for this patient
 
         const start = async () => {
             // Re-check everything — time may have passed, and the user
             // may have switched patients, opened Billing, etc.
-            if (cdssScrapeInFlight) return;
             if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
             const stillKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
             if (stillKey !== key || key === cdssCancerCacheKey) return;
             if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
 
             cdssScrapeInFlight = true;
+            cdssScrapeInFlightKey = key;
             try {
                 const result = await scrapeCdssCancerScreeningInvisibly();
                 const finalKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
@@ -1544,38 +1598,78 @@ function __smartCoderReadVersion(fallback) {
                     cdssCancerCacheKey = key;
                 }
             } finally {
+                cdssScrapeAttemptedKey = key;
                 cdssScrapeInFlight = false;
+                cdssScrapeInFlightKey = "";
+                cdssScrapeInFlightPromise = null;
             }
         };
+
+        cdssScrapeScheduledForKey = key;
 
         if (immediate) {
             // Explicit "I'm about to code this patient" signal (panel just
             // opened, or runAnalysis's last-resort check) — start right
             // away rather than waiting for idle, so a fast switch into
-            // Billing right after doesn't outrun it. Returns the in-flight
-            // promise so a caller that cares (runAnalysis) can await it;
-            // openPanel's fire-and-forget call just ignores the return.
-            cdssScrapeScheduledForKey = key;
-            return start();
+            // Billing right after doesn't outrun it.
+            const p = start();
+            cdssScrapeInFlightPromise = p;
+            return p;
         }
 
-        cdssScrapeScheduledForKey = key;
         const runIdle = (fn) => {
-            if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 2000 });
-            else setTimeout(fn, 300);
+            if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 800 });
+            else setTimeout(fn, 150);
         };
-        // Small fixed delay first so this never fires in the same tick as
-        // a fresh chart/encounter load, then hop to an idle callback so it
-        // waits for a genuine gap in whatever eCW/Angular is doing — keeps
-        // this from competing with the chart's own initial render.
-        setTimeout(() => runIdle(start), 2000);
+        // A short fixed delay first so this never fires in the very same
+        // tick as a fresh chart/encounter load, then hop to an idle
+        // callback so it still yields to genuinely urgent chart work —
+        // but capped much tighter than before (was 2s fixed + up to 2s
+        // idle timeout = up to 4s of pure waiting before the read even
+        // started). That was needlessly conservative: a coder can
+        // realistically reach Billing and click Analyze within a few
+        // seconds of opening a chart, so waiting up to 4s before even
+        // starting was itself a big part of "took too long to show up".
+        // openPanel()'s immediate call remains the primary fast path;
+        // this is just the fallback for when Coding Snapshot is opened
+        // after CDSS should've already started, or never opened at all
+        // before Analyze (edge case caught by ensureCdssCancerScreeningForAnalysis).
+        setTimeout(() => runIdle(() => { cdssScrapeInFlightPromise = start(); }), 400);
+        return null; // background path: nothing to await synchronously — status is exposed via getCdssCancerScreeningStatus()
     }
 
-    // Last-resort attempt from runAnalysis(): normally a no-op (cache is
-    // already primed, or the user is on Billing and this correctly does
-    // nothing since CDSS isn't reachable there). Only actually does
-    // anything in the edge case where Analyze gets clicked while still on
-    // the SOAP view with priming not yet attempted.
+    // Exposes what's going on with the CDSS cancer-screening check for the
+    // CURRENT patient, so the UI (renderAnalysisSection) can tell the coder
+    // outright whether cancer-screening compliance was actually considered
+    // in a given Analyze run — instead of an empty "Nothing to add" for
+    // cancer-screening codes reading as "nothing needed" when it might
+    // really mean "CDSS hadn't been read yet". Returns one of:
+    //   'done'      — cache is populated for this patient; CDSS was checked
+    //   'checking'  — a scrape for this patient is running right now
+    //   'unreachable' — Billing's grids are up and CDSS was never reached
+    //                   for this patient (no chart-view visit happened, or
+    //                   didn't last long enough to prefetch)
+    //   'pending'   — not yet attempted, but still reachable (still on the
+    //                   chart view; e.g. the idle-deferred prefetch hasn't
+    //                   fired yet)
+    function getCdssCancerScreeningStatus() {
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key) return 'pending';
+        if (key === cdssCancerCacheKey) return 'done';
+        if (cdssScrapeInFlight && cdssScrapeInFlightKey === key) return 'checking';
+        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
+        if (hasBillingGrid) return 'unreachable';
+        return 'pending';
+    }
+
+    // Last-resort attempt from runAnalysis(): if CDSS is still 'pending' or
+    // 'checking' for this patient, this either starts it (pending, and
+    // we're still on the chart view where it's reachable) or awaits the
+    // already-running scrape (checking) — see the promise-sharing fix
+    // above. Normally a fast no-op: the background prefetch (checkAndUpdate
+    // / openPanel) has almost always already finished by the time Analyze
+    // is clicked.
     async function ensureCdssCancerScreeningForAnalysis() {
         await primeCdssCancerScreeningCache(true);
     }
@@ -2562,6 +2656,13 @@ function __smartCoderReadVersion(fallback) {
     }
 
     function computeAnalysis() {
+        // Set inside the cancer-screening block below (see
+        // getCdssCancerScreeningStatus) and carried on the returned
+        // analysisState as `cdssStatus`, so renderAnalysisSection can show
+        // the coder whether CDSS cancer-screening compliance was actually
+        // considered in this specific Analyze run. Defaults to 'pending'
+        // in case that block is ever skipped for some reason.
+        let cdssStatusThisRun = 'pending';
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
         const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
@@ -2894,6 +2995,11 @@ function __smartCoderReadVersion(fallback) {
             const cdssKey = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
                 ? (window.__ecwPatientHistory.getCurrentKey() || '')
                 : '';
+            // Recorded on the returned analysisState (see below) so the
+            // panel can tell the coder plainly whether CDSS was actually
+            // consulted this run, rather than leaving them to guess from
+            // an empty cancer-screening result.
+            cdssStatusThisRun = getCdssCancerScreeningStatus();
             if (cdssCancerCache && cdssCancerCacheKey && cdssCancerCacheKey === cdssKey) {
                 const cdss = cdssCancerCache;
                 const notFutureDated = (dateStr) => {
@@ -3415,7 +3521,7 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
-        return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance };
+        return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance, cdssStatus: cdssStatusThisRun };
     }
 
     // ====================== FAST ICD ADD (search box + selection only, ported from the Button_Disabled ICD linker script) ======================
@@ -6318,6 +6424,32 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
     }
 
+    // Surfaces whether CDSS cancer-screening compliance was actually
+    // considered in this Analyze run — see getCdssCancerScreeningStatus().
+    // Added because of a real reported failure mode: cancer-screening
+    // (3014F/3015F/3017F) not appearing in "To add" looks IDENTICAL
+    // whether it's because CDSS/chart genuinely show nothing due, or
+    // because CDSS simply hadn't been read yet when Analyze ran — and a
+    // coder seeing an empty result with no such warning could reasonably
+    // (and wrongly) conclude no cancer screening is needed, then go apply
+    // codes from Billing without it. This makes that distinction explicit
+    // instead of silent.
+    function cdssStatusBannerHtml(status) {
+        if (status === 'done') {
+            return `<div class="ecs-diff-empty" style="color:#059669;">✓ CDSS cancer-screening check included in this result</div>`;
+        }
+        if (status === 'checking') {
+            return `<div class="ecs-diff-empty" style="color:#b45309;">⏳ CDSS cancer-screening check is still running — this result may not include it yet. Click Analyze again in a few seconds to pick it up.</div>`;
+        }
+        if (status === 'unreachable') {
+            return `<div class="ecs-diff-empty" style="color:#dc2626;">⚠ CDSS cancer-screening was NOT checked for this patient (only reachable from the chart view, not Billing) — this result reflects the chart's HEALTH PROMOTION section only. Reopen this patient's chart tab briefly, then re-Analyze, to include CDSS.</div>`;
+        }
+        // 'pending' — reachable but never attempted yet (e.g. Coding
+        // Snapshot was opened and Analyze clicked immediately, before the
+        // background prefetch had a chance to run at all).
+        return `<div class="ecs-diff-empty" style="color:#b45309;">⚠ CDSS cancer-screening has not been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it.</div>`;
+    }
+
     function renderAnalysisSection() {
         if (actionLog.length && !actionRunning) {
             const items = actionLog.map(l => {
@@ -6367,6 +6499,7 @@ function __smartCoderReadVersion(fallback) {
             const disabled = (!toAdd.length && !toDelete.length) ? 'disabled' : '';
             return `<div class="ecs-analysis">
                 <div class="ecs-analysis-title">Proposed changes</div>
+                ${cdssStatusBannerHtml(analysisState.cdssStatus)}
                 <div class="ecs-analysis-scroll">
                     <div class="ecs-diff-group"><div class="ecs-diff-label">To add</div>${addRows}</div>
                     <div class="ecs-diff-group"><div class="ecs-diff-label">To remove</div>${delRows}</div>
@@ -6378,8 +6511,18 @@ function __smartCoderReadVersion(fallback) {
             </div>`;
         }
 
+        // Idle state (Analyze not yet clicked this session): a quiet,
+        // non-alarming hint of the CDSS prefetch's current status, so
+        // there's visibility into it even before the coder clicks Analyze.
+        const idleCdssHint = (() => {
+            const status = getCdssCancerScreeningStatus();
+            if (status === 'done') return `<div class="ecs-diff-empty" style="color:#059669;font-size:11px;">✓ CDSS cancer-screening data ready</div>`;
+            if (status === 'checking') return `<div class="ecs-diff-empty" style="color:#b45309;font-size:11px;">⏳ Reading CDSS cancer-screening data…</div>`;
+            return '';
+        })();
         return `<div class="ecs-analysis">
             <button id="ecsAnalyzeBtn" class="ecs-btn ecs-btn-primary" style="width:100%;">🔍 Analyze Codes</button>
+            ${idleCdssHint}
         </div>`;
     }
 
