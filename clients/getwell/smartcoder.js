@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.58
+// @name         Getwell SmartCoder by ATQ v5.74
 // @namespace    http://tampermonkey.net/
-// @version      5.58
+// @version      5.74
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,303 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.74 (2026-08-25) - Blood draw/blood work (36415/99000) can now come
+//   from the HPI, not just the CC. Previously only a CC mention of
+//   "blood draw"/"blood work" triggered these two codes — a real blood
+//   draw described only in the HPI (a common pattern: "daughter called
+//   in... blood work was obtained today for routine monitoring") was
+//   silently missed. HPI mentions are held to a stricter bar than CC
+//   ones, though, since HPI often narrates PAST or FUTURE draws too, not
+//   just today's: a mention only counts when it's tied to today's visit
+//   (a "today"/"this visit"/"now" wording in the same sentence, or
+//   elsewhere in the HPI when that sentence has no conflicting marker)
+//   and is NOT tied to an explicit date, "ago", "last week", "scheduled",
+//   "at the hospital", etc. — any of those next to the mention rules it
+//   out even if "today" appears elsewhere in the note.
+// 5.73 (2026-08-25) - New cross-client billing-exclusivity rules:
+//   1) 99401/99406 are never billed together with 99214 — if both are
+//      applicable, 99214 wins and 99401/99406 is removed (applies to
+//      every client). 2) A TCM code (99495/99496) on the chart disables
+//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
+//      Preventive itself can still apply. 3) 99214 + a TCM code together
+//      is allowed for Getwell (and Bronx) specifically — no downgrade;
+//      every other client downgrades 99214 -> 99213 when a TCM code is
+//      present (Hasan Sheikh goes further and drops the office-visit
+//      code entirely — see that client's own changelog).
+// 5.72 (2026-08-25) - "After history loading, while CDSS is checking, the
+//   whole screen goes white for a while" — a regression from 5.71's own
+//   fix. 5.71 made the entire <html> element visibility:hidden so it
+//   wouldn't matter what markup/position the CDSS dialog used — that
+//   part worked (no more modal flash), but visibility:hidden on <html>
+//   stops the browser from painting ANYTHING under it, so the real
+//   patient chart the user was reading also disappeared for the whole
+//   scrape, replaced by a blank white viewport. That's a bigger problem
+//   than the one it fixed. Fix: stop hiding the whole page. Instead,
+//   watchAndHideCdssNodes() runs a MutationObserver on document.body
+//   with subtree:true (catches insertions at ANY depth, not just direct
+//   body children — the actual gap in the pre-5.71 per-node approach)
+//   and hides only the specific node(s) CDSS inserts. The rest of the
+//   chart stays fully visible and interactive the entire time; only the
+//   invisible CDSS dialog is affected, no matter where eCW mounts it.
+// 5.71 (2026-08-25) - "CDSS opening/closing still visibly flashes on
+//   screen, must never be seen." Root cause: the hiding logic only hid
+//   elements matching guessed selectors/positions — CSS targeting
+//   .modal/.modal-backdrop, plus a MutationObserver that only hid new
+//   *direct children of document.body*. eCW's actual CDSS dialog markup
+//   is custom (IDs like alertsMainTbl1, not Bootstrap classes) and there
+//   was no guarantee it's a direct body child either, so either
+//   assumption failing let a real flash through on a live patient chart.
+//   Fix: hide the ENTIRE page instead of guessing at the dialog's markup.
+//   The docpro-cdss-scraping class now sets visibility:hidden directly on
+//   <html>; visibility is inherited by every descendant regardless of
+//   its class name or where it's mounted, so nothing on the page can be
+//   visible for the whole scrape, guaranteed. This also let us delete the
+//   per-node hideNewBodyChildren()/MutationObserver/stillNeedsHiding-
+//   polling logic entirely (no longer needed once the whole page is
+//   hidden) in favor of one fixed short wait before revealing the page
+//   again — less code, more reliable.
+// 5.70 (2026-08-25) - "The extension is continuously looking for something
+//   every 2/3 seconds, making everything laggy" — found two real,
+//   general-purpose sources of that, unrelated to CDSS this time:
+//   1) isPatientChart() ran document.body.innerText on EVERY 2.5s
+//      checkAndUpdate tick, for as long as the user was anywhere on a
+//      chart page (which is most of the time this extension runs at
+//      all). .innerText forces the browser to fully compute page layout
+//      — a genuinely expensive synchronous operation — so this was a
+//      real, periodic layout-thrash on a timer. Fixed: skip it entirely
+//      while on the Billing tab (no SOAP text exists there anyway, so it
+//      was never actually needed to answer "are we on the chart" in that
+//      case); on the SOAP view, throttled to at most once every 8s
+//      instead of every 2.5s tick, trusting the cached result in between
+//      (a fresh scan still happens immediately on switching patients).
+//   2) renderSnapshotBlock() rebuilt the whole panel's innerHTML from
+//      scratch on every tick, even when the generated markup was
+//      byte-for-byte identical to what was already on screen — forcing
+//      an unnecessary re-parse/re-layout of the panel each time. Now
+//      skips the DOM write entirely when nothing actually changed.
+// 5.69 (2026-08-25) - The CDSS status badge (5.67) spelled its message out
+//   as a full sentence, which wrapped to 2-3 lines in the panel's narrow
+//   width and ate a large chunk of the limited vertical space above "TO
+//   ADD"/"TO REMOVE". Cut down to a short single-line badge ("✓ CDSS
+//   checked", "⚠ CDSS not checked (chart-only result)", etc.) with tighter
+//   padding/line-height; the full explanation moved into a title=""
+//   tooltip (hover to see it) instead of being permanently on-screen.
+// 5.68 (2026-08-25) - Reported from live use: 5.66/5.67 sometimes left the
+//   CDSS modal open on screen, plus the trigger machinery had grown too
+//   complex to trust ("increased code lines a lot but didn't do any
+//   effective work"). Rewrote the whole CDSS section:
+//   REAL BUG FIXED — the modal staying open: 5.66 closed the modal the
+//   instant the intercepted JSON arrived, which can be BEFORE the close
+//   button has even rendered into the DOM yet. findCdssCloseButton()
+//   returning null was silently treated as "nothing to close" (the code
+//   was `if (closeBtn) closeBtn.click()`, no retry) — leaving the modal
+//   open with nothing left to close it. Fixed: now waits (briefly, up to
+//   3s) for the close button to actually exist before giving up, with an
+//   Escape-key/generic-.close fallback if it somehow still can't be found,
+//   so a real patient chart is never left with a stuck invisible modal.
+//   SIMPLIFIED BACK DOWN — per direct feedback that "cdss after history
+//   was a good choice" and the extra "rules" (multiple trigger points in
+//   checkAndUpdate + openPanel + a runAnalysis last-resort, in-flight
+//   promise-sharing, an isLoading() gate debate, an auto-refresh-after-
+//   late-arrival hook) were bloat without real benefit. Removed all of
+//   that in favor of ONE rule: maybeStartCdssAfterHistory(), called only
+//   from checkAndUpdate — once patient-history finishes loading, start
+//   CDSS immediately, once per patient, full stop. The JSON-intercept
+//   speed fix from 5.66 (reading getPatientAlertData.jsp's response
+//   directly instead of waiting for the table to render) is kept — that
+//   part was correct and is what actually makes the check fast — it's
+//   just no longer wrapped in extra scheduling logic on top.
+// 5.67 (2026-08-25) - Two more fixes from live feedback on 5.66:
+//   1) Sequential-wait bug: primeCdssCancerScreeningCache() refused to
+//      start while historyApi.isLoading() was true — meaning CDSS's own
+//      request (now a single lightweight JSON call) waited for the ENTIRE
+//      patient-history fetch (which pools multiple encounter requests and
+//      can genuinely take a while) to finish first, stacking two
+//      unrelated waits back-to-back. That gate was never actually
+//      necessary: getCurrentKey() (what CDSS keys its cache on) is set
+//      the moment history loading STARTS, not when it finishes — see
+//      loadPatientHistoryOnce — and CDSS never reads any history data,
+//      only the patient key. Removed the isLoading() gate (both in
+//      primeCdssCancerScreeningCache's guard and inside start()) so CDSS
+//      priming now runs concurrently with history loading instead of
+//      after it — this was most of "the waiting time is way too much
+//      longer" whenever history parsing itself took any real time.
+//   2) Styling: the CDSS status line was plain unstyled text reusing
+//      .ecs-diff-empty with ad hoc inline colors, sitting right under the
+//      Analyze button with no real spacing — looked cramped/out of place.
+//      Replaced with a proper .ecs-cdss-badge component (tinted
+//      background per status, padding, icon+text layout, consistent
+//      margin) matching the rest of the panel's visual language.
+// 5.66 (2026-08-25) - THE actual fix for the lag (5.65 identified the root
+//   cause but didn't have the info to fix it yet). A live network capture
+//   showed the CDSS modal's own Angular controller gets its data from a
+//   plain JSON endpoint (getPatientAlertData.jsp), not from server-side
+//   HTML the table is rendered from — so the real cost was never "open a
+//   modal", it was "wait for Angular to finish painting a table we never
+//   actually needed to look at" (its JSON arrives well before the table
+//   finishes rendering). Can't call that endpoint cold — its URL carries
+//   a per-request signed "pd" token we have no way to construct — so the
+//   click stays, but scrapeCdssCancerScreeningInvisibly() no longer waits
+//   for the DOM table at all: a lightweight always-on fetch/XHR patch
+//   (installAlertDataInterceptors) grabs the JSON the instant the browser
+//   receives it, and the modal is closed immediately once we have it —
+//   both the wait AND the hidden-modal window shrink to roughly the
+//   network round trip alone. Old DOM-table scrape kept as an automatic
+//   fallback (parseCdssCancerRows) in case this response ever comes back
+//   over a transport the patch isn't watching. Also means richer/more
+//   reliable data than icon-class DOM sniffing (measureId, a proper
+//   alertStatus code, ISO dates) at no extra cost.
+// 5.65 (2026-08-25) - Root-cause note + one real time-saver, in response
+//   to "checking still takes too much time, what's the benefit of
+//   automation if we still wait": the actual cost has never been the
+//   scheduling around the CDSS read — it's that the read itself opens
+//   eCW's real Angular CDSS modal (network round-trip + full Angular
+//   digest/render of the PopHealth grid) and closes it again. Hiding it
+//   better (5.62-5.64) or starting it earlier doesn't remove that cost,
+//   it only relocates it. The actual fix is to stop opening the modal at
+//   all and fetch its underlying data directly instead — exactly the
+//   pattern get_patient_icd_cpt_history()/fetchEncounter() already use
+//   for patient history elsewhere in this file (a plain fetch() straight
+//   to a read-only JSP endpoint, parsed with DOMParser, no UI touched at
+//   all). That requires knowing the actual endpoint CDSS's own modal
+//   calls, which needs one live network capture to identify — not done
+//   in this pass. Until then, added maybeAutoRefreshAnalysisAfterCdss():
+//   if Analyze was clicked before the background CDSS prefetch finished
+//   (analysisState.cdssStatus !== 'done'), the panel now silently
+//   recomputes and refreshes itself the moment CDSS data actually lands,
+//   instead of leaving a stale result sitting there until the coder
+//   thinks to click Analyze again — a real reduction in clicks/attention
+//   spent waiting, even though the underlying read's own latency is
+//   unchanged pending the direct-fetch rewrite above.
+// 5.64 (2026-08-25) - Two more things found from live use of 5.63:
+//   1) REAL BUG: "colorectal took too long to appear in Analyze". Cause:
+//      when runAnalysis()'s last-resort call landed while the background
+//      prefetch (from checkAndUpdate/openPanel) was ALREADY running for
+//      the same patient, it saw cdssScrapeInFlight===true and just
+//      returned — a plain no-op — instead of waiting for that already-
+//      running scrape to finish. So Analyze proceeded without CDSS data
+//      even when the read was seconds from completing, and only a later,
+//      separate Analyze click would pick it up. Fixed: the in-flight
+//      scrape's own promise is now tracked (cdssScrapeInFlightPromise)
+//      and handed back to ANY caller that asks while it's running, so
+//      runAnalysis genuinely awaits the same scrape instead of treating
+//      "already running" as "nothing to do". Also tightened the
+//      background trigger's own start-up delay (was a fixed 2s PLUS up
+//      to a 2s idle-callback timeout — up to 4s of pure waiting before
+//      the read even began) down to 400ms + up to 800ms idle timeout, so
+//      it has more of the "chart -> Billing -> Analyze" window to finish
+//      in before being needed.
+//   2) SAFETY GAP: even with (1) fixed, CDSS can legitimately still be
+//      mid-read (or, if Billing was reached before it ever got a chance
+//      to run, never read at all) at the moment Analyze is clicked — and
+//      an empty cancer-screening result looks IDENTICAL whether that's
+//      because nothing is due or because CDSS just wasn't checked yet.
+//      That's a real risk of a coder reading "nothing proposed" as
+//      "no screening needed" and moving on. Added
+//      getCdssCancerScreeningStatus() ('done'/'checking'/'unreachable'/
+//      'pending') and a visible banner in the Coding Snapshot panel
+//      (cdssStatusBannerHtml) — shown with every Analyze result AND as a
+//      quiet hint before Analyze is even clicked — that says outright
+//      whether CDSS cancer-screening was actually included, so silence
+//      is never mistaken for "checked and clear".
+// 5.63 (2026-08-25) - 5.62 made the CDSS cancer-screening read fully
+//   on-demand, triggered from runAnalysis() ("Analyze Codes"). Reported
+//   back as broken: Analyze is only ever clicked from the Billing tab,
+//   and CDSS's modal isn't reachable once Billing's grids are up, so
+//   on-demand-at-Analyze-time meant CDSS never actually ran — the whole
+//   trigger point was unreachable by construction. Reverted to a
+//   background prefetch (CDSS can only be read from the chart/SOAP view,
+//   which is necessarily before Billing), but with two independent start
+//   points instead of one so a quick "open panel -> straight to Billing"
+//   can't outrun it: the same idle-deferred once-per-patient check as
+//   5.61 (now primeCdssCancerScreeningCache(), called from
+//   checkAndUpdate), PLUS an immediate (non-idle) fire-and-forget call
+//   the moment openPanel() runs, since opening Coding Snapshot is an
+//   explicit signal the user is about to code this patient. Both are
+//   no-ops if already cached/in-flight, so still only ever one real
+//   scrape per patient. runAnalysis still calls
+//   ensureCdssCancerScreeningForAnalysis() as a last-resort/no-op-if-
+//   unreachable safety net. The 5.62 hide/close-race fix (poll for actual
+//   removal instead of a fixed 150ms wait) is unaffected and stays as-is.
+// 5.62 (2026-08-25) - Two real fixes for the persistent CDSS lag/visible-
+//   flash reports (5.61's fix wasn't enough):
+//   1) LAG / "takes so much time" / "laggy while working": the CDSS
+//      cancer-screening scrape was still running automatically in the
+//      background for EVERY patient the instant the chart loaded
+//      (checkAndUpdate -> maybeScrapeCdssCancerScreening, every 2.5s
+//      poll), whether or not the user ever opened Coding Snapshot or
+//      clicked Analyze. Deferring it with requestIdleCallback (5.61)
+//      only changed *when* that heavy real eCW modal-open (network
+//      round-trip + Angular rendering the full PopHealth grid) ran —
+//      it still ran, unconditionally, for every patient. Removed the
+//      background trigger entirely. It's now fully on-demand: renamed
+//      to ensureCdssCancerScreeningForAnalysis() and called only from
+//      runAnalysis() when the user actually clicks "Analyze Codes" —
+//      the only place the cache is ever read — so patients that are
+//      never analyzed never pay this cost, and the chart is never
+//      competing with it while someone is just charting/typing.
+//   2) "CDSS tab becomes visible for some time": the hide/restore in
+//      scrapeCdssCancerScreeningInvisibly() un-hid the scraped nodes
+//      after a FIXED 150ms wait following the Close click, assuming
+//      Bootstrap's close transition + Angular's teardown always
+//      finished inside that window. Under real load they don't always,
+//      so un-hiding could land mid-animation and flash the modal/
+//      backdrop on screen for whatever was left of it. Now polls (50ms,
+//      up to 2s) until each hidden node has either left the DOM or
+//      picked up eCW's own display:none/ng-hide, and only un-hides nodes
+//      still connected to the DOM — instead of assuming a fixed
+//      duration.
+// 5.61 (2026-08-25) - Re-enabled the automatic CDSS invisible-scrape
+//   trigger (disabled in 5.60) with an actual fix instead of leaving it
+//   off: the old hiding mechanism only hid elements matching guessed
+//   class names (.modal/.modal-backdrop) — if eCW's CDSS dialog (or
+//   something it opens alongside it, e.g. a loading spinner) uses
+//   different markup, that guess misses it and it flashes on screen,
+//   which is what "popup is showing" was. scrapeCdssCancerScreeningInvisibly()
+//   now hides ANY new top-level node under <body> the instant it
+//   appears — via a MutationObserver plus inline styles, so it doesn't
+//   depend on knowing eCW's exact class names — and restores whatever's
+//   still around afterward instead of assuming closeModal() removed it.
+//   Separately, maybeScrapeCdssCancerScreening() now waits 2s then hops
+//   to requestIdleCallback before actually opening the modal, so this
+//   heavy one-time-per-patient render never competes with the chart's
+//   own initial paint — that overlap was the "everything so laggy" part.
+//   Still runs at most once per patient, never while Billing is open.
+// 5.60 (2026-08-25) - HOTFIX: disabled the automatic CDSS invisible-scrape
+//   trigger added in 5.59 (maybeScrapeCdssCancerScreening() call in
+//   checkAndUpdate) — it was making the chart noticeably laggy and a
+//   popup was showing through, meaning the CSS-hide wasn't fully
+//   containing whatever eCW opens alongside the CDSS modal. The scraping
+//   code itself is left in place (unused for now) rather than ripped
+//   out, so it can be root-caused and re-enabled properly instead of
+//   rebuilt from scratch. computeAnalysis's CDSS check is now always a
+//   no-op (cache never populates) — cancer screening from the chart's
+//   own HEALTH PROMOTION section is unaffected and still works exactly
+//   as before 5.59.
+// 5.59 (2026-08-25) - NEW RULE: cancer screening (colorectal/breast/
+//   cervical) now also checks eCW's own CDSS "PopHealth" HEDIS measures,
+//   not just the chart's HEALTH PROMOTION AND DISEASE PREVENTION section.
+//   Added an invisible background reader (maybeScrapeCdssCancerScreening /
+//   scrapeCdssCancerScreeningInvisibly) that opens the actual CDSS modal
+//   (topPanelLink15) but keeps it fully hidden the whole time — a CSS
+//   rule hiding any Bootstrap modal/backdrop is added to <html> BEFORE
+//   the click, so it's never visible on screen — scrapes the 3 cancer-
+//   screening rows (td[data-column-key="alert"/"lastDone"/"status"]),
+//   then clicks the modal's own Close button and removes the hiding
+//   flag. Runs at most once per patient, only while on the SOAP note
+//   (never once the Billing tab is up — CDSS isn't reachable from there
+//   per testing) and only after patient-history loading has finished,
+//   caching the result for computeAnalysis to use later once Analyze is
+//   clicked. A CDSS row only counts when it's genuinely green
+//   ("Compliant" — red/Noncompliant is never accepted no matter the
+//   date) AND its Last Done date is not in the future relative to the
+//   current DOS AND falls inside the same windows as before (colorectal
+//   7y, cervical 3y, breast same calendar year). Additive only: a code
+//   already proposed from the chart-text check is never re-added from
+//   CDSS (dedup via `!desired.has(code)`), and 3014F/3015F/3017F remain
+//   excluded from MANAGED_CODES exactly as before — nothing here or
+//   anywhere else in this file ever deletes a cancer-screening code
+//   that's already on the chart.
 // 5.58 (2026-08-25) - BUG FIX: isGetwellCommercialInsurance() missed "The
 //   Empire Plan" (and any Empire-branded name prefixed with "The ") because
 //   the "^empire" check requires the name to start with "empire" — "The
@@ -715,6 +1012,7 @@ function __smartCoderReadVersion(fallback) {
     const PANEL_POS_KEY = 'ecs_panel_pos';
 
     // ---- Auto-coding analysis state ----
+    let lastRenderedSnapshotHtml = null; // memoized panel HTML — see renderSnapshotBlock; skips the DOM rewrite when nothing changed
     let analysisState = null;   // { toAdd:[{code,reason}], toDelete:[{code,row,reason}] }
     let analysisRunning = false;
     let actionRunning = false;
@@ -913,6 +1211,21 @@ function __smartCoderReadVersion(fallback) {
         .ecs-diff-add b { color: #0f766e; }
         .ecs-diff-del b { color: #b91c1c; }
         .ecs-diff-empty { font-size: 10.5px; color: #94a3b8; }
+        /* CDSS cancer-screening status badge — was plain inline-styled text
+           reusing .ecs-diff-empty (no padding/background, easy to miss and
+           badly spaced right under the Analyze button). Now a proper
+           tinted banner consistent with the rest of the panel's rounded/
+           padded components (buttons, diff rows). */
+        .ecs-cdss-badge {
+            display: flex; align-items: center; gap: 4px;
+            margin-top: 4px; padding: 2px 6px; border-radius: 5px;
+            font-size: 9.5px; font-weight: 600; line-height: 1.35;
+        }
+        .ecs-cdss-badge .ecs-cdss-icon { flex: 0 0 auto; }
+        .ecs-cdss-badge--done { background: #ecfdf5; color: #047857; }
+        .ecs-cdss-badge--checking { background: #fffbeb; color: #92400e; }
+        .ecs-cdss-badge--warn { background: #fef2f2; color: #b91c1c; align-items: flex-start; padding: 3px 6px; }
+        .ecs-cdss-badge-inline { margin-top: 4px; }
         .ecs-log-row { font-size: 11px; padding: 2px 0; color: #334155; }
         .ecs-spinner-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #475569; }
         .ecs-mini-spin {
@@ -1208,6 +1521,345 @@ function __smartCoderReadVersion(fallback) {
             colorectal: colorectal ? colorectal[1] : null,
             breast: breast ? breast[1] : null
         };
+    }
+
+    // ====================== CDSS CANCER SCREENING (invisible background read) ======================
+    // Cancer-screening evidence (colorectal/breast/cervical) can also come
+    // from eCW's own CDSS "PopHealth" HEDIS measures, not just the chart's
+    // HEALTH PROMOTION section above — whichever shows it. There's no
+    // separate read-only endpoint for CDSS the way the patient-history
+    // loader (top of file) has for encounters, so this opens the actual
+    // CDSS modal (topPanelLink15, ng-click "loadmodalurl('New_Alerts')")
+    // but keeps it fully invisible: a CSS rule hiding any Bootstrap
+    // modal/backdrop is added to <html> BEFORE the click, so there is
+    // never a frame where it's visible, then the modal's own Close button
+    // is clicked once scraping is done and the hiding class is removed.
+    // Never runs while the Billing tab is up (CDSS isn't reachable from
+    // there) — only while looking at the SOAP note.
+    //
+    // 5.68: rewritten from scratch after live use of 5.63-5.67 found a
+    // real regression — the modal was being left open. Root cause: a live
+    // network capture (5.66) showed the modal's own data comes from a
+    // plain JSON endpoint, getPatientAlertData.jsp, which we intercept via
+    // a fetch/XHR patch below to read the moment it arrives — often BEFORE
+    // Angular finishes rendering the table. 5.66 used that to close the
+    // modal the instant the JSON landed, but findCdssCloseButton() can
+    // return null if the close button hasn't rendered into the DOM yet at
+    // that exact instant — and the old code just silently skipped clicking
+    // it (`if (closeBtn) closeBtn.click()`, no retry), leaving the modal
+    // open with nothing left to close it. Fixed below by actually waiting
+    // (briefly) for the close button to exist before giving up.
+    //
+    // 5.63-5.67 also grew a lot of machinery — multiple trigger points
+    // (checkAndUpdate + openPanel + a runAnalysis "last resort"),
+    // in-flight promise sharing, an isLoading() gate, an auto-refresh-
+    // after-late-arrival hook — trying to squeeze out every last bit of
+    // timing. That's simplified back down to ONE rule, matching how this
+    // worked before and reportedly worked fine: once patient-history
+    // finishes loading, start the CDSS check immediately, once per
+    // patient. The JSON intercept (the actual speed fix) stays, so the
+    // check itself is still fast — it just isn't wrapped in extra
+    // scheduling logic.
+    let cdssCancerCache = null;      // { colorectal, cervical, breast } | null
+    let cdssCancerCacheKey = "";     // patient key this cache belongs to
+    let cdssScrapeInFlight = false;  // true while a scrape is actively running (single-flight — only ever one at a time)
+    let cdssTriggeredForKey = "";    // patient key CDSS has already been started for (whether or not it finished) — once-per-patient guard
+
+    // ---- Network intercept for getPatientAlertData.jsp (see 5.66 note above) ----
+    let interceptedAlertJsonByKey = new Map(); // patient key -> the JSON last seen for it
+
+    function handleInterceptedAlertJson(json) {
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key) return;
+        interceptedAlertJsonByKey.set(key, json);
+        if (interceptedAlertJsonByKey.size > 20) interceptedAlertJsonByKey.clear(); // simple unbounded-growth guard for long sessions
+    }
+
+    (function installAlertDataInterceptor() {
+        const isAlertUrl = (url) => typeof url === 'string' && url.toLowerCase().indexOf('getpatientalertdata.jsp') !== -1;
+
+        // Angular's $http traditionally rides on XMLHttpRequest, not
+        // fetch, in apps of this vintage — this is the patch that actually
+        // matters in practice.
+        if (window.XMLHttpRequest && !XMLHttpRequest.prototype.__docproAlertPatched) {
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (method, url) {
+                try { this.__docproIsAlertCall = isAlertUrl(url); } catch { this.__docproIsAlertCall = false; }
+                return origOpen.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function () {
+                if (this.__docproIsAlertCall) {
+                    this.addEventListener('load', () => {
+                        try {
+                            if (this.status >= 200 && this.status < 300) {
+                                handleInterceptedAlertJson(JSON.parse(this.responseText));
+                            }
+                        } catch {}
+                    });
+                }
+                return origSend.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.__docproAlertPatched = true;
+        }
+
+        // Defensive fallback in case this ever rides on fetch instead.
+        if (window.fetch && !window.fetch.__docproAlertPatched) {
+            const origFetch = window.fetch.bind(window);
+            const patched = function (input, init) {
+                const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+                const p = origFetch(input, init);
+                if (!isAlertUrl(url)) return p;
+                return p.then(res => {
+                    try { res.clone().json().then(handleInterceptedAlertJson).catch(() => {}); } catch {}
+                    return res;
+                });
+            };
+            patched.__docproAlertPatched = true;
+            window.fetch = patched;
+        }
+    })();
+
+    // getPatientAlertData.jsp's PopHealth.alertList entries (per a live
+    // capture) carry alertName ("Colorectal Cancer Screening ..." etc.),
+    // lastDoneDate (seen as ISO YYYY-MM-DD), and a numeric alertStatus
+    // (1 = compliant/"green" in every sample observed; anything else is
+    // treated as not-compliant — only a positively-recognized compliant
+    // code ever counts, same rule as the DOM version below).
+    function parseCdssCancerRowsFromJson(json) {
+        const result = { colorectal: null, cervical: null, breast: null };
+        const list = (json && json.PopHealth && Array.isArray(json.PopHealth.alertList)) ? json.PopHealth.alertList : [];
+        const toUsDate = (raw) => {
+            if (!raw) return null;
+            const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+            if (iso) return `${iso[2]}/${iso[3]}/${iso[1]}`;
+            return /^\d{2}\/\d{2}\/\d{4}$/.test(raw) ? raw : null; // in case some sites/measures return US format instead
+        };
+        list.forEach(item => {
+            const name = String(item.alertName || '').trim();
+            let key = null;
+            if (/^colorectal cancer screening\b/i.test(name)) key = 'colorectal';
+            else if (/^breast cancer screening\b/i.test(name)) key = 'breast';
+            else if (/^cervical cancer screening\b/i.test(name)) key = 'cervical';
+            if (!key || result[key]) return; // first matching entry wins
+            result[key] = { date: toUsDate(item.lastDoneDate), compliant: item.alertStatus === 1 };
+        });
+        return result;
+    }
+
+    const CDSS_HIDE_STYLE_ID = 'docproCdssHideCSS';
+    const CDSS_HIDE_HTML_CLASS = 'docpro-cdss-scraping';
+
+    function ensureCdssHideStyle() {
+        if (document.getElementById(CDSS_HIDE_STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = CDSS_HIDE_STYLE_ID;
+        // Targeted hiding only — see hideCdssInsertedNode() below for how
+        // nodes get this class. (5.71 tried hiding the whole <html>
+        // element instead, which stopped the modal from flashing but
+        // blanked the entire chart to a plain white screen for the
+        // duration — visibility:hidden on <html> suppresses painting of
+        // EVERYTHING under it, including the chart the user is reading,
+        // not just the CDSS dialog. That's worse, not better.)
+        style.textContent = `
+            .${CDSS_HIDE_HTML_CLASS} {
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function findCdssTopPanelLink() {
+        return document.querySelector(`a[ng-click*="loadmodalurl('New_Alerts')"]`)
+            || document.getElementById('topPanelLink15');
+    }
+
+    function findCdssCloseButton() {
+        return document.getElementById('alertsMainBtn1')
+            || document.querySelector('.modal-header button.close[ng-click="closeModal()"]');
+    }
+
+    // The 3 cancer-screening measures render as CDSS's "PopHealth" rows
+    // (td[data-column-key="alert"] etc.) under the default "All" tab —
+    // kept as a fallback for parseCdssCancerRowsFromJson, in case the JSON
+    // intercept above ever misses (a transport change on eCW's side).
+    function parseCdssCancerRows(table) {
+        const result = { colorectal: null, cervical: null, breast: null };
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(row => {
+            const alertCell = row.querySelector('td[data-column-key="alert"]');
+            if (!alertCell) return;
+            const nameText = (alertCell.getAttribute('title') || alertCell.textContent || '').trim();
+            let key = null;
+            if (/^colorectal cancer screening\b/i.test(nameText)) key = 'colorectal';
+            else if (/^breast cancer screening\b/i.test(nameText)) key = 'breast';
+            else if (/^cervical cancer screening\b/i.test(nameText)) key = 'cervical';
+            if (!key || result[key]) return; // first matching row wins
+            const lastDoneCell = row.querySelector('td[data-column-key="lastDone"]');
+            const lastDoneText = (lastDoneCell?.textContent || '').trim();
+            const statusCell = row.querySelector('td[data-column-key="status"]');
+            const isGreen = !!statusCell?.querySelector('.icon-mangreen');
+            const isRed = !!statusCell?.querySelector('.icon-manred');
+            result[key] = {
+                date: /^\d{2}\/\d{2}\/\d{4}$/.test(lastDoneText) ? lastDoneText : null,
+                compliant: isGreen && !isRed // only a genuinely green row ever counts
+            };
+        });
+        return result;
+    }
+
+    // Hides exactly the node(s) CDSS inserts, wherever in the DOM they
+    // land — a MutationObserver on document.body with subtree:true so it
+    // catches insertions at any depth (not just direct body children,
+    // which earlier versions wrongly assumed). Only the outermost newly-
+    // added element of each mutation is hidden (never a descendant of a
+    // node already hidden this scrape) — hiding a node hides everything
+    // inside it via the CSS above, so touching only the topmost new node
+    // keeps this cheap and avoids fighting Angular over inner nodes it's
+    // still populating.
+    function watchAndHideCdssNodes() {
+        const hiddenNodes = [];
+        function hide(node) {
+            if (node.nodeType !== 1) return;
+            if (hiddenNodes.some(h => h === node || h.contains(node))) return;
+            node.classList.add(CDSS_HIDE_HTML_CLASS);
+            hiddenNodes.push(node);
+        }
+        const observer = new MutationObserver(mutations => {
+            mutations.forEach(m => m.addedNodes.forEach(hide));
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        return {
+            hiddenNodes,
+            stop() { observer.disconnect(); },
+        };
+    }
+
+    // Opens the CDSS modal invisibly, reads the cancer-screening rows, and
+    // closes it. Prefers the network-JSON intercept (fast — no need to
+    // wait for the table to render); falls back to scraping the DOM table
+    // if the JSON doesn't show up. Closing is WAIT-based, not
+    // immediate-and-hope: the 5.66 regression was closing the instant data
+    // arrived without confirming the close button actually existed yet,
+    // silently leaving the modal open when it didn't. Fixed by polling
+    // briefly for the close button before giving up on it.
+    //
+    // Hiding: 5.71 tried making <html> itself visibility:hidden so it
+    // wouldn't matter where/how the dialog was mounted — that did stop
+    // the modal from flashing, but visibility:hidden on <html> hides
+    // EVERYTHING under it, so the chart the user was actively reading
+    // went blank white for the whole scrape, which is its own real
+    // problem. 5.72 instead hides only what CDSS actually inserts, found
+    // via a subtree-wide MutationObserver (watchAndHideCdssNodes) so it
+    // doesn't matter what class names eCW uses or how deep it nests the
+    // dialog — but it leaves the rest of the chart on screen, untouched.
+    async function scrapeCdssCancerScreeningInvisibly() {
+        const link = findCdssTopPanelLink();
+        if (!link) return null;
+
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+
+        ensureCdssHideStyle();
+        const watcher = watchAndHideCdssNodes();
+
+        let result = null;
+        try {
+            link.click();
+
+            const alreadyHave = key ? interceptedAlertJsonByKey.get(key) : null;
+            const json = alreadyHave || await waitForElement(() => {
+                const j = key ? interceptedAlertJsonByKey.get(key) : null;
+                return j || null;
+            }, 6000, 50);
+
+            if (json) {
+                result = parseCdssCancerRowsFromJson(json);
+            } else {
+                // JSON never showed up in time — fall back to the DOM table.
+                const table = await waitForElement(() => {
+                    const t = document.getElementById('alertsMainTbl1');
+                    return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
+                }, 6000, 100);
+                result = table ? parseCdssCancerRows(table) : null;
+            }
+        } catch {
+            result = null;
+        } finally {
+            watcher.stop();
+            // Wait (briefly) for the close button to actually exist before
+            // giving up on clicking it — this is the fix for the modal
+            // being left open: the close button may not have rendered yet
+            // at the exact moment we got our data, especially now that the
+            // JSON path can resolve faster than the modal shell finishes.
+            const closeBtn = await waitForElement(findCdssCloseButton, 3000, 50);
+            if (closeBtn) {
+                closeBtn.click();
+            } else {
+                // Last-resort fallbacks so a real patient chart is never
+                // left with a stuck invisible modal sitting over it.
+                const anyClose = document.querySelector('.modal.in .close, .modal[style*="display: block"] .close');
+                if (anyClose) anyClose.click();
+                else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            }
+            // Wait for each hidden node to either leave the DOM or pick up
+            // eCW's own hidden state (display:none/ng-hide) before
+            // un-hiding, so the close animation/removal never gets a
+            // chance to flash on screen.
+            const stillNeedsHiding = (node) => node.isConnected && window.getComputedStyle(node).display !== 'none';
+            const waitStart = Date.now();
+            while (watcher.hiddenNodes.some(stillNeedsHiding) && Date.now() - waitStart < 2000) {
+                await new Promise(r => setTimeout(r, 50));
+            }
+            watcher.hiddenNodes.forEach(node => node.classList.remove(CDSS_HIDE_HTML_CLASS));
+        }
+        return result;
+    }
+
+    // ONE simple rule: once patient-history finishes loading, start the
+    // CDSS check immediately, once per patient. Called from checkAndUpdate
+    // (the existing ~2.5s main loop) — no idle callbacks, no separate
+    // "immediate" trigger points, no promise-sharing. Never runs while
+    // Billing's grids are up (CDSS isn't reachable from there).
+    function maybeStartCdssAfterHistory() {
+        if (cdssScrapeInFlight) return;
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key || key === cdssCancerCacheKey || key === cdssTriggeredForKey) return;
+        if (historyApi.isLoading && historyApi.isLoading()) return; // wait for history to actually finish, then go — no earlier, no later
+        if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
+
+        cdssTriggeredForKey = key;
+        cdssScrapeInFlight = true;
+        scrapeCdssCancerScreeningInvisibly().then(result => {
+            const finalKey = (historyApi.getCurrentKey && historyApi.getCurrentKey()) || '';
+            if (finalKey === key) {
+                cdssCancerCache = result;
+                cdssCancerCacheKey = key;
+            }
+        }).finally(() => {
+            cdssScrapeInFlight = false;
+        });
+    }
+
+    // Exposes what's going on with the CDSS cancer-screening check for the
+    // CURRENT patient, so the UI (renderAnalysisSection) can tell the
+    // coder outright whether cancer-screening compliance was actually
+    // considered in a given Analyze run — an empty "Nothing to add" for
+    // cancer-screening codes looks identical whether CDSS genuinely shows
+    // nothing due, or CDSS just hadn't been read yet.
+    function getCdssCancerScreeningStatus() {
+        const historyApi = window.__ecwPatientHistory;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key) return 'pending';
+        if (key === cdssCancerCacheKey) return 'done';
+        if (cdssScrapeInFlight && cdssTriggeredForKey === key) return 'checking';
+        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
+        if (hasBillingGrid) return 'unreachable';
+        return 'pending'; // still on the chart view, history not done loading yet
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
@@ -2192,6 +2844,13 @@ function __smartCoderReadVersion(fallback) {
     }
 
     function computeAnalysis() {
+        // Set inside the cancer-screening block below (see
+        // getCdssCancerScreeningStatus) and carried on the returned
+        // analysisState as `cdssStatus`, so renderAnalysisSection can show
+        // the coder whether CDSS cancer-screening compliance was actually
+        // considered in this specific Analyze run. Defaults to 'pending'
+        // in case that block is ever skipped for some reason.
+        let cdssStatusThisRun = 'pending';
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
         const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
@@ -2398,12 +3057,66 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
-        // ---- Chief Complaint: blood draw / blood work ----
+        // ---- Chief Complaint / HPI: blood draw / blood work ----
+        // A CC mention is always "today" by definition (the CC is why the
+        // patient is here this encounter), so any CC mention of blood
+        // draw/work qualifies outright — unchanged from before.
+        //
+        // HPI is different: it's often a narrative that ALSO covers past
+        // visits, other providers, or a plan for a FUTURE draw ("blood
+        // work is scheduled for next week", "labs were drawn 3 days ago
+        // at the hospital"), so an HPI mention only qualifies when it's
+        // actually about blood work done AT today's encounter (the DOS).
+        // Handled sentence-by-sentence so an unrelated "today" elsewhere
+        // in a long HPI (e.g. "presents today for follow up") doesn't
+        // wrongly qualify a blood-work mention from a different, clearly
+        // past/future sentence, and a past/future date next to the
+        // blood-work mention itself always excludes it even if the word
+        // "today" appears somewhere else in the note.
         const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
         const ccText = ccRaw ? ccRaw[1] : '';
-        if (/blood\s*draw|blood\s*work/i.test(ccText)) {
-            desired.set('36415', 'Blood draw/blood work in CC');
-            desired.set('99000', 'Blood draw/blood work in CC');
+        const hpiRaw = text.match(/\bHPI:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|Assessment|Plan|Review|Physical\s+Exam|Vital|Social\s+History|Family\s+History|Medical\s+History|Surgical\s+History|Chief\s+Complaint)\b|$)/i);
+        const hpiText = hpiRaw ? hpiRaw[1] : '';
+
+        const BLOOD_WORK_RE = /\bblood\s*(?:draw|work)\b/i;
+        // "Today" or an equivalent same-visit indicator — deliberately
+        // broad, per the request to catch any wording that indicates the
+        // draw happened at this encounter, not just the literal word
+        // "today".
+        const TODAY_INDICATOR_RE = /\btoday\b|\bthis\s+(?:visit|encounter|appointment)\b|\bat\s+(?:this|today'?s)\s+(?:visit|encounter|appointment)\b|\bduring\s+(?:this|today'?s)\s+visit\b|\bobtained\s+today\b|\bdone\s+today\b|\bdrawn\s+today\b|\bcollected\s+today\b|\bin[- ]office\s+today\b|\bhere\s+today\b|\bnow\b/i;
+        // Anything that puts the draw somewhere OTHER than today — an
+        // explicit calendar date, a relative past/future reference, or
+        // language describing a plan rather than something already done
+        // at this visit. Any of these next to a blood-work mention rules
+        // that mention out, regardless of "today" appearing elsewhere.
+        const NOT_TODAY_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\byesterday\b|\blast\s+(?:week|month|visit|time)\b|\b\d+\s*(?:day|week|month)s?\s+ago\b|\bago\b|\bprior\b|\bpreviously\b|\bearlier\b|\bnext\s+(?:week|month|visit|time)\b|\bupcoming\b|\bscheduled\b|\bwill\s+(?:be|need|get|have)\b|\bplan(?:ned|s)?\s+to\b|\bto\s+be\s+(?:done|drawn|obtained)\b|\bnot\s+yet\b|\bpending\b|\bat\s+(?:the\s+)?hospital\b|\bat\s+(?:the\s+)?(?:ER|emergency\s+room)\b/i;
+
+        function splitIntoSentences(str) {
+            return str.split(/(?<=[.!?;])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+        }
+
+        let bloodWorkReason = null;
+        if (BLOOD_WORK_RE.test(ccText)) {
+            bloodWorkReason = 'Blood draw/blood work in CC';
+        } else if (hpiText && BLOOD_WORK_RE.test(hpiText)) {
+            const hpiHasTodayAnywhere = TODAY_INDICATOR_RE.test(hpiText);
+            const qualifies = splitIntoSentences(hpiText).some(seg => {
+                if (!BLOOD_WORK_RE.test(seg)) return false;
+                if (NOT_TODAY_RE.test(seg)) return false; // explicit past/future/other-location next to the mention — never qualifies
+                if (TODAY_INDICATOR_RE.test(seg)) return true; // today-indicator right in the same sentence
+                // No today-indicator in THIS sentence and no conflicting
+                // past/future marker either — fall back to "today"
+                // appearing anywhere else in the HPI (e.g. "Patient
+                // presents today... blood work was obtained.").
+                return hpiHasTodayAnywhere;
+            });
+            if (qualifies) {
+                bloodWorkReason = 'Blood draw/blood work in HPI, done at today’s visit (DOS)';
+            }
+        }
+        if (bloodWorkReason) {
+            desired.set('36415', bloodWorkReason);
+            desired.set('99000', bloodWorkReason);
         }
 
         // ---- Chief Complaint: H. pylori (any spelling/spacing variant) ----
@@ -2503,6 +3216,50 @@ function __smartCoderReadVersion(fallback) {
             }
             if (screenings.breast && isSameYearAsDos(screenings.breast, dosDate)) {
                 desired.set('3014F', `Breast cancer screening (mammogram) completed ${screenings.breast} — current DOS year`);
+            }
+
+            // ---- Also check CDSS (PopHealth) cancer-screening measures ----
+            // Same 3 codes, same time windows — but sourced from eCW's own
+            // CDSS compliance data (see maybeStartCdssAfterHistory,
+            // invisible background prefetch) instead of the chart's HEALTH
+            // PROMOTION section above. Only a cache already populated for
+            // THIS patient is used. A Noncompliant (red) row is never
+            // accepted no matter the date, and a future "Last Done" date
+            // (relative to this DOS) is never accepted either. Additive
+            // only, and never a duplicate add: if the HEALTH PROMOTION
+            // check above already proposed a code this run, CDSS is not
+            // consulted for that same code again (`!desired.has(...)`
+            // guards below) — a code is never added twice from two
+            // sources. This whole cancer-screening block only ever ADDS;
+            // 3014F/3015F/3017F stay excluded from MANAGED_CODES so
+            // nothing here — or anywhere else — ever deletes one already
+            // on the chart.
+            const cdssKey = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
+                ? (window.__ecwPatientHistory.getCurrentKey() || '')
+                : '';
+            // Recorded on the returned analysisState (see below) so the
+            // panel can tell the coder plainly whether CDSS was actually
+            // consulted this run, rather than leaving them to guess from
+            // an empty cancer-screening result.
+            cdssStatusThisRun = getCdssCancerScreeningStatus();
+            if (cdssCancerCache && cdssCancerCacheKey && cdssCancerCacheKey === cdssKey) {
+                const cdss = cdssCancerCache;
+                const notFutureDated = (dateStr) => {
+                    const d = parseUSDateParts(dateStr);
+                    return !!d && d <= dosDate;
+                };
+                if (!desired.has('3015F') && cdss.cervical && cdss.cervical.compliant && cdss.cervical.date
+                    && notFutureDated(cdss.cervical.date) && isWithinYearsOfDos(cdss.cervical.date, dosDate, 3)) {
+                    desired.set('3015F', `Cervical cancer screening — CDSS Compliant, last done ${cdss.cervical.date} — within 3 years`);
+                }
+                if (!desired.has('3017F') && cdss.colorectal && cdss.colorectal.compliant && cdss.colorectal.date
+                    && notFutureDated(cdss.colorectal.date) && isWithinYearsOfDos(cdss.colorectal.date, dosDate, 7)) {
+                    desired.set('3017F', `Colorectal cancer screening — CDSS Compliant, last done ${cdss.colorectal.date} — within 7 years`);
+                }
+                if (!desired.has('3014F') && cdss.breast && cdss.breast.compliant && cdss.breast.date
+                    && notFutureDated(cdss.breast.date) && isSameYearAsDos(cdss.breast.date, dosDate)) {
+                    desired.set('3014F', `Breast cancer screening — CDSS Compliant, last done ${cdss.breast.date} — current DOS year`);
+                }
             }
         }
 
@@ -2936,6 +3693,29 @@ function __smartCoderReadVersion(fallback) {
                     }
                 });
             }
+            var computedOvCodeForBilling = ovCode || null;
+        }
+
+        // ---- Billing-exclusivity rule: 99401/99406 vs 99214 ----
+        // Never billed together with 99214 — if both are applicable,
+        // 99214 wins and 99401/99406 is removed. Applies to every client.
+        // Getwell/Bronx are still allowed to bill 99214 alongside a TCM
+        // code (99495/99496) — no downgrade for those two clients.
+        {
+            const effectiveOvCode = (typeof computedOvCodeForBilling !== 'undefined' && computedOvCodeForBilling)
+                || currentRows.map(r => r.code).find(c => OFFICE_VISIT_EM_CODES.includes(c))
+                || null;
+            if (effectiveOvCode === '99214') {
+                ['99401', '99406'].forEach(code => {
+                    const row = currentRows.find(r => r.code === code);
+                    if (row && !toDelete.some(d => d.code === code)) {
+                        toDelete.push({ code, row: row.row, kind: 'cpt', reason: '99214 applies this encounter — 99401/99406 is not billed together with 99214' });
+                    }
+                    for (let i = toAdd.length - 1; i >= 0; i--) {
+                        if (toAdd[i].code === code) toAdd.splice(i, 1);
+                    }
+                });
+            }
         }
 
         // ---- L21.0 vs L21.9 (seborrheic dermatitis): correction-only ----
@@ -3006,7 +3786,7 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
-        return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance };
+        return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance, cdssStatus: cdssStatusThisRun };
     }
 
     // ====================== FAST ICD ADD (search box + selection only, ported from the Button_Disabled ICD linker script) ======================
@@ -5485,6 +6265,17 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
         }
 
+        // ---- TCM on chart (99495/99496): P/C, Smoking, and Obesity
+        // Counseling never apply alongside a TCM code — only Preventive
+        // (PV) can still be used, if its own rules above allow it. Runs
+        // last so it always wins, same as the no-vitals check above. ----
+        if (getCPTRows().some(r => { const c = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase(); return c === '99495' || c === '99496'; })) {
+            const tcmReason = 'TCM code (99495/99496) is on the chart — only Preventive applies, not Preventive/Smoking/Obesity Counseling';
+            pc = { disabled: true, title: tcmReason };
+            sm = { disabled: true, title: tcmReason };
+            ob = { disabled: true, title: tcmReason };
+        }
+
         return { pv, pc, sm, ob };
     }
 
@@ -5734,6 +6525,11 @@ function __smartCoderReadVersion(fallback) {
         analysisRunning = true;
         renderSnapshotBlock();
         setTimeout(() => {
+            // CDSS cancer-screening data (if any) comes from whatever
+            // maybeStartCdssAfterHistory already cached in the background
+            // — see that function's comment. computeAnalysis just reads
+            // the cache as-is; if it's not there yet, this Analyze run
+            // simply proceeds without it (additive-only, never required).
             try {
                 analysisState = computeAnalysis();
             } catch (err) {
@@ -5894,6 +6690,36 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
     }
 
+    // Surfaces whether CDSS cancer-screening compliance was actually
+    // considered in this Analyze run — see getCdssCancerScreeningStatus().
+    // Added because of a real reported failure mode: cancer-screening
+    // (3014F/3015F/3017F) not appearing in "To add" looks IDENTICAL
+    // whether it's because CDSS/chart genuinely show nothing due, or
+    // because CDSS simply hadn't been read yet when Analyze ran — and a
+    // coder seeing an empty result with no such warning could reasonably
+    // (and wrongly) conclude no cancer screening is needed, then go apply
+    // codes from Billing without it. This makes that distinction explicit
+    // instead of silent.
+    // Kept as short single-line badges (full explanation lives in the
+    // title="" tooltip, not inline) — an earlier version spelled the whole
+    // sentence out in the panel itself and wrapped to 2-3 lines, eating a
+    // large chunk of the panel's limited vertical space.
+    function cdssStatusBannerHtml(status) {
+        if (status === 'done') {
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--done" title="CDSS cancer-screening compliance was checked and is reflected in this result."><span class="ecs-cdss-icon">✓</span><span>CDSS checked</span></div>`;
+        }
+        if (status === 'checking') {
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--checking" title="CDSS cancer-screening check is still running and may not be reflected yet — re-Analyze in a few seconds to pick it up."><span class="ecs-cdss-icon">⏳</span><span>CDSS checking… re-Analyze shortly</span></div>`;
+        }
+        if (status === 'unreachable') {
+            return `<div class="ecs-cdss-badge ecs-cdss-badge--warn" title="CDSS isn't reachable from Billing, so it was never checked for this patient — this result reflects the chart's HEALTH PROMOTION section only. Revisit this patient's chart tab, then re-Analyze, to include CDSS."><span class="ecs-cdss-icon">⚠</span><span>CDSS not checked (chart-only result)</span></div>`;
+        }
+        // 'pending' — reachable but never attempted yet (e.g. Coding
+        // Snapshot was opened and Analyze clicked immediately, before the
+        // background prefetch had a chance to run at all).
+        return `<div class="ecs-cdss-badge ecs-cdss-badge--checking" title="CDSS cancer-screening hasn't been checked yet for this patient — this result reflects the chart's HEALTH PROMOTION section only. Re-Analyze in a few seconds to include it."><span class="ecs-cdss-icon">⚠</span><span>CDSS not checked yet — re-Analyze shortly</span></div>`;
+    }
+
     function renderAnalysisSection() {
         if (actionLog.length && !actionRunning) {
             const items = actionLog.map(l => {
@@ -5943,6 +6769,7 @@ function __smartCoderReadVersion(fallback) {
             const disabled = (!toAdd.length && !toDelete.length) ? 'disabled' : '';
             return `<div class="ecs-analysis">
                 <div class="ecs-analysis-title">Proposed changes</div>
+                ${cdssStatusBannerHtml(analysisState.cdssStatus)}
                 <div class="ecs-analysis-scroll">
                     <div class="ecs-diff-group"><div class="ecs-diff-label">To add</div>${addRows}</div>
                     <div class="ecs-diff-group"><div class="ecs-diff-label">To remove</div>${delRows}</div>
@@ -5954,8 +6781,18 @@ function __smartCoderReadVersion(fallback) {
             </div>`;
         }
 
+        // Idle state (Analyze not yet clicked this session): a quiet,
+        // non-alarming hint of the CDSS prefetch's current status, so
+        // there's visibility into it even before the coder clicks Analyze.
+        const idleCdssHint = (() => {
+            const status = getCdssCancerScreeningStatus();
+            if (status === 'done') return `<div class="ecs-cdss-badge ecs-cdss-badge--done ecs-cdss-badge-inline" title="CDSS cancer-screening data is ready."><span class="ecs-cdss-icon">✓</span><span>CDSS ready</span></div>`;
+            if (status === 'checking') return `<div class="ecs-cdss-badge ecs-cdss-badge--checking ecs-cdss-badge-inline" title="Reading CDSS cancer-screening data…"><span class="ecs-cdss-icon">⏳</span><span>CDSS checking…</span></div>`;
+            return '';
+        })();
         return `<div class="ecs-analysis">
             <button id="ecsAnalyzeBtn" class="ecs-btn ecs-btn-primary" style="width:100%;">🔍 Analyze Codes</button>
+            ${idleCdssHint}
         </div>`;
     }
 
@@ -6085,6 +6922,17 @@ function __smartCoderReadVersion(fallback) {
 
         const body = document.getElementById('ecsBody');
         if (body) {
+            // renderSnapshotBlock was rebuilding this innerHTML wholesale
+            // on every single checkAndUpdate tick (every 2.5s) REGARDLESS
+            // of whether anything actually changed — a real source of
+            // periodic jank ("loading issue every 2/3 seconds"): a full
+            // innerHTML rewrite forces the browser to re-parse and re-lay-
+            // out the whole panel every time, even when the generated
+            // markup is byte-for-byte identical to what's already there.
+            // Skip the DOM write entirely when nothing changed.
+            if (html === lastRenderedSnapshotHtml) return;
+            lastRenderedSnapshotHtml = html;
+
             // Periodic re-renders (checkAndUpdate's setInterval, action progress,
             // etc.) rebuild this innerHTML wholesale, which was resetting the
             // Proposed-changes list back to the top mid-scroll. Snapshot the
@@ -6110,42 +6958,68 @@ function __smartCoderReadVersion(fallback) {
             .replace(/'/g, "&#039;");
     }
 
+    let lastSoapScanTime = 0;
+    const SOAP_SCAN_THROTTLE_MS = 8000; // see isPatientChart
+
     function isPatientChart() {
         // .innerText forces the browser to compute full page layout — a
-        // genuinely expensive operation — and this was running every 2.5s
-        // unconditionally from the very first page load, even on pages
-        // that obviously aren't a patient chart (login, dashboard, etc.).
-        // Cheap pre-check first: if neither the encounter dropdown nor
-        // either billing grid exists at all, we're definitely not in a
-        // chart/coding context, so skip the expensive scan entirely.
+        // genuinely expensive operation — and this was running every
+        // single 2.5s tick unconditionally, for the entire time anyone was
+        // on a chart page (which is most of the time this extension is
+        // running at all). That periodic layout-thrash is what "loading
+        // issue every 2/3 seconds" was — not a network request, a
+        // synchronous browser reflow happening on a timer. Cheap pre-check
+        // first: if neither the encounter dropdown nor either billing grid
+        // exists at all, we're definitely not in a chart/coding context,
+        // so skip everything below entirely.
         const hasEncDropdown = !!document.getElementById('encDropDownItem');
         const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (!hasEncDropdown && !hasBillingGrid) {
             return false;
         }
 
-        // SOAP-note text means we're on the progress-note view. The billing
-        // grids (#billingTbl2 ICD / #billingTbl4 CPT) mean we're on the
-        // ICD/CPT coding tab — which doesn't have any "Chief Complaint(s)/
-        // HPI:/Assessment:/Plan:" text on it at all, so without this check
-        // the panel (and the Proposed changes list on it) was being hidden
-        // the moment the user switched into the coding tab.
-        const liveText = document.body.innerText || "";
-        const hasSoapText = /Chief Complaint\(s\)|HPI:|Assessment:|Plan:/i.test(liveText);
+        // The Billing/ICD-CPT coding tab has no SOAP-note text on it at
+        // all, so the expensive scan below is never needed to answer
+        // "are we on the chart" while billingTbl2/4 exist — skip it
+        // outright. This alone removes the layout-forcing scan for the
+        // entire time someone is on Billing (coding, running Analyze,
+        // applying changes) — a big chunk of real usage.
+        if (hasBillingGrid) return true;
 
         // Drop the cached note text if we've moved to a different
         // patient/encounter, so the billing tab never shows stale data
-        // left over from someone else's chart.
+        // left over from someone else's chart — and force an immediate
+        // fresh scan for the new patient rather than waiting out the
+        // throttle below.
         const key = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
             ? (window.__ecwPatientHistory.getCurrentKey() || "")
             : "";
         if (key !== cachedEncounterKey) {
             cachedEncounterText = "";
             cachedEncounterKey = key;
+            lastSoapScanTime = 0;
         }
+
+        // Once we already know we're on this patient's SOAP view, a fresh
+        // .innerText read only needs to happen occasionally to keep the
+        // snapshot panel's live fields (BP, chief complaint, etc.)
+        // reasonably current — not on every single tick. If we're on the
+        // chart at all (hasEncDropdown, checked above) and we already
+        // have cached SOAP text for this patient, trust it between scans.
+        const now = Date.now();
+        if (cachedEncounterText && now - lastSoapScanTime < SOAP_SCAN_THROTTLE_MS) {
+            return true;
+        }
+        lastSoapScanTime = now;
+
+        // SOAP-note text means we're on the progress-note view — this is
+        // the one unavoidable layout-forcing read, now throttled to at
+        // most once every SOAP_SCAN_THROTTLE_MS instead of every tick.
+        const liveText = document.body.innerText || "";
+        const hasSoapText = /Chief Complaint\(s\)|HPI:|Assessment:|Plan:/i.test(liveText);
         if (hasSoapText) cachedEncounterText = liveText;
 
-        return hasSoapText || hasBillingGrid;
+        return hasSoapText;
     }
 
     // The stable "what does the note say" text: the cached copy from the
@@ -6351,6 +7225,11 @@ function __smartCoderReadVersion(fallback) {
         if (onChart) {
             if (!isPanelOpen()) showTab();
             if (isPanelOpen()) renderSnapshotBlock();
+            // Single rule: once history is done loading, start CDSS. See
+            // maybeStartCdssAfterHistory's comment for why this has to be
+            // a background prefetch (CDSS isn't reachable once Billing is
+            // up, which is where Analyze gets clicked from).
+            maybeStartCdssAfterHistory();
         } else {
             hideTab();
             if (panel) panel.style.display = 'none';

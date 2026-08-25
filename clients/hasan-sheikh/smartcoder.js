@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.85
+// @name         Hasan Sheikh SmartCoder v1.86
 // @namespace    http://tampermonkey.net/
-// @version      1.85
+// @version      1.86
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,21 @@
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
 //
+// 1.86 (2026-08-25) - New billing-exclusivity rules, some Hasan-Sheikh-
+//   specific: 1) 99401/99406 never billed together with 99214 — 99214
+//   wins, 99401/99406 removed (all clients). 2) A TCM code (99495/99496)
+//   on the chart disables Preventive/Smoking/Obesity Counseling — only
+//   Preventive itself can still apply (all clients). 3) 99214 is never
+//   billed with a TCM code for this provider (unlike Bronx/Getwell, who
+//   may bill both) — 4) and specifically for Hasan Sheikh, when a TCM
+//   code is present NO office-visit E&M code is billed at all, not even
+//   a downgraded one (stronger than the generic 99214->99213 downgrade
+//   other clients use). 5) 99401 (Preventive Counseling) now needs a
+//   2-month (60-day) gap since it was last billed for Healthfirst
+//   specifically, and is never billed at all for a capitated plan
+//   (Centerlight, Well Care, Ameri Group) — both new isCapitatedInsurance()
+//   and the Healthfirst 60-day check feed the existing P/C gating, which
+//   already auto-removes a 99401 already on the chart when disabled.
 // 1.85 (2026-08-18) - PERF FIX to 1.84's ICD delete retry: it was
 //   adding a settle wait after EVERY ICD delete, even ones that worked
 //   cleanly on the first try, slowing down normal deletes that never
@@ -2596,9 +2611,26 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
+        // Hasan Sheikh only: if a TCM code (99495/99496) is on the chart,
+        // NO office-visit E&M code is billed alongside it at all — not
+        // even a downgraded one. (Every other client instead downgrades
+        // 99214 -> 99213 when both are applicable; Bronx/Getwell allow
+        // 99214 and TCM together with no change. See the shared
+        // 99401/99406-vs-99214 rule right after this block for those.)
+        let computedOvCodeForBilling = null;
+        const hasTCMOnChartForOV = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
-        if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
+        if (hasTCMOnChartForOV) {
+            currentRows.forEach(r => {
+                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'TCM code (99495/99496) is on the chart — no office-visit E/M code is billed alongside a TCM code for this provider' });
+                }
+            });
+            for (let i = toAdd.length - 1; i >= 0; i--) {
+                if (OFFICE_VISIT_EM_CODES.includes(toAdd[i].code)) toAdd.splice(i, 1);
+            }
+        } else if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
             let ovCode;
             let ovIsNewPatient = false;
             let ovReason;
@@ -2660,6 +2692,25 @@ function __smartCoderReadVersion(fallback) {
                     }
                 });
             }
+            computedOvCodeForBilling = ovCode || null;
+        }
+
+        // ---- Billing-exclusivity rule: 99401/99406 vs 99214 ----
+        // Never billed together with 99214 — if both are applicable,
+        // 99214 wins and 99401/99406 is removed. Applies to every client
+        // (moot here whenever the TCM branch above already cleared the
+        // office-visit code entirely, since computedOvCodeForBilling
+        // stays null in that case).
+        if (computedOvCodeForBilling === '99214') {
+            ['99401', '99406'].forEach(code => {
+                const row = currentRows.find(r => r.code === code);
+                if (row && !toDelete.some(d => d.code === code)) {
+                    toDelete.push({ code, row: row.row, kind: 'cpt', reason: '99214 applies this encounter — 99401/99406 is not billed together with 99214' });
+                }
+                for (let i = toAdd.length - 1; i >= 0; i--) {
+                    if (toAdd[i].code === code) toAdd.splice(i, 1);
+                }
+            });
         }
 
         // ---- L21.0 vs L21.9 (seborrheic dermatitis): correction-only ----
@@ -5313,7 +5364,17 @@ function __smartCoderReadVersion(fallback) {
         // chronic condition to counsel on, Preventive Counseling doesn't apply.
         const hasChronicDiseaseThisEncounter = getICDRows().some(r => CHRONIC_DISEASE_ICD_CODES.has((r.code || '').toUpperCase()));
         let pc = { disabled: false, title: 'Preventive Counseling' };
-        if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
+        // Hasan Sheikh only: 99401 is never billed for a capitated plan
+        // (Centerlight, Well Care, Ameri Group), and for Healthfirst it
+        // needs a 2-month (60-day) gap since it was last billed — a
+        // stricter, payer-specific version of the general 30-day gate
+        // below, so it's checked first.
+        const isHealthfirstForPC = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
+        if (isCapitatedInsurance(insurance)) {
+            pc = { disabled: true, title: `Preventive Counseling (99401) not applicable for capitated insurance (${insurance})` };
+        } else if (isHealthfirstForPC && codeUsedInLastDays('99401', 60)) {
+            pc = { disabled: true, title: 'Preventive Counseling (99401) needs a 2-month gap for Healthfirst — already billed within the last 60 days' };
+        } else if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
             pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
         } else if (isPreventiveCounselBlockedIns(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insurance || 'this insurance'}` };
@@ -5406,6 +5467,17 @@ function __smartCoderReadVersion(fallback) {
             pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
             sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
             ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
+        }
+
+        // ---- TCM on chart (99495/99496): P/C, Smoking, and Obesity
+        // Counseling never apply alongside a TCM code — only Preventive
+        // (PV) can still be used, if its own rules above allow it. Runs
+        // last so it always wins, same as the no-vitals check above. ----
+        if (getCPTRows().some(r => { const c = (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase(); return c === '99495' || c === '99496'; })) {
+            const tcmReason = 'TCM code (99495/99496) is on the chart — only Preventive applies, not Preventive/Smoking/Obesity Counseling';
+            pc = { disabled: true, title: tcmReason };
+            sm = { disabled: true, title: tcmReason };
+            ob = { disabled: true, title: tcmReason };
         }
 
         return { pv, pc, sm, ob };
@@ -5514,6 +5586,17 @@ function __smartCoderReadVersion(fallback) {
     // the preventive-visit/office-visit exclusivity rule.
     function isNycePPOIns(insurance) {
         return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
+    }
+
+    // Capitated plans (Hasan Sheikh only) — 99401 Preventive Counseling is
+    // never billed for any of these, regardless of anything else.
+    function isCapitatedInsurance(insurance) {
+        if (!insurance) return false;
+        const name = insurance.trim();
+        if (/center\s*light/i.test(name)) return true;
+        if (/well\s*care/i.test(name)) return true;
+        if (/ameri\s*group/i.test(name)) return true;
+        return false;
     }
 
     // ── Preventive Counsel: Z71.3, Z71.82/89, CPT 99401 ──
