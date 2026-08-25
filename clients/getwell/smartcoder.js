@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.74
+// @name         Getwell SmartCoder by ATQ v5.75
 // @namespace    http://tampermonkey.net/
-// @version      5.74
+// @version      5.75
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,17 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.75 (2026-08-25) - Fixed page becoming faded/unresponsive
+//   after saving Billing and clicking the CDSS tab: the
+//   background CDSS scraper (maybeStartCdssAfterHistory)
+//   could fire its own invisible click on the same CDSS
+//   link right as the user's own click was opening the real
+//   modal, and its body-wide hide-observer would catch the
+//   real tab's content too, leaving it hidden/pointer-events
+//   none until reload. Now skips the background scrape
+//   entirely whenever any modal is already open, so it never
+//   collides with a user-initiated CDSS open.
+//
 // 5.74 (2026-08-25) - Blood draw/blood work codes (36415/99000)
 //   now also detected from HPI text, not just CC.
 //   HPI mentions must tie to today's visit, not past/future
@@ -1461,6 +1472,11 @@ function __smartCoderReadVersion(fallback) {
         if (!key || key === cdssCancerCacheKey || key === cdssTriggeredForKey) return;
         if (historyApi.isLoading && historyApi.isLoading()) return; // wait for history to actually finish, then go — no earlier, no later
         if (!!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4')) return;
+        // Skip if a modal (e.g. the user's own CDSS tab click) is already
+        // open — clicking the same link ourselves on top of that would
+        // collide with the user's real modal and can leave it stuck
+        // hidden/unresponsive. Just wait for the next tick instead.
+        if (document.querySelector('.modal.in, .modal[style*="display: block"], .modal[style*="display:block"]')) return;
 
         cdssTriggeredForKey = key;
         cdssScrapeInFlight = true;
