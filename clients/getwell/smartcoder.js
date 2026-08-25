@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.58
+// @name         Getwell SmartCoder by ATQ v5.59
 // @namespace    http://tampermonkey.net/
-// @version      5.58
+// @version      5.59
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,30 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.59 (2026-08-25) - NEW RULE: cancer screening (colorectal/breast/
+//   cervical) now also checks eCW's own CDSS "PopHealth" HEDIS measures,
+//   not just the chart's HEALTH PROMOTION AND DISEASE PREVENTION section.
+//   Added an invisible background reader (maybeScrapeCdssCancerScreening /
+//   scrapeCdssCancerScreeningInvisibly) that opens the actual CDSS modal
+//   (topPanelLink15) but keeps it fully hidden the whole time — a CSS
+//   rule hiding any Bootstrap modal/backdrop is added to <html> BEFORE
+//   the click, so it's never visible on screen — scrapes the 3 cancer-
+//   screening rows (td[data-column-key="alert"/"lastDone"/"status"]),
+//   then clicks the modal's own Close button and removes the hiding
+//   flag. Runs at most once per patient, only while on the SOAP note
+//   (never once the Billing tab is up — CDSS isn't reachable from there
+//   per testing) and only after patient-history loading has finished,
+//   caching the result for computeAnalysis to use later once Analyze is
+//   clicked. A CDSS row only counts when it's genuinely green
+//   ("Compliant" — red/Noncompliant is never accepted no matter the
+//   date) AND its Last Done date is not in the future relative to the
+//   current DOS AND falls inside the same windows as before (colorectal
+//   7y, cervical 3y, breast same calendar year). Additive only: a code
+//   already proposed from the chart-text check is never re-added from
+//   CDSS (dedup via `!desired.has(code)`), and 3014F/3015F/3017F remain
+//   excluded from MANAGED_CODES exactly as before — nothing here or
+//   anywhere else in this file ever deletes a cancer-screening code
+//   that's already on the chart.
 // 5.58 (2026-08-25) - BUG FIX: isGetwellCommercialInsurance() missed "The
 //   Empire Plan" (and any Empire-branded name prefixed with "The ") because
 //   the "^empire" check requires the name to start with "empire" — "The
@@ -1208,6 +1232,152 @@ function __smartCoderReadVersion(fallback) {
             colorectal: colorectal ? colorectal[1] : null,
             breast: breast ? breast[1] : null
         };
+    }
+
+    // ====================== CDSS CANCER SCREENING (invisible background read) ======================
+    // Cancer-screening evidence (colorectal/breast/cervical) can also come
+    // from eCW's own CDSS "PopHealth" HEDIS measures, not just the chart's
+    // HEALTH PROMOTION section above — whichever shows it. There's no
+    // separate read-only endpoint for CDSS the way the patient-history
+    // loader (top of file) has for encounters, so this opens the actual
+    // CDSS modal (topPanelLink15, ng-click "loadmodalurl('New_Alerts')")
+    // but keeps it fully invisible: a CSS rule hiding any Bootstrap
+    // modal/backdrop is added to <html> BEFORE the click, so there is
+    // never a frame where it's visible, then the modal's own Close button
+    // is clicked once scraping is done and the hiding class is removed.
+    // Never runs while the Billing tab is up (CDSS isn't reachable from
+    // there) — only while looking at the SOAP note — so the result is
+    // cached per patient for computeAnalysis to read later, once the user
+    // has moved on to Billing/Analyze.
+    let cdssCancerCache = null;       // { colorectal, cervical, breast } | null — see parseCdssCancerRows
+    let cdssCancerCacheKey = "";      // patient key this cache belongs to
+    let cdssScrapeInFlight = false;   // de-dupe: checkAndUpdate calls this every 2.5s
+
+    const CDSS_HIDE_STYLE_ID = 'docproCdssHideCSS';
+    const CDSS_HIDE_HTML_CLASS = 'docpro-cdss-scraping';
+
+    function ensureCdssHideStyle() {
+        if (document.getElementById(CDSS_HIDE_STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = CDSS_HIDE_STYLE_ID;
+        // visibility/opacity (never display:none) so eCW/Angular still lays
+        // out and populates the modal exactly as normal — it just never
+        // becomes visible or clickable to the person using the chart.
+        style.textContent = `
+            html.${CDSS_HIDE_HTML_CLASS} .modal,
+            html.${CDSS_HIDE_HTML_CLASS} .modal-backdrop {
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function findCdssTopPanelLink() {
+        return document.querySelector(`a[ng-click*="loadmodalurl('New_Alerts')"]`)
+            || document.getElementById('topPanelLink15');
+    }
+
+    function findCdssCloseButton() {
+        return document.getElementById('alertsMainBtn1')
+            || document.querySelector('.modal-header button.close[ng-click="closeModal()"]');
+    }
+
+    // The 3 cancer-screening measures render as CDSS's "PopHealth" rows
+    // (td[data-column-key="alert"] etc.) under the default "All" tab, so
+    // no tab-switch is needed — plain CDSS/Practice-Configured/Registry
+    // rows have no data-column-key attribute at all, which is what tells
+    // the two apart.
+    function parseCdssCancerRows(table) {
+        const result = { colorectal: null, cervical: null, breast: null };
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(row => {
+            const alertCell = row.querySelector('td[data-column-key="alert"]');
+            if (!alertCell) return;
+            const nameText = (alertCell.getAttribute('title') || alertCell.textContent || '').trim();
+            let key = null;
+            if (/^colorectal cancer screening\b/i.test(nameText)) key = 'colorectal';
+            else if (/^breast cancer screening\b/i.test(nameText)) key = 'breast';
+            else if (/^cervical cancer screening\b/i.test(nameText)) key = 'cervical';
+            if (!key || result[key]) return; // first matching row wins
+            const lastDoneCell = row.querySelector('td[data-column-key="lastDone"]');
+            const lastDoneText = (lastDoneCell?.textContent || '').trim();
+            const statusCell = row.querySelector('td[data-column-key="status"]');
+            const isGreen = !!statusCell?.querySelector('.icon-mangreen');
+            const isRed = !!statusCell?.querySelector('.icon-manred');
+            result[key] = {
+                date: /^\d{2}\/\d{2}\/\d{4}$/.test(lastDoneText) ? lastDoneText : null,
+                // Red (Noncompliant) is never accepted no matter the date —
+                // only a genuinely green (Compliant) row counts.
+                compliant: isGreen && !isRed
+            };
+        });
+        return result;
+    }
+
+    async function scrapeCdssCancerScreeningInvisibly() {
+        const link = findCdssTopPanelLink();
+        if (!link) return null;
+
+        ensureCdssHideStyle();
+        document.documentElement.classList.add(CDSS_HIDE_HTML_CLASS);
+        try {
+            link.click();
+
+            const table = await waitForElement(() => {
+                const t = document.getElementById('alertsMainTbl1');
+                // Wait for actual PopHealth rows, not just the empty table
+                // shell — their presence is the signal the alert data has
+                // actually arrived.
+                return (t && t.querySelector('td[data-column-key="alert"]')) ? t : null;
+            }, 8000);
+
+            return table ? parseCdssCancerRows(table) : null;
+        } catch {
+            return null;
+        } finally {
+            // Always try to close the modal and remove the hiding flag,
+            // even if scraping failed/timed out, so nothing is left open
+            // or hidden indefinitely.
+            const closeBtn = findCdssCloseButton();
+            if (closeBtn) closeBtn.click();
+            // Give Angular a tick to process the close before un-hiding —
+            // so a closing transition never gets a chance to flash.
+            await new Promise(r => setTimeout(r, 150));
+            document.documentElement.classList.remove(CDSS_HIDE_HTML_CLASS);
+        }
+    }
+
+    // Runs at most once per patient, only while looking at the SOAP note
+    // (never once the Billing tab's grids are up — CDSS isn't reachable
+    // from there per Getwell's own testing), and only once patient-history
+    // loading has finished (same "wait for history" rule the Preventive
+    // quick action uses elsewhere in this file) — matches "after the page
+    // loads completely and history loading is done, read CDSS
+    // automatically."
+    async function maybeScrapeCdssCancerScreening() {
+        if (cdssScrapeInFlight) return;
+        const historyApi = window.__ecwPatientHistory;
+        if (historyApi && historyApi.isLoading && historyApi.isLoading()) return;
+        const key = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+        if (!key || key === cdssCancerCacheKey) return;
+        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
+        if (hasBillingGrid) return;
+
+        cdssScrapeInFlight = true;
+        try {
+            const result = await scrapeCdssCancerScreeningInvisibly();
+            // Only commit if still on the same patient — they may have
+            // switched charts while the scrape was in flight.
+            const stillSameKey = (historyApi && historyApi.getCurrentKey) ? (historyApi.getCurrentKey() || '') : '';
+            if (stillSameKey === key) {
+                cdssCancerCache = result;
+                cdssCancerCacheKey = key;
+            }
+        } finally {
+            cdssScrapeInFlight = false;
+        }
     }
 
     // ====================== A1C EXTRACTION (Type 2 diabetes control) ======================
@@ -2503,6 +2673,45 @@ function __smartCoderReadVersion(fallback) {
             }
             if (screenings.breast && isSameYearAsDos(screenings.breast, dosDate)) {
                 desired.set('3014F', `Breast cancer screening (mammogram) completed ${screenings.breast} — current DOS year`);
+            }
+
+            // ---- Also check CDSS (PopHealth) cancer-screening measures ----
+            // Same 3 codes, same time windows — but sourced from eCW's own
+            // CDSS compliance data (see maybeScrapeCdssCancerScreening,
+            // invisible background read) instead of the chart's HEALTH
+            // PROMOTION section above. Only a cache already populated for
+            // THIS patient is used. A Noncompliant (red) row is never
+            // accepted no matter the date, and a future "Last Done" date
+            // (relative to this DOS) is never accepted either. Additive
+            // only, and never a duplicate add: if the HEALTH PROMOTION
+            // check above already proposed a code this run, CDSS is not
+            // consulted for that same code again (`!desired.has(...)`
+            // guards below) — a code is never added twice from two
+            // sources. This whole cancer-screening block only ever ADDS;
+            // 3014F/3015F/3017F stay excluded from MANAGED_CODES so
+            // nothing here — or anywhere else — ever deletes one already
+            // on the chart.
+            const cdssKey = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
+                ? (window.__ecwPatientHistory.getCurrentKey() || '')
+                : '';
+            if (cdssCancerCache && cdssCancerCacheKey && cdssCancerCacheKey === cdssKey) {
+                const cdss = cdssCancerCache;
+                const notFutureDated = (dateStr) => {
+                    const d = parseUSDateParts(dateStr);
+                    return !!d && d <= dosDate;
+                };
+                if (!desired.has('3015F') && cdss.cervical && cdss.cervical.compliant && cdss.cervical.date
+                    && notFutureDated(cdss.cervical.date) && isWithinYearsOfDos(cdss.cervical.date, dosDate, 3)) {
+                    desired.set('3015F', `Cervical cancer screening — CDSS Compliant, last done ${cdss.cervical.date} — within 3 years`);
+                }
+                if (!desired.has('3017F') && cdss.colorectal && cdss.colorectal.compliant && cdss.colorectal.date
+                    && notFutureDated(cdss.colorectal.date) && isWithinYearsOfDos(cdss.colorectal.date, dosDate, 7)) {
+                    desired.set('3017F', `Colorectal cancer screening — CDSS Compliant, last done ${cdss.colorectal.date} — within 7 years`);
+                }
+                if (!desired.has('3014F') && cdss.breast && cdss.breast.compliant && cdss.breast.date
+                    && notFutureDated(cdss.breast.date) && isSameYearAsDos(cdss.breast.date, dosDate)) {
+                    desired.set('3014F', `Breast cancer screening — CDSS Compliant, last done ${cdss.breast.date} — current DOS year`);
+                }
             }
         }
 
@@ -6351,6 +6560,10 @@ function __smartCoderReadVersion(fallback) {
         if (onChart) {
             if (!isPanelOpen()) showTab();
             if (isPanelOpen()) renderSnapshotBlock();
+            // Fire-and-forget: internally no-ops unless this is a new
+            // patient, history has finished loading, and we're not already
+            // on the Billing tab. See maybeScrapeCdssCancerScreening.
+            maybeScrapeCdssCancerScreening();
         } else {
             hideTab();
             if (panel) panel.style.display = 'none';
