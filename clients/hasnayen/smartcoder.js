@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.26
+// @name         Hasnayen Medical SmartCoder v1.27
 // @namespace    http://tampermonkey.net/
-// @version      1.26
+// @version      1.27
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,15 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.27 (2026-08-25) - Ported the 96127-vs-G0444 rule just added to Bronx:
+//   if G0444 is on the chart, 96127 is removed. If G0444 is absent, 96127
+//   is kept only when it's already on the chart AND a depression/anxiety
+//   ICD (F32/F33/F34.1/F34.81/F40/F41/F43.2x) is coded this encounter —
+//   never added fresh either way. With neither G0444 nor a qualifying
+//   ICD, an existing 96127 is removed. Added '96127' to MANAGED_CODES and
+//   a new DEPRESSION_ANXIETY_ICD_PREFIXES regex. (The Bronx-only
+//   NP/preventive visit-type fix was NOT ported here — not requested for
+//   Hasnayen.)
 // 1.26 (2026-08-19) - Ported the same two fixes just applied to Bronx:
 //   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
 //     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
@@ -1723,9 +1732,18 @@ function __smartCoderReadVersion(fallback) {
         'G9275', 'G9276', '1036F', '1000F',
         'G0136', 'G9744',
         '99051',  // Hasnayen rule 23 — weekend/holiday visit code
-        '3044F', '3051F', '3048F', '3049F', '3050F'   // kept only while their qualifying ICD is present — see computeAnalysis
+        '3044F', '3051F', '3048F', '3049F', '3050F',   // kept only while their qualifying ICD is present — see computeAnalysis
+        '96127'  // brief emotional/behavioral assessment — see G0444 rule in computeAnalysis
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
+
+    // Depression/anxiety diagnosis codes — used only by the 96127-vs-G0444
+    // rule (see computeAnalysis): major/recurrent depressive disorder
+    // (F32.x/F33.x), dysthymia/persistent depressive disorder (F34.1),
+    // disruptive mood dysregulation (F34.81), adjustment disorder with
+    // depressed/anxious/mixed mood (F43.2x), and anxiety disorders
+    // (F40.x/F41.x).
+    const DEPRESSION_ANXIETY_ICD_PREFIXES = /^F32|^F33|^F34\.1|^F34\.81|^F40|^F41|^F43\.2/;
 
     function getCPTRows() {
         return Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
@@ -2507,6 +2525,35 @@ function __smartCoderReadVersion(fallback) {
         if (age >= 18) {
             if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
             else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
+        }
+
+        // ---- 96127 (brief emotional/behavioral assessment) vs G0444 ----
+        // Rule: 96127 and G0444 (annual depression screening) are never
+        // billed together — if G0444 is on the chart (existing or about to
+        // be added this run), 96127 is removed. If G0444 is NOT present,
+        // 96127 is only KEPT when it's already on the chart AND a
+        // depression/anxiety ICD is coded on this encounter — never added
+        // fresh by us either way. With no G0444 and no qualifying
+        // depression/anxiety ICD, an existing 96127 is removed. 96127 is
+        // in MANAGED_CODES (below) so the diff sweep enforces all of this:
+        // only setting `desired` here (to preserve it) prevents deletion.
+        {
+            const hasG0444OnChart = rawCPTCodeSet.has('G0444') || desired.has('G0444');
+            if (rawCPTCodeSet.has('96127')) {
+                if (hasG0444OnChart) {
+                    exclusionReasons.set('96127', 'G0444 present on chart — 96127 not billed alongside it');
+                } else {
+                    const hasDepAnxietyIcd = getICDRows().some(e => DEPRESSION_ANXIETY_ICD_PREFIXES.test(e.code.toUpperCase()));
+                    if (hasDepAnxietyIcd) {
+                        desired.set('96127', 'Already on chart — depression/anxiety ICD present, no G0444');
+                    } else {
+                        exclusionReasons.set('96127', 'No G0444 and no depression/anxiety ICD on chart');
+                    }
+                }
+            }
+            // If nothing above sets `desired`, 96127 is left out of it —
+            // the MANAGED_CODES sweep below removes it if it's currently
+            // on the chart, using the exclusionReasons message set above.
         }
 
         // Tobacco/smoking screening result codes share 99406's 18+ age

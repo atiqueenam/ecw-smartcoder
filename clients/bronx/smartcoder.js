@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.73
+// @name         Bronx Health SmartCoder v1.74
 // @namespace    http://tampermonkey.net/
-// @version      1.73
+// @version      1.74
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,29 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.74 (2026-08-25) - Two fixes:
+//   - NEW RULE: 96127 (brief emotional/behavioral assessment) vs G0444.
+//     If G0444 is on the chart, 96127 is removed. If G0444 is absent,
+//     96127 is kept only when it's already on the chart AND a
+//     depression/anxiety ICD (F32/F33/F34.1/F34.81/F40/F41/F43.2x) is
+//     coded this encounter — never added fresh either way. With neither
+//     G0444 nor a qualifying ICD, an existing 96127 is removed. Added
+//     '96127' to MANAGED_CODES and a new DEPRESSION_ANXIETY_ICD_PREFIXES
+//     regex.
+//   - BUG FIX: the Preventive quick action determined new-vs-established
+//     purely from isEstablishedPatient() (patient-history lookup), while
+//     the office-visit E&M rule elsewhere trusts the scheduled
+//     appointment's own visit type (NP/ESTPT/F-U/CON via getVisitType()/
+//     classifyVisitType()) as authoritative. The two could disagree: a
+//     chart scheduled as NP, where history lookup returned stale/
+//     incidental data, computed established=true and left an
+//     established-patient preventive code (e.g. 99396) in place instead
+//     of switching to the new-patient one (99386). Added
+//     isNewPatientVisit() — trusts the appointment's own visit type when
+//     classifyVisitType() recognizes it, falling back to
+//     isEstablishedPatient() only when it doesn't — and pointed both
+//     runPreventiveAction() and computeQuickActionGating() at it instead
+//     of calling isEstablishedPatient() directly.
 // 1.73 (2026-08-19) - Two fixes:
 //   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
 //     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
@@ -1787,9 +1810,18 @@ function __smartCoderReadVersion(fallback) {
         '1157F', '1158F', '1170F',
         'G8510', 'G8431', 'G9622', '3016F',
         'G9275', 'G9276', '1036F', '1000F',
-        'G0136', 'G9744'
+        'G0136', 'G9744',
+        '96127'  // brief emotional/behavioral assessment — see G0444 rule in computeAnalysis
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
     ]);
+
+    // Depression/anxiety diagnosis codes — used only by the 96127-vs-G0444
+    // rule (see computeAnalysis): major/recurrent depressive disorder
+    // (F32.x/F33.x), dysthymia/persistent depressive disorder (F34.1),
+    // disruptive mood dysregulation (F34.81), adjustment disorder with
+    // depressed/anxious/mixed mood (F43.2x), and anxiety disorders
+    // (F40.x/F41.x).
+    const DEPRESSION_ANXIETY_ICD_PREFIXES = /^F32|^F33|^F34\.1|^F34\.81|^F40|^F41|^F43\.2/;
 
     function getCPTRows() {
         return Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
@@ -2561,6 +2593,35 @@ function __smartCoderReadVersion(fallback) {
         if (age >= 18) {
             if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
             else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
+        }
+
+        // ---- 96127 (brief emotional/behavioral assessment) vs G0444 ----
+        // Rule: 96127 and G0444 (annual depression screening) are never
+        // billed together — if G0444 is on the chart (existing or about to
+        // be added this run), 96127 is removed. If G0444 is NOT present,
+        // 96127 is only KEPT when it's already on the chart AND a
+        // depression/anxiety ICD is coded on this encounter — never added
+        // fresh by us either way. With no G0444 and no qualifying
+        // depression/anxiety ICD, an existing 96127 is removed. 96127 is
+        // in MANAGED_CODES (below) so the diff sweep enforces all of this:
+        // only setting `desired` here (to preserve it) prevents deletion.
+        {
+            const hasG0444OnChart = rawCPTCodeSet.has('G0444') || desired.has('G0444');
+            if (rawCPTCodeSet.has('96127')) {
+                if (hasG0444OnChart) {
+                    exclusionReasons.set('96127', 'G0444 present on chart — 96127 not billed alongside it');
+                } else {
+                    const hasDepAnxietyIcd = getICDRows().some(e => DEPRESSION_ANXIETY_ICD_PREFIXES.test(e.code.toUpperCase()));
+                    if (hasDepAnxietyIcd) {
+                        desired.set('96127', 'Already on chart — depression/anxiety ICD present, no G0444');
+                    } else {
+                        exclusionReasons.set('96127', 'No G0444 and no depression/anxiety ICD on chart');
+                    }
+                }
+            }
+            // If nothing above sets `desired`, 96127 is left out of it —
+            // the MANAGED_CODES sweep below removes it if it's currently
+            // on the chart, using the exclusionReasons message set above.
         }
 
         // Tobacco/smoking screening result codes share 99406's 18+ age
@@ -3457,6 +3518,28 @@ function __smartCoderReadVersion(fallback) {
         if (!data || !data.length) return false;
         const currentDos = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
         return data.some(enc => enc.encounter_date && enc.encounter_date !== currentDos);
+    }
+
+    // BUG FIX: the Preventive quick action used isEstablishedPatient()
+    // (patient-history-based) as its ONLY source for new-vs-established,
+    // while the office-visit E&M rule elsewhere uses the scheduled
+    // appointment's own visit type (getVisitType()/classifyVisitType — NP
+    // literally means "new patient" on the schedule). The two could
+    // disagree: a chart scheduled as NP but whose history lookup returned
+    // stale/incidental data (or a leftover preventive code from a prior,
+    // wrongly-typed visit) would compute established=true and leave the
+    // established-patient preventive code (e.g. 99396) in place instead of
+    // switching to the new-patient one (99386) — the code was never wrong
+    // per isEstablishedPatient(), it just disagreed with the actual
+    // schedule. The appointment's visit type is the authoritative signal
+    // when eCW gives us one (NP / ESTPT / F-U / CON); patient history is
+    // only a fallback for visit types classifyVisitType() doesn't
+    // recognize.
+    function isNewPatientVisit() {
+        const visitCategory = classifyVisitType(getVisitType());
+        if (visitCategory === 'new') return true;
+        if (visitCategory === 'established' || visitCategory === 'lab') return false;
+        return !isEstablishedPatient();
     }
 
     // Age-band mapping per eCW's Preventive Medicine E&M list.
@@ -5671,7 +5754,7 @@ function __smartCoderReadVersion(fallback) {
     function computeQuickActionGating(insurance, flags, text) {
         const insuranceNorm = normalizeInsuranceForMatch(insurance);
         const isTelevisit = isTelevisitNow();
-        const established = isEstablishedPatient();
+        const established = !isNewPatientVisit();
         const dosYear = getCurrentDosYear();
         const PREVENTIVE_ALL_CODES = [...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES];
 
@@ -5834,7 +5917,7 @@ function __smartCoderReadVersion(fallback) {
             const z71Opposite = z71Code === "Z71.89" ? "Z71.82" : "Z71.89";
             codes.push(z71Code);
 
-            const established = isEstablishedPatient();
+            const established = !isNewPatientVisit();
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
