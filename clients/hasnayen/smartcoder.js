@@ -13,174 +13,77 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
-// 1.28 (2026-08-25) - New cross-client billing-exclusivity rules:
-//   1) 99401/99406 are never billed together with 99214 — if both are
-//      applicable, 99214 wins and 99401/99406 is removed (applies to
-//      every client). 2) A TCM code (99495/99496) on the chart disables
-//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
-//      Preventive itself can still apply. 3) 99214 is never billed
-//      together with a TCM code for this client (unlike Bronx/Getwell,
-//      who may bill both) — if a TCM code is present and 99214 would
-//      otherwise be the effective office-visit code (including a
-//      practice-added 99214 that rule 1 would normally leave untouched),
-//      it's downgraded to 99213 and the TCM code is used instead.
-// 1.27 (2026-08-25) - Ported the 96127-vs-G0444 rule just added to Bronx:
-//   if G0444 is on the chart, 96127 is removed. If G0444 is absent, 96127
-//   is kept only when it's already on the chart AND a depression/anxiety
-//   ICD (F32/F33/F34.1/F34.81/F40/F41/F43.2x) is coded this encounter —
-//   never added fresh either way. With neither G0444 nor a qualifying
-//   ICD, an existing 96127 is removed. Added '96127' to MANAGED_CODES and
-//   a new DEPRESSION_ANXIETY_ICD_PREFIXES regex. (The Bronx-only
-//   NP/preventive visit-type fix was NOT ported here — not requested for
-//   Hasnayen.)
-// 1.26 (2026-08-19) - Ported the same two fixes just applied to Bronx:
-//   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
-//     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
-//     isn't actually Medicaid/Medicare) was being wrongly treated as real
-//     Medicaid/Medicare in three places: isHasnayenCounselingBlockedIns()
-//     (99401 payer block), the Obesity Counseling (OB) gating check, and
-//     the OB quick-action's own redundant Medicaid re-check. All three
-//     used an unanchored /medicaid/i.test(...) or isAnyMedicareIns() (bare
-//     /medicare/i) match. isMedicaidInsurance() is now start-anchored
-//     (matching isMedicaidOrMedicareIns()'s existing pattern, MetroPlus
-//     carve-out included) and isHasnayenCounselingBlockedIns()'s Medicare
-//     check now uses the already-anchored isStraightMedicareIns() instead
-//     of isAnyMedicareIns() — a payer's name now has to actually BEGIN
-//     with "Medicaid"/"Medicare" to be treated as one. G0444/G0442's
-//     Medicaid removal (which already called isMedicaidInsurance())
-//     automatically gets the same fix for free. (isAnyMedicareIns()'s
-//     vaccine-admin-code gating is deliberately left as-is — unrelated to
-//     this fix, same as Bronx.)
-//   - Obesity Counseling (G0447) gap for non-Healthfirst payers changed
-//     from a flat 30 days to 14 days (new hasnayenObesityGapDays() —
-//     separate from the unchanged 60/30-day hasnayenCounselingGapDays()
-//     used by 99401): blocked through 13 days since the last G0447, usable
-//     again once the gap reaches 14+ days. Healthfirst's 60-day gap is
-//     unchanged.
+// 1.28 (2026-08-25) - 99401/99406 never billed with 99214 (99214
+//   wins, all clients). TCM code disables Preventive/Smoking/Obesity
+//   Counseling (Preventive itself still allowed). For this client,
+//   99214 is never billed with a TCM code at all — if TCM is present
+//   and 99214 would otherwise apply (even a practice-added one),
+//   it's downgraded to 99213 and the TCM code used instead.
 //
-// 1.25 (2026-08-19) - Weekend rule: ALL blood/specimen-draw CPTs are now
-//   exempt from the "9-series code blocks 99051" check, not just 99000.
-//   99001 (the rarer specimen-handling sibling of 99000) was previously
-//   NOT exempt — a visit billed with 99001 instead of 99000 would block
-//   and delete 99051 even though the two codes serve the same purpose.
-//   36415 (venipuncture) never actually triggered the check (it doesn't
-//   start with "9"), but is now listed explicitly alongside 99000/99001
-//   in BLOOD_DRAW_CODES_FOR_WEEKEND so the exemption is self-documenting
-//   and won't be missed if this list needs another blood code later.
+// 1.27 (2026-08-25) - Ported Bronx's 96127-vs-G0444 rule: G0444
+//   present removes 96127. G0444 absent keeps an existing 96127
+//   only if a depression/anxiety ICD is coded this encounter, never
+//   added fresh either way. Neither condition met removes it.
+//   Bronx's NP/preventive visit-type fix not ported here.
 //
-// 1.24 (2026-08-19) - Several fixes:
-//   - BUG FIX (weekend 99051 delete/re-add loop): the CC-text EKG rule
-//     used to auto-add 93000 any time "EKG"/"ECG" appeared in the Chief
-//     Complaint. 93000 is a 9-series CPT that isn't exempt from the
-//     weekend-rule's "any 9-series code blocks 99051" check, so on charts
-//     where the CC mentions EKG, 93000 kept getting auto-added, which
-//     blocked/deleted 99051; when staff deleted the unwanted 93000 (since
-//     it was never something they asked to be auto-added), the next
-//     Analyze pass saw the CC still said EKG and auto-added 93000 again —
-//     deleting 99051 again next time it was blocked and re-adding it once
-//     93000 was gone. That add/delete/add/delete cycle is exactly the
-//     "weekend code keeps deleting then re-adding" report. Fix: removed
-//     the CC-text auto-add of 93000 entirely (see 1.24 EKG note below) —
-//     93000 is no longer touched by us at all unless the practice adds it
-//     itself, which stops the oscillation.
-//   - EKG/93000: no longer auto-added from Chief Complaint text at all —
-//     this practice doesn't want us auto-adding it. If 93000 is already
-//     on the chart (added by the practice), it is left alone; 93000 was
-//     never in MANAGED_CODES so it was already never auto-deleted, only
-//     the unwanted auto-ADD is removed here. The Z13.6 EKG-link-ICD rule
-//     still runs, but now only triggers off 93000 actually being on the
-//     chart already, never off our own (now-removed) auto-add.
-//   - Z01.83: explicitly protected — if this ICD is ever on the chart, it
-//     is never proposed for deletion by this script (added a defensive
-//     exclusion in al_deleteUnwantedCodes's icdsToDelete set, and it is
-//     not, and must never be, added to any delete/prune list here).
-//   - 3049F/3050F now follow the exact same "kept only while the
-//     hyperlipidemia ICD (E78.x) is present" rule that 3048F already had
-//     — all three are LDL-management F-codes and should behave
-//     identically. Added both to MANAGED_CODES and removed 3050F from
-//     al_deleteUnwantedCodes's unconditional always-delete list (it was
-//     being hard-deleted regardless of the hyperlipidemia ICD, which
-//     contradicted the 3048F-style rule the practice wants for all three
-//     LDL codes).
-//   - Confirmed Preventive Counseling (99401) is allowed for MetroPlus at
-//     Hasnayen (isHasnayenCounselingBlockedIns already special-cases
-//     MetroPlus as allowed) — no code change needed, verified only.
+// 1.26 (2026-08-19) - Ported two Bronx fixes: payer names merely
+//   containing "Medicaid"/"Medicare" (e.g. a fake "ABCD Medicaid")
+//   were wrongly treated as real, across three gating checks; now
+//   anchored so the name must actually start with the word. Obesity
+//   Counseling (G0447) gap for non-Healthfirst payers changed from
+//   30 days to 14 days; Healthfirst's 60-day gap unchanged.
 //
-// 1.23 (2026-08-18) - PERF FIX to 1.22's ICD delete retry: it was
-//   adding a settle wait after EVERY ICD delete, even ones that worked
-//   cleanly on the first try, slowing down normal deletes that never
-//   had a problem. Now the wait only happens AFTER a bounce-back is
-//   actually detected, before the next retry — a clean delete returns
-//   immediately, same speed as before 1.22.
+// 1.25 (2026-08-19) - Weekend rule: all blood/specimen-draw CPTs now
+//   exempt from the "9-series code blocks 99051" check, not just
+//   99000. 99001 was previously not exempt. 36415 added explicitly
+//   for documentation even though it never triggered the check.
 //
-// 1.22 (2026-08-18) - BUG FIX: ICD deletes could bounce back a moment
-//   after appearing to delete successfully — eCW's backend hadn't
-//   actually committed the delete before the next add/delete in the
-//   same run touched the grid and it re-rendered from a not-yet-updated
-//   list. New deleteICDRowWithRetry() retries the delete up to 4 times
-//   with an increasing settle wait after each attempt (900ms/1600ms/
-//   2300ms/3000ms), re-reading the row fresh each time. Wired into both
-//   the main delete pass and the recheck pass (recheck pass no longer
-//   skips a code that failed on the first pass).
+// 1.24 (2026-08-19) - Fixed a 99051 delete/re-add loop caused by
+//   auto-adding 93000 from CC text mentioning EKG; that auto-add is
+//   now removed entirely, 93000 only touched if practice adds it
+//   itself. Z01.83 now explicitly protected from deletion. 3049F/
+//   3050F now follow the same hyperlipidemia-ICD-gated rule as
+//   3048F, and 3050F removed from the unconditional delete list.
+//   Confirmed 99401 is allowed for MetroPlus at Hasnayen.
 //
-// 1.21 (2026-08-18) - BUG FIX: evaluateAlcohol()'s section filter only
-//   matched a combined "Drug/Alcohol" widget label — SCREENING_LABEL_RE
-//   also recognizes a standalone "Alcohol:" heading as its own label, but
-//   evaluateAlcohol() never accepted it. A chart whose alcohol screening
-//   widget is titled just "Alcohol:" got tokenized correctly but then
-//   silently excluded, so hasAlc came back null even though the screening
-//   was genuinely documented — which meant NOTHING alcohol-related (not
-//   the immediate result code G9622/3016F, nor the annual G0442 code)
-//   ever got suggested, no matter what insurance/visit-type/billing-
-//   history gates would have otherwise allowed. Also fixed the identical
-//   latent bug in evaluateTobacco(), which excluded a standalone
-//   "Tobacco:" label the same way.
+// 1.23 (2026-08-18) - Perf fix: ICD delete retry's settle wait now
+//   only triggers after a real bounce-back is detected, not on
+//   every delete, keeping clean deletes at full speed.
 //
-// 1.18 (2026-08-18) - F/U labs office-visit override changed from 99212
-//   to 99213 — this practice doesn't use 99212 at all. Same protection
-//   as every other office-visit rule: 99213 is only added when there is
-//   NO office-visit code on the chart yet; if the practice already has
-//   99213/99214/99215/etc. on the chart, it's left untouched.
+// 1.22 (2026-08-18) - Fixed ICD deletes bouncing back after
+//   appearing to succeed, due to eCW's backend not yet committing
+//   the delete. Added deleteICDRowWithRetry() with up to 4 retries
+//   and increasing settle waits, wired into both delete passes.
 //
-// 1.17 (2026-08-18) - Two fixes:
-//   - Preventive Counseling (99401) gap rule 3 corrected: the
-//     payer-specific gap (60 days Healthfirst / 30 days elsewhere) only
-//     applies between two 99401 occurrences. A plain Preventive visit
-//     (993xx/AWV) now only blocks 99401 for a flat 30 days regardless of
-//     payer, instead of the longer Healthfirst gap being wrongly applied
-//     to a preventive VISIT that isn't itself Preventive Counseling.
-//   - BUG FIX: clickAnyYesButton() (both copies) only matched plain
-//     <button> elements with exact "yes" text in one copy, and only
-//     <button>/<a> in the other — eCW's "Remove CPT"/"Remove ICD" confirm
-//     popup could render its Yes button as something outside that set and
-//     get left sitting on screen asking the user to confirm instead of
-//     being auto-clicked, even though the code was already on the
-//     delete list. Now also matches input[type="button"/"submit"].
+// 1.21 (2026-08-18) - Fixed evaluateAlcohol() and evaluateTobacco()
+//   silently excluding a standalone "Alcohol:"/"Tobacco:" heading
+//   even though it's a recognized label, causing genuinely
+//   documented screenings to be treated as never screened at all.
 //
-// 1.16 (2026-08-18) - Several rule fixes/additions:
-//   - Medicaid (incl. New York State Medicaid): G0444/G0442 already on
-//     the chart are now actively removed — this payer never bills them,
-//     and they were previously exempt from the delete diff.
-//   - BP codes (3074F/3075F/3078F/3079F): an already-present code is no
-//     longer kept unconditionally — it's now deleted whenever I10 isn't
-//     on the chart, same as the add-side requirement.
-//   - 3046F/3050F added to the always-delete CPT list (al_deleteUnwantedCodes).
-//   - 3044F/3051F (diabetes) and 3048F (hyperlipidemia) are now managed:
-//     kept on the chart only while a qualifying diabetes/hyperlipidemia
-//     ICD is present, deleted otherwise. Never auto-added.
-//   - Office-visit E&M: 99214 is no longer auto-added under any
-//     condition — 99213 is always the default add (F/U labs still uses
-//     99212 via the per-visit-type override). An existing office-visit
-//     code on the chart is still never touched (rule 1).
+// 1.18 (2026-08-18) - F/U labs office-visit override changed from
+//   99212 to 99213, since this practice doesn't use 99212. Still
+//   only added when no office-visit code already exists on chart.
 //
-// 1.15 (2026-08-18) - Rule update: BMI Z68.xx and 3008F are no longer
-//   proposed for deletion when a BMI value is documented on the
-//   encounter, even without a preventive visit or Obesity Counseling
-//   (G0447) on the chart — G8417/G8418/G8420 remain gated to preventive
-//   visits only, unchanged. Also removed rule 15 (auto-consolidating
-//   vitamin-deficiency ICDs to E56.9): whatever vitamin-deficiency code
-//   is already on the chart is left as-is, never replaced. Confirmed
-//   99000/99001 were already in the delete-on-sight CPT list.
+// 1.17 (2026-08-18) - Preventive Counseling gap rule corrected: the
+//   payer-specific 99401-to-99401 gap no longer wrongly applies
+//   between a plain Preventive visit and 99401, which now uses a
+//   flat 30 days regardless of payer. Fixed clickAnyYesButton() to
+//   also match input[type=button/submit], since eCW's confirm popup
+//   could render outside the previously matched element types.
+//
+// 1.16 (2026-08-18) - Medicaid now actively removes existing
+//   G0444/G0442. BP codes (3074F/3075F/3078F/3079F) now deleted
+//   whenever I10 isn't on chart, not just blocked from adding.
+//   3046F/3050F added to always-delete list. 3044F/3051F/3048F now
+//   kept only while a qualifying ICD is present, never auto-added.
+//   99214 no longer auto-added under any condition; 99213 is the
+//   default add.
+//
+// 1.15 (2026-08-18) - BMI Z68.xx and 3008F no longer deleted when a
+//   BMI value is documented, even without a preventive visit or
+//   G0447. Removed auto-consolidation of vitamin-deficiency ICDs to
+//   E56.9; existing codes now left as-is. Confirmed 99000/99001
+//   were already in the delete-on-sight CPT list.
 //
 // 1.14 (2026-08-17) - Version label spacing fixed: margin-top 10px
 //   (was 2px, barely visible) and margin-bottom 4px (was a negative

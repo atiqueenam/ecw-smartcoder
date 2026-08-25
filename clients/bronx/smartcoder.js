@@ -11,358 +11,85 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
-// 1.75 (2026-08-25) - New cross-client billing-exclusivity rules:
-//   1) 99401/99406 are never billed together with 99214 — if both are
-//      applicable, 99214 wins and 99401/99406 is removed (applies to
-//      every client). 2) A TCM code (99495/99496) on the chart disables
-//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
-//      Preventive itself can still apply. 3) 99214 + a TCM code together
-//      is allowed for Bronx (and Getwell) specifically — no downgrade;
-//      every other client downgrades 99214 -> 99213 when a TCM code is
-//      present.
-// 1.74 (2026-08-25) - Two fixes:
-//   - NEW RULE: 96127 (brief emotional/behavioral assessment) vs G0444.
-//     If G0444 is on the chart, 96127 is removed. If G0444 is absent,
-//     96127 is kept only when it's already on the chart AND a
-//     depression/anxiety ICD (F32/F33/F34.1/F34.81/F40/F41/F43.2x) is
-//     coded this encounter — never added fresh either way. With neither
-//     G0444 nor a qualifying ICD, an existing 96127 is removed. Added
-//     '96127' to MANAGED_CODES and a new DEPRESSION_ANXIETY_ICD_PREFIXES
-//     regex.
-//   - BUG FIX: the Preventive quick action determined new-vs-established
-//     purely from isEstablishedPatient() (patient-history lookup), while
-//     the office-visit E&M rule elsewhere trusts the scheduled
-//     appointment's own visit type (NP/ESTPT/F-U/CON via getVisitType()/
-//     classifyVisitType()) as authoritative. The two could disagree: a
-//     chart scheduled as NP, where history lookup returned stale/
-//     incidental data, computed established=true and left an
-//     established-patient preventive code (e.g. 99396) in place instead
-//     of switching to the new-patient one (99386). Added
-//     isNewPatientVisit() — trusts the appointment's own visit type when
-//     classifyVisitType() recognizes it, falling back to
-//     isEstablishedPatient() only when it doesn't — and pointed both
-//     runPreventiveAction() and computeQuickActionGating() at it instead
-//     of calling isEstablishedPatient() directly.
-// 1.73 (2026-08-19) - Two fixes:
-//   - BUG FIX: a payer whose name merely CONTAINS "Medicaid"/"Medicare"
-//     (e.g. a fictitious/branded "ABCD Medicaid" or "ABCD Medicare" that
-//     isn't actually Medicaid/Medicare) was being wrongly treated as real
-//     Medicaid/Medicare by isPreventiveCounselBlockedIns() (blocked P/C),
-//     the Obesity Counseling gating check, and the OB quick-action's own
-//     redundant Medicaid check — all three used an unanchored
-//     /medicaid/i.test(...) or isAnyMedicareIns() (bare /medicare/i), which
-//     matches that word ANYWHERE in the name. Added isMedicaidInsurance()
-//     (start-anchored, same pattern as the existing isMedicaidOrMedicareIns/
-//     isStraightMedicareIns) and switched all three call sites to it (and
-//     to isStraightMedicareIns() for the Medicare half) — a payer's name
-//     now has to actually BEGIN with "Medicaid"/"Medicare" to be treated
-//     as one. (isAnyMedicareIns()'s vaccine-admin-code gating is
-//     deliberately left as-is — Medicare Advantage plans that don't start
-//     with the word "Medicare" still need the Medicare-only vaccine G-codes,
-//     same as before this fix.)
-//   - Obesity Counseling (G0447) gap changed from a flat 30 days to 14
-//     days: previously blocked for 30 days after the last G0447, now
-//     blocked only through 13 days since last use and usable again once
-//     the gap reaches 14+ days.
+// 1.75 (2026-08-25) - 99401/99406 never billed with 99214 (99214 wins, all clients); TCM code disables Preventive/Smoking/Obesity Counseling.
+//   99214+TCM allowed together only for Bronx/Getwell; all other clients downgrade 99214->99213 when a TCM code is present.
 //
-// 1.72 (2026-08-18) - PERF FIX to 1.71's ICD delete retry: it was adding a settle wait after EVERY ICD delete, even ones that worked cleanly on the first try, slowing down normal deletes that never had a problem. Now the wait only happens AFTER a bounce-back is actually detected, before the next retry — a clean delete returns immediately, same speed as before 1.71.
+// 1.74 (2026-08-25) - 96127 removed if G0444 present; kept only if G0444 absent AND a depression/anxiety ICD coded this encounter (never added fresh).
+//   Fixed Preventive quick action to trust appointment visit type (isNewPatientVisit()) instead of stale isEstablishedPatient() history lookup.
 //
-// 1.71 (2026-08-18) - BUG FIX: ICD deletes (e.g. Z13.89/Z13.31) could
-//   still bounce back a moment after appearing to delete successfully —
-//   eCW's backend hadn't actually committed the delete before the next
-//   add/delete in the same run touched the grid and it re-rendered from
-//   a not-yet-updated list. New deleteICDRowWithRetry() retries the
-//   delete up to 4 times with an increasing settle wait after each
-//   attempt (900ms/1600ms/2300ms/3000ms), re-reading the row fresh each
-//   time. Wired into both the main delete pass and the recheck pass
-//   (recheck pass no longer skips a code that failed on the first pass).
+// 1.73 (2026-08-19) - Fixed unanchored /medicaid|medicare/i matching fake payers like "ABCD Medicaid"; added anchored isMedicaidInsurance().
+//   Obesity Counseling (G0447) gap shortened from 30 days to 14 days.
 //
-// 1.68 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
-//   enabled with no BMI documented at all, only failing after being
-//   clicked ("BMI not found on this page — skipped"). Now fades up
-//   front like every other missing-prerequisite case.
+// 1.72 (2026-08-18) - Perf fix: ICD delete retry's settle wait now only fires after a bounce-back is detected, not on every delete.
 //
-// 1.67 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
-//   screening ICD): replaced with Z13.9 when alcohol screening applies,
-//   deleted outright with no replacement when it doesn't.
+// 1.71 (2026-08-18) - Fixed ICD deletes (Z13.89/Z13.31) bouncing back from uncommitted eCW backend state.
+//   Added deleteICDRowWithRetry() with up to 4 retries and increasing settle waits (900ms-3000ms).
 //
-// 1.66 (2026-08-16) - BUG FIX: deleteOneCPTRow/deleteOneICDRow reported
-//   "deleted successfully" for a row whose DOM reference went stale
-//   (e.g. Angular re-rendered the grid after an earlier delete in the
-//   same batch) WITHOUT actually clicking delete — the log said Z13.31
-//   (or any code) was removed while it was still visibly on the chart.
-//   Now re-finds the row by code in the current grid before giving up;
-//   only reports success-without-deleting if the code is genuinely gone.
+// 1.68 (2026-08-16) - Fixed OB button staying enabled with no BMI documented; now fades upfront instead of failing after click.
 //
-// 1.65 (2026-08-16) - 1125F/1126F/1157F/1158F/1170F: removed pain-vs and
-//   televisit-vs correction/swap logic — plain age check only. 1159F/
-//   1160F: Healthfirst no longer deletes these from the chart (age-66+
-//   check is the only thing that removes them now, same as any payer) —
-//   instead, on the Claim tab, Healthfirst gets them deselected from the
-//   claim (unchecked, not deleted) via new cl_deselectHealthfirst1159_1160.
+// 1.67 (2026-08-16) - Z13.89 standardized to Z13.9 for alcohol screening (replaced or deleted based on applicability).
 //
-// 1.64 (2026-08-15) - NEW RULE (all clients): Preventive/Preventive
-//   Counseling/Smoking Counseling/Obesity Counseling now all require at
-//   least one vital sign (BP, weight, height, pulse, temp, resp rate, O2
-//   sat) documented this encounter, via the existing isVitalsDocumented()
-//   helper. With no vitals at all, all four quick-action buttons fade and
-//   each one's hover tooltip reads "No vitals documented — <bundle> can't
-//   be applied" — checked last in computeQuickActionGating() so it always
-//   overrides every other individual rule. Nothing else changed.
+// 1.66 (2026-08-16) - Fixed delete functions falsely reporting success on a stale DOM row without actually deleting it.
+//   Now re-finds the row by code in the current grid before giving up.
 //
-// 1.63 (2026-08-15) - BUG FIXES (4): (1) BP codes (3074F-3079F) are now
-//   withheld entirely when EITHER systolic (>139) or diastolic (>89) is out
-//   of range — previously a high systolic with an in-range diastolic (or
-//   vice versa) still let the in-range half's code through. (2) Tobacco
-//   detection now recognizes a bare "(Smoking):yes." structured answer as a
-//   confirmed smoker — previously this fell through every regex (none of
-//   which match a lone "yes") to the "no positive indicators" default and
-//   was reported as a false non-smoker. (3) G0442/G0444 are now deleted
-//   from the current chart if they were already billed in another
-//   encounter this same calendar year, instead of only being skipped from
-//   re-proposal (a copy already added to the current chart stayed put
-//   before this fix). (4) Z00.01 (18+) and Z00.121 (under 18) are now
-//   mutually exclusive — both the Preventive quick-action and the regular
-//   Analyze/Start Action flow remove whichever one doesn't match the
-//   patient's age instead of leaving both on the chart.
+// 1.65 (2026-08-16) - 1125F/1126F/1157F/1158F/1170F: removed pain-vs/televisit-vs logic, plain age check only.
+//   Healthfirst: 1159F/1160F now deselected on Claim tab instead of deleted from chart.
 //
-// 1.62 (2026-08-13) - RULE CHANGE (reverts part of 1.61): Z13.31/Z13.9 and
-//   their screening CPT are now enforced as a true bundle — the ICD is
-//   only ever proposed/kept when its matching screening CPT is actually
-//   billable for this payer, with NO payer-specific carve-out. 1.61 had
-//   added a UHC exception that kept the ICD even when no CPT applied
-//   (since UHC blocks G-coded results); per explicit instruction, that
-//   split the bundle and is wrong — if the G-code isn't used for UHC,
-//   its paired Z-code isn't suggested either, exactly like the G-code
-//   itself. The CPT-support check (hasDepressionScreeningCpt/
-//   hasAlcoholScreeningCpt) is now computed once and shared by BOTH the
-//   add rule and the delete/cleanup rule, so they can never disagree —
-//   this also closes the add/delete loop from 1.58/1.61 for good, since
-//   the same condition now gates both directions.
+// 1.64 (2026-08-15) - New rule (all clients): Preventive/Preventive Counseling/Smoking/Obesity Counseling now require
+//   at least one documented vital sign this encounter, else all four quick-action buttons fade.
 //
-// 1.61 (2026-08-13) - BUG FIX: the depression/alcohol screening ICD
-//   cleanup (Z13.31/Z13.9) added in 1.58 fought with United Health Care's
-//   "no G-prefixed CPT" rule and produced an add/delete loop. For UHC, a
-//   NEGATIVE alcohol screen wants G9622 and a NEGATIVE depression screen
-//   wants G8510/G8431/G0444 — all G-prefixed, all wiped by the UHC rule,
-//   leaving no CPT the cleanup would accept. So it kept flagging Z13.9/
-//   Z13.31 for deletion the same run they were just added (screening was
-//   genuinely documented), and re-adding them right after — repeating
-//   every time Analyze ran. Fixed by treating a documented screening
-//   (hasDep/hasAlc !== null) as sufficient justification on its own for
-//   UHC, since the matching CPT is deliberately never billable for this
-//   payer regardless of the result. Verified for all 3 clients (same bug
-//   existed in Getwell and Hasan Sheikh — same fix applied to both).
+// 1.63 (2026-08-15) - 4 fixes: BP codes withheld if either systolic OR diastolic is out of range (not just one).
+//   Bare "(Smoking):yes" now detected as smoker; G0442/G0444 deleted if already billed this year; Z00.01/Z00.121 now mutually exclusive by age.
 //
-// 1.60 (2026-08-13) - BUG FIX: United Health Care's blanket "no G-prefixed
-//   CPT code" rule was deleting G0101/G0102/G0103 too, even though UHC
-//   does use these. Added UHC_GCODE_EXCEPTIONS = {G0101,G0102,G0103},
-//   checked in BOTH places the UHC G-code sweep runs (the `desired` map
-//   filter before toAdd is built, and the currentRows sweep that removes
-//   any leftover G-code already on the chart) — these 3 codes are now
-//   never proposed for deletion for UHC, everything else G-prefixed
-//   still is.
+// 1.62 (2026-08-13) - Reverted 1.61's UHC exception: Z13.31/Z13.9 now strictly bundled with matching screening CPT for all payers, no carve-outs.
+//   Add/delete logic now shares one computed check, closing the add/delete loop for good.
 //
-// 1.59 (2026-08-13) - NEW RULE: NYCE PPO billing restrictions.
-//   1) No counseling services for NYCE PPO — Preventive Counseling was
-//      already blocked; Smoking Counseling (SM) and Obesity Counseling
-//      (OB) quick-action buttons are now also disabled for this payer,
-//      same as the other counseling-blocked payers.
-//   2) If a Preventive visit code (993xx or G0438/G0439) is on a NYCE
-//      PPO claim, no office-visit E/M code is billed alongside it — any
-//      office-visit code already on the chart is removed and none is
-//      suggested. Added isNycePPOIns() helper, reused by both rules.
+// 1.61 (2026-08-13) - Fixed UHC add/delete loop: G-prefixed screening codes wiped but Z13.9/Z13.31 kept re-adding.
+//   Documented screening alone now justifies keeping the ICD for UHC.
 //
-// 1.58 (2026-08-13) - NEW RULE: depression/alcohol screening ICD cleanup.
-//   If Z13.31 (depression screening) or Z13.9/Z13.89 (alcohol screening)
-//   is sitting on the chart but there's no matching screening CPT on the
-//   claim (G8510/G8431/G0444/3725F for depression; G9622/3016F/G0442/
-//   H0049/99408 for alcohol) — either already present or about to be
-//   added this run — the ICD is now flagged for deletion. Previously
-//   these Z-codes were only ever ADDED when a screening was documented;
-//   nothing removed one that was left over from a prior visit or added
-//   by hand with no screening actually billed this encounter.
+// 1.60 (2026-08-13) - Fixed UHC's "no G-prefixed CPT" rule wrongly deleting G0101/G0102/G0103.
+//   Added UHC_GCODE_EXCEPTIONS so these 3 codes are never proposed for deletion.
 //
-// 1.57 (2026-08-13) - BUG FIX x3:
-//   1) isStraightMedicareIns() now strips harmless trailing/interior noise
-//      (a parenthetical like "(Traditional)", stray dashes) before its
-//      exact match, so a plain-Medicare name carrying that noise is
-//      recognized as straight Medicare and gets G0438/G0439 instead of
-//      falling through to an age-banded 993xx preventive code.
-//   2) The "Controlling BP" chief-complaint check now also matches the
-//      common typo "controllin bp" (missing trailing "g").
-//   3) Televisit (CON) 99212-vs-99213 med-refill rule: a CC segment is no
-//      longer treated as "refill-only" just because the word "refill"
-//      appears somewhere in it. A heavy CC like "MEDICATION REFILL ( 95
-//      yr male contacted @ 11:39 am spoke with pts daughter and care
-//      giver ( pts medication and pharmacy confirmed ( kt )" has no
-//      commas/semicolons so it was one giant "segment", and used to bill
-//      99212 even though it documents a real encounter (contact time, who
-//      was spoken to, meds/pharmacy confirmed). Now the refill phrase is
-//      stripped out of each segment and only counts as refill-only if
-//      what's left is a short (<=6 word) descriptor — otherwise 99213.
+// 1.59 (2026-08-13) - NYCE PPO: blocked Smoking (SM) and Obesity (OB) Counseling buttons, same as Preventive Counseling.
+//   Preventive visit code on a NYCE PPO claim now excludes any office-visit E/M code (removed/not suggested).
 //
-// 1.56 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
-//   "history still loading" notice if window.__ecwPatientHistory
-//   .isLoading() is true, instead of proceeding. isEstablishedPatient()
-//   can't distinguish "genuinely no prior encounters" from "history
-//   fetch hasn't finished yet" — both look like an empty getData(), and
-//   it silently defaulted to "New Patient" either way. Since this
-//   established/new call picks the actual CPT billed (99381-99387 vs
-//   99391-99397, or G0438 vs G0439 Medicare AWV), clicking Preventive
-//   right after opening/switching a chart — before the async,
-//   multi-request history fetch resolves — could bill a new-patient
-//   code (or a duplicate G0438) for a genuinely established patient.
-//   isLoading() already existed and was already used elsewhere (the
-//   "Loading visit history…" banner) but was never checked here.
+// 1.58 (2026-08-13) - New rule: Z13.31/Z13.9/Z13.89 flagged for deletion if no matching screening CPT is on/being added to the claim.
 //
-// 1.55 (2026-08-12) - NEW RULE: insurance-change carve-out for the
-//   preventive/counseling timeline gates, ported from Getwell/Hasan
-//   Sheikh. codeUsedInYear (annual "billed this calendar year" checks)
-//   and codeUsedInLastDays (30-day gates, the 99214 "not used in the
-//   last 30 days" rule) now skip any historical encounter billed under
-//   a DIFFERENT payer than the current encounter's insurance. Example:
-//   a code billed under one insurance no longer blocks billing it again
-//   once the patient's insurance genuinely changes to a different
-//   payer, since that new payer never used it. Added getPayerBrand()
-//   (derives a payer "brand" key, stripping plan-variant words like
-//   PPO/HMO/Plan/Leaf/Premier/etc. — same payer under a different plan
-//   name still counts as the SAME payer; only a genuinely different
-//   payer resets the timeline) and isDifferentPayerThanCurrent()
-//   (conservative: unparsed insurance on either side is treated as the
-//   SAME payer, so missing data never opens a duplicate-billing gap).
-//   Does NOT touch smoker/tobacco detection (Bronx has no
-//   isConfirmedNonSmoker logic to begin with) and does NOT affect
-//   new-vs-established patient status — that stays based on full visit
-//   history regardless of insurance changes.
+// 1.57 (2026-08-13) - 3 fixes: isStraightMedicareIns() now tolerates noise like "(Traditional)"; "controllin bp" typo now matches.
+//   Televisit refill-only detection no longer misfires on long CC text just because "refill" appears somewhere in it.
 //
-// 1.54 (2026-08-11) - 99401 is now allowed for MetroPlus (was blocked in 1.53).
-//   Empire alcohol/tobacco removal is now limited to televisits only
+// 1.56 (2026-08-12) - Fixed Preventive quick action possibly billing wrong new/established code while patient history was still loading.
+//   Now blocks with a "history still loading" notice via window.__ecwPatientHistory.isLoading().
 //
-// 1.53 (2026-08-11) - Age gates for screening result codes and smoking
-//   counseling (ported from Getwell 5.33/Hasan Sheikh 1.71-1.73). Audit:
-//   G0444 (12+), G0442 (18+), and their result codes G8510/G8431 (12+)
-//   and G9622/3016F (18+) were ALREADY correctly gated, including the
-//   age-based cleanup block for G0444/G0442 (they're deliberately not in
-//   MANAGED_CODES). Two gaps found and fixed: (1) tobacco screening result
-//   codes G9275/G9276/1036F/1000F had no age gate — added the same 18+
-//   requirement as 99406; they're in MANAGED_CODES so an already-present
-//   one now auto-deletes for a too-young patient. (2) 99406 (Smoking
-//   Counseling) itself had no age gate anywhere — added an 18+ check to
-//   the SM quick-action gating (computeQuickActionGating), which already
-//   doubles as cleanup, so this also auto-deletes an existing 99406 for a
-//   patient under 18.
+// 1.55 (2026-08-12) - New rule: annual/30-day billing timeline gates now ignore encounters billed under a different payer.
+//   Added getPayerBrand()/isDifferentPayerThanCurrent() helpers (insurance-change carve-out, ported from Getwell/Hasan Sheikh).
 //
-// 1.52 (2026-08-11) - Widened the 1.51 popup fix into a general rule: the
-//   background popup-dismiss helpers (dismissEcwErrorPopup,
-//   dismissAssociatedCPTModalIfPresent) now ONLY ever act while this
-//   extension is itself mid-action (quick action, Start Action, Auto
-//   Link, or Claim Link) — added a new extensionBusy flag, set for Auto
-//   Link/Claim Link's duration (they had no such tracking before; quick
-//   actions and Start Action already had quickActionRunning/
-//   actionRunning). Both helpers now bail out and touch nothing at all
-//   whenever quickActionRunning/actionRunning/extensionBusy are all
-//   false — i.e. whenever it's the user doing something manually, not
-//   this extension. Previously the "Associated CPT Codes" popup was
-//   auto-answered "No" and plain "eClinicalWorks" error alerts were
-//   auto-dismissed regardless of who triggered them, which could
-//   override a decision the user was mid-way through making by hand.
-//   extensionBusy is cleared in a finally block (so an unexpected error
-//   mid-flow can't leave it stuck true) plus a 20s hard-timeout safety
-//   net around Auto Link's async delete/confirm loop.
+// 1.54 (2026-08-11) - 99401 re-enabled for MetroPlus (was blocked in 1.53).
+//   Empire alcohol/tobacco removal now limited to televisits only.
 //
-// 1.51 (2026-08-11) - BUG FIX: manually clicking Remove on an ICD/CPT in
-//   eCW's own Claim screen and confirming "Are you sure you want to
-//   remove this ICD?" was getting the dialog instantly force-closed
-//   before Yes/No could be clicked, silently cancelling the delete. Root
-//   cause: dismissEcwErrorPopup() (polls every 1.8s to auto-close eCW's
-//   plain "eClinicalWorks"-titled error alerts, e.g. "Could not add ICD:
-//   ...") matches on modal TITLE only — but eCW reuses that exact same
-//   titled modal for Yes/No confirmation dialogs too. Since a confirm
-//   dialog has no "OK" button to match, the old code fell through to the
-//   close/X button and force-dismissed it on every poll tick, faster than
-//   a person could click anything. Fixed by having the function bail out
-//   immediately (do nothing at all) whenever it detects a Yes/No button
-//   pair in the modal, leaving any such confirmation dialog fully alone
-//   for the user to answer. Plain OK-only error alerts are unaffected and
-//   still auto-dismiss as before.
+// 1.53 (2026-08-11) - Added 18+ age gate to tobacco screening result codes (G9275/G9276/1036F/1000F).
+//   Added 18+ age gate to 99406 itself (SM quick-action), matching existing gates on other screening codes.
 //
-// 1.50 (2026-08-11) - Two fixes. (1) New-patient office-visit E&M: if the
-//   practice already added 99204 or 99205 to a new-patient chart, we no
-//   longer also suggest/add our own 99203 alongside it (theirs is the
-//   deliberate call, keep it) — and if a stale 99203 from an earlier run
-//   is already sitting there next to their 99204/99205, it now gets
-//   flagged for deletion as redundant. If neither 99204 nor 99205 is
-//   present, behavior is unchanged: we still only ever add 99203. (2)
-//   Preventive E&M code selection: only STRAIGHT/plain Medicare (exact
-//   "Medicare"/"Medicare Part A"/"Medicare Part B", nothing else in the
-//   name) and VNS Choice get the G0438/G0439 Medicare AWV codes now.
-//   Clover Health — previously lumped in with Medicare for this — and
-//   every other insurance (including Medicare Advantage plans whose name
-//   merely mentions "Medicare") now correctly get the age-banded 993xx
-//   preventive E&M code instead. Added isStraightMedicareIns() for this;
-//   isAnyMedicareIns()'s other, unrelated uses (vaccine Medicare gating,
-//   Preventive-Counseling-blocked-payer check) are untouched.
+// 1.52 (2026-08-11) - Background popup-dismiss helpers now only act while the extension itself is mid-action.
+//   Added extensionBusy flag for Auto Link/Claim Link; both helpers bail out entirely during manual user actions.
 //
-// 1.49 (2026-08-11) - Two fixes. (1) 99402/99403/99404 (30/45/60-min
-//   Preventive Counseling) are never used by this provider — only 99401
-//   is. Removed their ICD-linking entries from both Auto Link and Claim
-//   Link's CPT rule tables (they were wrongly treated as valid/linkable
-//   like 99401) and added an unconditional Analyze-flow deletion: any of
-//   the three gets removed outright wherever found, independent of visit
-//   type/insurance/PC gating. (2) Office-visit E&M cleanup was silently
-//   ignoring 99204/99205 (new-patient level 4/5) because they weren't in
-//   OFFICE_VISIT_EM_CODES at all — a 99204 sitting on an ESTABLISHED
-//   visit's chart (wrong patient type) could never be flagged. Added both
-//   to OFFICE_VISIT_EM_CODES and made their PRACTICE_PROTECTED_OV_CODES
-//   protection conditional on ovIsNewPatient: on an actual new-patient
-//   visit a 99204/99205 next to the computed 99203 is still protected as
-//   a deliberate practice override (unchanged behavior); on an
-//   established visit it's now correctly recognized as a mismatched code
-//   and deleted. 99215's unconditional protection is unchanged.
+// 1.51 (2026-08-11) - Fixed manual ICD/CPT removal confirmation dialogs being force-closed instantly by the error-popup dismisser.
+//   dismissEcwErrorPopup() now leaves any Yes/No confirmation dialog fully alone.
 //
-// 1.48 (2026-08-11) - 95250 (CGM placement) now follows the exact same
-//   rule as 95251 (CGM interpretation): both link to the diabetic ICD
-//   E11.9 in Auto Link and Claim Link's CPT rule tables, and both trigger
-//   the same modifier logic (checked together as "9525x present").
-//   Televisit modifier rule unchanged: office-visit code gets mod1=95
-//   always, plus mod2=25 when either 9525x code is present. NEW: added a
-//   normal (non-televisit) visit rule — when 9525x is present, the
-//   office-visit code gets mod1=25 by default; but if a Preventive or
-//   Preventive Counseling code (993xx/G0438/G0439/99401) is ALSO on the
-//   chart alongside the office-visit code, the 25 goes on that
-//   preventive/counseling code's mod1 instead, and the office-visit
-//   code's own modifier is left completely untouched (not set, not
-//   cleared). Refactored al_applyTelevisitModifier's Angular-scope/manual-
-//   input modifier-setting into a shared al_setCPTModifier() helper used
-//   by both branches — no behavior change to the write mechanism itself.
+// 1.50 (2026-08-11) - Stop suggesting/adding 99203 alongside an existing 99204/99205; flag stale redundant 99203 for deletion.
+//   Only straight Medicare/VNS Choice get G0438/G0439 now; all others (incl. Medicare Advantage) get age-banded 993xx.
 //
-// 1.47 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
-//   cleanup, not just an add-guard. Whenever a quick-action button is
-//   faded — for ANY of its existing reasons (already billed this year/30
-//   days, wrong insurance, no chronic dx this encounter, not a confirmed
-//   smoker, BMI doesn't qualify, new patient, televisit, etc.) — that
-//   bundle's own CPT code is deleted if already on the chart: PV faded ->
-//   993xx/G0438/G0439 removed; PC faded -> 99401 removed; SM faded ->
-//   99406 removed; OB faded -> G0447 removed. Existing
-//   hasPreventiveVisit/has99401ForZ71/hasObesityCPTForBMI logic now reads
-//   through this same gating, so the linked ICDs (Z00.01/Z00.121,
-//   Z71.3/Z71.82/Z71.89, BMI Z68.xx) cascade-delete automatically too —
-//   Z68.xx specifically is only removed if NEITHER the PV nor the
-//   (now-cleaned) OB bundle still needs it. Superseded/generalized the
-//   1.46 televisit-only cleanup (televisit is just one of the gating
-//   reasons now, same as before).
+// 1.49 (2026-08-11) - 99402/99403/99404 no longer linked/valid; unconditionally deleted wherever found on the chart.
+//   Fixed 99204/99205 never being flagged for cleanup when mismatched to an established visit.
 //
-// 1.46 (2026-08-11) - Removed the "commercial payer" office-visit exclusion:
-//   Bronx does not follow that rule, so an office-visit E&M code is now
-//   suggested for every visit (Aetna/Cigna/BCBS/UHC/UMR/Empire included).
-//   Added active cleanup for televisits (CON): any Preventive visit code
-//   (993xx/G0438/G0439) or Preventive Counseling (99401) already on the
-//   chart is now deleted outright, along with their linked ICDs
-//   (Z00.01/Z00.121, Z71.3/Z71.82/Z71.89, Z68.xx when no longer needed) —
-//   not just blocked from being newly added. Removed MODULE 3 (PN modal
-//   resize) entirely per Bronx's request; #mainPNDialog is left at eCW's
-//   own default size/behavior now.
+// 1.48 (2026-08-11) - 95250 now follows the same ICD-linking/modifier rules as 95251 (both link to E11.9).
+//   New non-televisit rule: mod1=25 goes on preventive/counseling code instead of office-visit code when both present.
+//
+// 1.47 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now also actively deletes each bundle's CPT + linked ICDs when faded.
+//   Applies for any fade reason (billed already, wrong insurance, no chronic dx, not a smoker, BMI, new patient, televisit, etc.).
+//
+// 1.46 (2026-08-11) - Removed "commercial payer" office-visit exclusion; office-visit E&M now suggested for every payer.
+//   Added active televisit (CON) cleanup deleting Preventive/Preventive Counseling codes + linked ICDs; removed PN modal resize module.
 //
 // 1.45 (2026-08-10) - Fixed pediatric Obesity Counseling gating. Patients
 //   under 18 now use documented BMI percentile >=95 instead of adult BMI >=30;
