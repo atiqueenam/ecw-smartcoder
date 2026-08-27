@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-25T10:26:25.340Z",
+  "generatedAt": "2026-08-25T11:35:50.020Z",
   "clients": [
     {
       "id": "bronx",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "5.74",
+      "version": "5.75",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "65fca75454b6074fd3137872ba1b9e563351a8197d7278cef94f287029411ba8"
+      "sha256": "216568b7eb557f03b7a377a7c78f573c31e3176be3af436e25013a1dd84d5d11"
     },
     {
       "id": "hasan-sheikh",
