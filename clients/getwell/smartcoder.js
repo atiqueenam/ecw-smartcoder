@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.76
+// @name         Getwell SmartCoder by ATQ v5.77
 // @namespace    http://tampermonkey.net/
-// @version      5.76
+// @version      5.77
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.77 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
+//   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
+//   visit linking when none present. Was previously completely
+//   unregistered (not linked by either engine). Same fix: Bronx 1.76.
+//   Also folds in the unreleased 5.76.1 fix: HPI_SECTION_RE now stops at
+//   "Current Medication:" (was over-running past the real HPI boundary,
+//   letting an unrelated "today" elsewhere on the page falsely qualify a
+//   past-blood-work-review sentence for 36415/99000) and recognizes
+//   "History of Present Illness" as an HPI header alias, not just "HPI:".
 // 5.76 (2026-08-25) - "HPI clearly says 'Blood work was obtained today'
 //   but SmartCoder isn't proposing 36415/99000." Two fixes to 5.74's HPI
 //   blood-work detection: 1) The HPI section was captured with a single
@@ -4467,6 +4476,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "al_officeVisit" },
@@ -5465,6 +5475,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "cl_officeVisit" },

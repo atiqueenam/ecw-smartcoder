@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.75
+// @name         Bronx Health SmartCoder v1.76
 // @namespace    http://tampermonkey.net/
-// @version      1.75
+// @version      1.76
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.76 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
+//   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
+//   visit linking when none present. Was previously completely
+//   unregistered (not linked by either engine).
 // 1.75 (2026-08-25) - 99401/99406 never billed with 99214 (99214 wins, all clients); TCM code disables Preventive/Smoking/Obesity Counseling.
 //   99214+TCM allowed together only for Bronx/Getwell; all other clients downgrade 99214->99213 when a TCM code is present.
 //
@@ -3629,6 +3633,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "al_officeVisit" },
@@ -4785,6 +4790,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "cl_officeVisit" },

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.86
+// @name         Hasan Sheikh SmartCoder v1.87
 // @namespace    http://tampermonkey.net/
-// @version      1.86
+// @version      1.87
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+//
+// 1.87 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
+//   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
+//   visit linking when none present. Was previously completely
+//   unregistered (not linked by either engine). Same fix: Bronx 1.76.
 //
 // 1.86 (2026-08-25) - 99401/99406 never billed with 99214 (99214
 //   wins, all clients). TCM code disables Preventive/Smoking/Obesity
@@ -3285,6 +3290,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "al_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "al_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "al_officeVisit" },
@@ -4478,6 +4484,7 @@ function __smartCoderReadVersion(fallback) {
             "LSM01": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "PD001": { type: "customICDCollector", icdList: ["Z71.3","Z71.82","Z71.89"], fallback: "cl_officeVisit" },
             "4013F": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
+            "G9664": { type: "startsWith", icds: ["E78"], fallback: "cl_officeVisit" },
             "2026F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "2033F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "4010F": { type: "startsWith", icds: ["I10"], fallback: "cl_officeVisit" },
