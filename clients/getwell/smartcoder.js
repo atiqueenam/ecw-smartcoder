@@ -12,642 +12,161 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
-// 5.77 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
-//   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
-//   visit linking when none present. Was previously completely
-//   unregistered (not linked by either engine). Same fix: Bronx 1.76.
-//   Also folds in the unreleased 5.76.1 fix: HPI_SECTION_RE now stops at
-//   "Current Medication:" (was over-running past the real HPI boundary,
-//   letting an unrelated "today" elsewhere on the page falsely qualify a
-//   past-blood-work-review sentence for 36415/99000) and recognizes
-//   "History of Present Illness" as an HPI header alias, not just "HPI:".
-// 5.76 (2026-08-25) - "HPI clearly says 'Blood work was obtained today'
-//   but SmartCoder isn't proposing 36415/99000." Two fixes to 5.74's HPI
-//   blood-work detection: 1) The HPI section was captured with a single
-//   non-global regex match — "HPI:" can appear more than once on the
-//   page (e.g. a section-nav label with little/no content before the
-//   next header, in addition to the real note body), and matching only
-//   the FIRST occurrence risked grabbing an empty/near-empty decoy
-//   instead of the actual HPI text. Now every "HPI:"-headed block on the
-//   page is collected and the LONGEST one is used — the real narrative,
-//   never a bare label. 2) Added a whole-page-text fallback: if the
-//   section extraction still comes up with next to nothing (the page's
-//   markup didn't line up with the expected header pattern at all), the
-//   exact same same-sentence "blood work" + "today" rule now also runs
-//   against the full note text, so a genuine same-visit mention is never
-//   silently missed just because it couldn't be isolated to a named
-//   section. Verified against the exact HPI text reported by the client
-//   (see this session) — now correctly proposes 36415/99000.
-// 5.75 (2026-08-25) - "The SmartCoder panel itself goes white for a
-//   moment while CDSS is checking." Root cause: 5.72's fix for the CDSS
-//   whiteout used a subtree-wide MutationObserver (watchAndHideCdssNodes)
-//   that hides whatever eCW inserts anywhere under <body> during the
-//   scrape — but subtree:true also catches THIS SCRIPT'S OWN re-renders,
-//   e.g. renderSnapshotBlock() rewriting #ecsBody's innerHTML if that
-//   happens to run while a CDSS scrape is in flight (CDSS starts right
-//   after patient history finishes loading, so the two can genuinely
-//   overlap). The watcher was hiding its own freshly-rendered panel
-//   content, which is exactly what showed up as the panel going blank/
-//   white. Fix: watchAndHideCdssNodes() now excludes this extension's
-//   own UI (the #ecwCodingSnapshot panel, #ecwSnapshotTab, the Patient
-//   History modal, and anything with an id starting "docpro"/"ecs")
-//   before hiding a newly-inserted node — only eCW's own CDSS dialog
-//   ever gets hidden now, never anything this script renders itself.
-// 5.74 (2026-08-25) - Blood draw/blood work (36415/99000) can now come
-//   from the HPI, not just the CC. Previously only a CC mention of
-//   "blood draw"/"blood work" triggered these two codes — a real blood
-//   draw described only in the HPI (a common pattern: "daughter called
-//   in... blood work was obtained today for routine monitoring") was
-//   silently missed. HPI mentions are held to a stricter bar than CC
-//   ones, though, since HPI often narrates PAST or FUTURE draws too, not
-//   just today's: a mention only counts when it's tied to today's visit
-//   (a "today"/"this visit"/"now" wording in the same sentence, or
-//   elsewhere in the HPI when that sentence has no conflicting marker)
-//   and is NOT tied to an explicit date, "ago", "last week", "scheduled",
-//   "at the hospital", etc. — any of those next to the mention rules it
-//   out even if "today" appears elsewhere in the note.
-// 5.73 (2026-08-25) - New cross-client billing-exclusivity rules:
-//   1) 99401/99406 are never billed together with 99214 — if both are
-//      applicable, 99214 wins and 99401/99406 is removed (applies to
-//      every client). 2) A TCM code (99495/99496) on the chart disables
-//      Preventive/Smoking/Obesity Counseling (99401/99406/G0447) — only
-//      Preventive itself can still apply. 3) 99214 + a TCM code together
-//      is allowed for Getwell (and Bronx) specifically — no downgrade;
-//      every other client downgrades 99214 -> 99213 when a TCM code is
-//      present (Hasan Sheikh goes further and drops the office-visit
-//      code entirely — see that client's own changelog).
-// 5.72 (2026-08-25) - "After history loading, while CDSS is checking, the
-//   whole screen goes white for a while" — a regression from 5.71's own
-//   fix. 5.71 made the entire <html> element visibility:hidden so it
-//   wouldn't matter what markup/position the CDSS dialog used — that
-//   part worked (no more modal flash), but visibility:hidden on <html>
-//   stops the browser from painting ANYTHING under it, so the real
-//   patient chart the user was reading also disappeared for the whole
-//   scrape, replaced by a blank white viewport. That's a bigger problem
-//   than the one it fixed. Fix: stop hiding the whole page. Instead,
-//   watchAndHideCdssNodes() runs a MutationObserver on document.body
-//   with subtree:true (catches insertions at ANY depth, not just direct
-//   body children — the actual gap in the pre-5.71 per-node approach)
-//   and hides only the specific node(s) CDSS inserts. The rest of the
-//   chart stays fully visible and interactive the entire time; only the
-//   invisible CDSS dialog is affected, no matter where eCW mounts it.
-// 5.71 (2026-08-25) - "CDSS opening/closing still visibly flashes on
-//   screen, must never be seen." Root cause: the hiding logic only hid
-//   elements matching guessed selectors/positions — CSS targeting
-//   .modal/.modal-backdrop, plus a MutationObserver that only hid new
-//   *direct children of document.body*. eCW's actual CDSS dialog markup
-//   is custom (IDs like alertsMainTbl1, not Bootstrap classes) and there
-//   was no guarantee it's a direct body child either, so either
-//   assumption failing let a real flash through on a live patient chart.
-//   Fix: hide the ENTIRE page instead of guessing at the dialog's markup.
-//   The docpro-cdss-scraping class now sets visibility:hidden directly on
-//   <html>; visibility is inherited by every descendant regardless of
-//   its class name or where it's mounted, so nothing on the page can be
-//   visible for the whole scrape, guaranteed. This also let us delete the
-//   per-node hideNewBodyChildren()/MutationObserver/stillNeedsHiding-
-//   polling logic entirely (no longer needed once the whole page is
-//   hidden) in favor of one fixed short wait before revealing the page
-//   again — less code, more reliable.
-// 5.70 (2026-08-25) - "The extension is continuously looking for something
-//   every 2/3 seconds, making everything laggy" — found two real,
-//   general-purpose sources of that, unrelated to CDSS this time:
-//   1) isPatientChart() ran document.body.innerText on EVERY 2.5s
-//      checkAndUpdate tick, for as long as the user was anywhere on a
-//      chart page (which is most of the time this extension runs at
-//      all). .innerText forces the browser to fully compute page layout
-//      — a genuinely expensive synchronous operation — so this was a
-//      real, periodic layout-thrash on a timer. Fixed: skip it entirely
-//      while on the Billing tab (no SOAP text exists there anyway, so it
-//      was never actually needed to answer "are we on the chart" in that
-//      case); on the SOAP view, throttled to at most once every 8s
-//      instead of every 2.5s tick, trusting the cached result in between
-//      (a fresh scan still happens immediately on switching patients).
-//   2) renderSnapshotBlock() rebuilt the whole panel's innerHTML from
-//      scratch on every tick, even when the generated markup was
-//      byte-for-byte identical to what was already on screen — forcing
-//      an unnecessary re-parse/re-layout of the panel each time. Now
-//      skips the DOM write entirely when nothing actually changed.
-// 5.69 (2026-08-25) - The CDSS status badge (5.67) spelled its message out
-//   as a full sentence, which wrapped to 2-3 lines in the panel's narrow
-//   width and ate a large chunk of the limited vertical space above "TO
-//   ADD"/"TO REMOVE". Cut down to a short single-line badge ("✓ CDSS
-//   checked", "⚠ CDSS not checked (chart-only result)", etc.) with tighter
-//   padding/line-height; the full explanation moved into a title=""
-//   tooltip (hover to see it) instead of being permanently on-screen.
-// 5.68 (2026-08-25) - Reported from live use: 5.66/5.67 sometimes left the
-//   CDSS modal open on screen, plus the trigger machinery had grown too
-//   complex to trust ("increased code lines a lot but didn't do any
-//   effective work"). Rewrote the whole CDSS section:
-//   REAL BUG FIXED — the modal staying open: 5.66 closed the modal the
-//   instant the intercepted JSON arrived, which can be BEFORE the close
-//   button has even rendered into the DOM yet. findCdssCloseButton()
-//   returning null was silently treated as "nothing to close" (the code
-//   was `if (closeBtn) closeBtn.click()`, no retry) — leaving the modal
-//   open with nothing left to close it. Fixed: now waits (briefly, up to
-//   3s) for the close button to actually exist before giving up, with an
-//   Escape-key/generic-.close fallback if it somehow still can't be found,
-//   so a real patient chart is never left with a stuck invisible modal.
-//   SIMPLIFIED BACK DOWN — per direct feedback that "cdss after history
-//   was a good choice" and the extra "rules" (multiple trigger points in
-//   checkAndUpdate + openPanel + a runAnalysis last-resort, in-flight
-//   promise-sharing, an isLoading() gate debate, an auto-refresh-after-
-//   late-arrival hook) were bloat without real benefit. Removed all of
-//   that in favor of ONE rule: maybeStartCdssAfterHistory(), called only
-//   from checkAndUpdate — once patient-history finishes loading, start
-//   CDSS immediately, once per patient, full stop. The JSON-intercept
-//   speed fix from 5.66 (reading getPatientAlertData.jsp's response
-//   directly instead of waiting for the table to render) is kept — that
-//   part was correct and is what actually makes the check fast — it's
-//   just no longer wrapped in extra scheduling logic on top.
-// 5.67 (2026-08-25) - Two more fixes from live feedback on 5.66:
-//   1) Sequential-wait bug: primeCdssCancerScreeningCache() refused to
-//      start while historyApi.isLoading() was true — meaning CDSS's own
-//      request (now a single lightweight JSON call) waited for the ENTIRE
-//      patient-history fetch (which pools multiple encounter requests and
-//      can genuinely take a while) to finish first, stacking two
-//      unrelated waits back-to-back. That gate was never actually
-//      necessary: getCurrentKey() (what CDSS keys its cache on) is set
-//      the moment history loading STARTS, not when it finishes — see
-//      loadPatientHistoryOnce — and CDSS never reads any history data,
-//      only the patient key. Removed the isLoading() gate (both in
-//      primeCdssCancerScreeningCache's guard and inside start()) so CDSS
-//      priming now runs concurrently with history loading instead of
-//      after it — this was most of "the waiting time is way too much
-//      longer" whenever history parsing itself took any real time.
-//   2) Styling: the CDSS status line was plain unstyled text reusing
-//      .ecs-diff-empty with ad hoc inline colors, sitting right under the
-//      Analyze button with no real spacing — looked cramped/out of place.
-//      Replaced with a proper .ecs-cdss-badge component (tinted
-//      background per status, padding, icon+text layout, consistent
-//      margin) matching the rest of the panel's visual language.
-// 5.66 (2026-08-25) - THE actual fix for the lag (5.65 identified the root
-//   cause but didn't have the info to fix it yet). A live network capture
-//   showed the CDSS modal's own Angular controller gets its data from a
-//   plain JSON endpoint (getPatientAlertData.jsp), not from server-side
-//   HTML the table is rendered from — so the real cost was never "open a
-//   modal", it was "wait for Angular to finish painting a table we never
-//   actually needed to look at" (its JSON arrives well before the table
-//   finishes rendering). Can't call that endpoint cold — its URL carries
-//   a per-request signed "pd" token we have no way to construct — so the
-//   click stays, but scrapeCdssCancerScreeningInvisibly() no longer waits
-//   for the DOM table at all: a lightweight always-on fetch/XHR patch
-//   (installAlertDataInterceptors) grabs the JSON the instant the browser
-//   receives it, and the modal is closed immediately once we have it —
-//   both the wait AND the hidden-modal window shrink to roughly the
-//   network round trip alone. Old DOM-table scrape kept as an automatic
-//   fallback (parseCdssCancerRows) in case this response ever comes back
-//   over a transport the patch isn't watching. Also means richer/more
-//   reliable data than icon-class DOM sniffing (measureId, a proper
-//   alertStatus code, ISO dates) at no extra cost.
-// 5.65 (2026-08-25) - Root-cause note + one real time-saver, in response
-//   to "checking still takes too much time, what's the benefit of
-//   automation if we still wait": the actual cost has never been the
-//   scheduling around the CDSS read — it's that the read itself opens
-//   eCW's real Angular CDSS modal (network round-trip + full Angular
-//   digest/render of the PopHealth grid) and closes it again. Hiding it
-//   better (5.62-5.64) or starting it earlier doesn't remove that cost,
-//   it only relocates it. The actual fix is to stop opening the modal at
-//   all and fetch its underlying data directly instead — exactly the
-//   pattern get_patient_icd_cpt_history()/fetchEncounter() already use
-//   for patient history elsewhere in this file (a plain fetch() straight
-//   to a read-only JSP endpoint, parsed with DOMParser, no UI touched at
-//   all). That requires knowing the actual endpoint CDSS's own modal
-//   calls, which needs one live network capture to identify — not done
-//   in this pass. Until then, added maybeAutoRefreshAnalysisAfterCdss():
-//   if Analyze was clicked before the background CDSS prefetch finished
-//   (analysisState.cdssStatus !== 'done'), the panel now silently
-//   recomputes and refreshes itself the moment CDSS data actually lands,
-//   instead of leaving a stale result sitting there until the coder
-//   thinks to click Analyze again — a real reduction in clicks/attention
-//   spent waiting, even though the underlying read's own latency is
-//   unchanged pending the direct-fetch rewrite above.
-// 5.64 (2026-08-25) - Two more things found from live use of 5.63:
-//   1) REAL BUG: "colorectal took too long to appear in Analyze". Cause:
-//      when runAnalysis()'s last-resort call landed while the background
-//      prefetch (from checkAndUpdate/openPanel) was ALREADY running for
-//      the same patient, it saw cdssScrapeInFlight===true and just
-//      returned — a plain no-op — instead of waiting for that already-
-//      running scrape to finish. So Analyze proceeded without CDSS data
-//      even when the read was seconds from completing, and only a later,
-//      separate Analyze click would pick it up. Fixed: the in-flight
-//      scrape's own promise is now tracked (cdssScrapeInFlightPromise)
-//      and handed back to ANY caller that asks while it's running, so
-//      runAnalysis genuinely awaits the same scrape instead of treating
-//      "already running" as "nothing to do". Also tightened the
-//      background trigger's own start-up delay (was a fixed 2s PLUS up
-//      to a 2s idle-callback timeout — up to 4s of pure waiting before
-//      the read even began) down to 400ms + up to 800ms idle timeout, so
-//      it has more of the "chart -> Billing -> Analyze" window to finish
-//      in before being needed.
-//   2) SAFETY GAP: even with (1) fixed, CDSS can legitimately still be
-//      mid-read (or, if Billing was reached before it ever got a chance
-//      to run, never read at all) at the moment Analyze is clicked — and
-//      an empty cancer-screening result looks IDENTICAL whether that's
-//      because nothing is due or because CDSS just wasn't checked yet.
-//      That's a real risk of a coder reading "nothing proposed" as
-//      "no screening needed" and moving on. Added
-//      getCdssCancerScreeningStatus() ('done'/'checking'/'unreachable'/
-//      'pending') and a visible banner in the Coding Snapshot panel
-//      (cdssStatusBannerHtml) — shown with every Analyze result AND as a
-//      quiet hint before Analyze is even clicked — that says outright
-//      whether CDSS cancer-screening was actually included, so silence
-//      is never mistaken for "checked and clear".
-// 5.63 (2026-08-25) - 5.62 made the CDSS cancer-screening read fully
-//   on-demand, triggered from runAnalysis() ("Analyze Codes"). Reported
-//   back as broken: Analyze is only ever clicked from the Billing tab,
-//   and CDSS's modal isn't reachable once Billing's grids are up, so
-//   on-demand-at-Analyze-time meant CDSS never actually ran — the whole
-//   trigger point was unreachable by construction. Reverted to a
-//   background prefetch (CDSS can only be read from the chart/SOAP view,
-//   which is necessarily before Billing), but with two independent start
-//   points instead of one so a quick "open panel -> straight to Billing"
-//   can't outrun it: the same idle-deferred once-per-patient check as
-//   5.61 (now primeCdssCancerScreeningCache(), called from
-//   checkAndUpdate), PLUS an immediate (non-idle) fire-and-forget call
-//   the moment openPanel() runs, since opening Coding Snapshot is an
-//   explicit signal the user is about to code this patient. Both are
-//   no-ops if already cached/in-flight, so still only ever one real
-//   scrape per patient. runAnalysis still calls
-//   ensureCdssCancerScreeningForAnalysis() as a last-resort/no-op-if-
-//   unreachable safety net. The 5.62 hide/close-race fix (poll for actual
-//   removal instead of a fixed 150ms wait) is unaffected and stays as-is.
-// 5.62 (2026-08-25) - Two real fixes for the persistent CDSS lag/visible-
-//   flash reports (5.61's fix wasn't enough):
-//   1) LAG / "takes so much time" / "laggy while working": the CDSS
-//      cancer-screening scrape was still running automatically in the
-//      background for EVERY patient the instant the chart loaded
-//      (checkAndUpdate -> maybeScrapeCdssCancerScreening, every 2.5s
-//      poll), whether or not the user ever opened Coding Snapshot or
-//      clicked Analyze. Deferring it with requestIdleCallback (5.61)
-//      only changed *when* that heavy real eCW modal-open (network
-//      round-trip + Angular rendering the full PopHealth grid) ran —
-//      it still ran, unconditionally, for every patient. Removed the
-//      background trigger entirely. It's now fully on-demand: renamed
-//      to ensureCdssCancerScreeningForAnalysis() and called only from
-//      runAnalysis() when the user actually clicks "Analyze Codes" —
-//      the only place the cache is ever read — so patients that are
-//      never analyzed never pay this cost, and the chart is never
-//      competing with it while someone is just charting/typing.
-//   2) "CDSS tab becomes visible for some time": the hide/restore in
-//      scrapeCdssCancerScreeningInvisibly() un-hid the scraped nodes
-//      after a FIXED 150ms wait following the Close click, assuming
-//      Bootstrap's close transition + Angular's teardown always
-//      finished inside that window. Under real load they don't always,
-//      so un-hiding could land mid-animation and flash the modal/
-//      backdrop on screen for whatever was left of it. Now polls (50ms,
-//      up to 2s) until each hidden node has either left the DOM or
-//      picked up eCW's own display:none/ng-hide, and only un-hides nodes
-//      still connected to the DOM — instead of assuming a fixed
-//      duration.
-// 5.61 (2026-08-25) - Re-enabled the automatic CDSS invisible-scrape
-//   trigger (disabled in 5.60) with an actual fix instead of leaving it
-//   off: the old hiding mechanism only hid elements matching guessed
-//   class names (.modal/.modal-backdrop) — if eCW's CDSS dialog (or
-//   something it opens alongside it, e.g. a loading spinner) uses
-//   different markup, that guess misses it and it flashes on screen,
-//   which is what "popup is showing" was. scrapeCdssCancerScreeningInvisibly()
-//   now hides ANY new top-level node under <body> the instant it
-//   appears — via a MutationObserver plus inline styles, so it doesn't
-//   depend on knowing eCW's exact class names — and restores whatever's
-//   still around afterward instead of assuming closeModal() removed it.
-//   Separately, maybeScrapeCdssCancerScreening() now waits 2s then hops
-//   to requestIdleCallback before actually opening the modal, so this
-//   heavy one-time-per-patient render never competes with the chart's
-//   own initial paint — that overlap was the "everything so laggy" part.
-//   Still runs at most once per patient, never while Billing is open.
+// 5.77 (2026-08-29) - G9664 registered in Auto Link/Claim Link: prefers
+//   hyperlipidemia (E78.x), falls back to office-visit linking otherwise.
+//   Also fixes HPI_SECTION_RE to stop at "Current Medication:" and to
+//   recognize "History of Present Illness" as an HPI header alias.
+// 5.76 (2026-08-25) - Fixed HPI blood-work detection missing draws only
+//   mentioned in the HPI: now scans every "HPI:" block (keeping the
+//   longest) instead of just the first match, with a whole-note-text
+//   fallback when section extraction comes up empty.
+// 5.75 (2026-08-25) - Fixed the CDSS scrape's MutationObserver hiding this
+//   extension's own panel re-renders (not just eCW's CDSS dialog),
+//   which is what caused the panel to flash white during a scrape.
+// 5.74 (2026-08-25) - Blood draw/blood work (36415/99000) can now be
+//   detected in the HPI, not just the CC — but only when tied to today's
+//   visit (same-sentence "today"/"this visit" wording, no conflicting
+//   past/future markers like a date or "ago").
+// 5.73 (2026-08-25) - New cross-client rules: 99401/99406 never billed
+//   with 99214; a TCM code disables Preventive/Smoking/Obesity
+//   Counseling; 99214+TCM allowed together only for Getwell/Bronx.
+// 5.72 (2026-08-25) - Fixed 5.71's own regression: hiding the whole
+//   <html> element during CDSS scraping blanked the entire chart, not
+//   just the dialog. Now only the specific inserted CDSS node is hidden.
+// 5.71 (2026-08-25) - Fixed the CDSS modal still flashing on screen:
+//   switched from guessing at selectors to hiding the whole page
+//   (visibility:hidden on <html>) during the scrape.
+// 5.70 (2026-08-25) - Fixed periodic lag: isPatientChart()'s expensive
+//   .innerText call is now skipped on the Billing tab and throttled
+//   elsewhere; panel re-render is skipped when its markup is unchanged.
+// 5.69 (2026-08-25) - Shortened the CDSS status badge to one line (was
+//   wrapping to 2-3 lines and eating panel space); full text moved to
+//   a hover tooltip.
+// 5.68 (2026-08-25) - Fixed the CDSS modal sometimes staying open (now
+//   waits for the close button to exist before giving up) and
+//   simplified the trigger logic back down to one call site.
+// 5.67 (2026-08-25) - Fixed CDSS priming waiting on the entire
+//   patient-history fetch instead of just its start; now runs
+//   concurrently. Restyled the CDSS status line into a proper badge.
+// 5.66 (2026-08-25) - Real fix for CDSS lag: an interceptor now reads the
+//   same JSON the modal's own Angular controller uses instead of waiting
+//   for its table to render, closing the modal as soon as data arrives.
+// 5.65 (2026-08-25) - Noted the real CDSS bottleneck is opening eCW's
+//   actual modal, not scheduling around it. Added silent auto-refresh of
+//   the Analyze result once background CDSS data lands after the fact.
+// 5.64 (2026-08-25) - Fixed Analyze proceeding without CDSS data when a
+//   prefetch was already in-flight (now awaits it). Added a visible
+//   banner showing whether CDSS was actually checked.
+// 5.63 (2026-08-25) - Reverted the on-demand CDSS trigger (unreachable
+//   from Billing) back to a background prefetch, started from two points
+//   (idle-deferred on chart load, plus immediately on panel open).
+// 5.62 (2026-08-25) - Removed the background CDSS scrape trigger (now
+//   fully on-demand from Analyze) to stop per-patient lag; modal
+//   hide/restore now polls for actual DOM removal instead of a fixed wait.
+// 5.61 (2026-08-25) - Re-enabled the CDSS invisible scrape with a real
+//   fix: hides any new top-level body node via MutationObserver instead
+//   of guessing class names, and defers via idle callback.
 // 5.60 (2026-08-25) - HOTFIX: disabled the automatic CDSS invisible-scrape
-//   trigger added in 5.59 (maybeScrapeCdssCancerScreening() call in
-//   checkAndUpdate) — it was making the chart noticeably laggy and a
-//   popup was showing through, meaning the CSS-hide wasn't fully
-//   containing whatever eCW opens alongside the CDSS modal. The scraping
-//   code itself is left in place (unused for now) rather than ripped
-//   out, so it can be root-caused and re-enabled properly instead of
-//   rebuilt from scratch. computeAnalysis's CDSS check is now always a
-//   no-op (cache never populates) — cancer screening from the chart's
-//   own HEALTH PROMOTION section is unaffected and still works exactly
-//   as before 5.59.
-// 5.59 (2026-08-25) - NEW RULE: cancer screening (colorectal/breast/
-//   cervical) now also checks eCW's own CDSS "PopHealth" HEDIS measures,
-//   not just the chart's HEALTH PROMOTION AND DISEASE PREVENTION section.
-//   Added an invisible background reader (maybeScrapeCdssCancerScreening /
-//   scrapeCdssCancerScreeningInvisibly) that opens the actual CDSS modal
-//   (topPanelLink15) but keeps it fully hidden the whole time — a CSS
-//   rule hiding any Bootstrap modal/backdrop is added to <html> BEFORE
-//   the click, so it's never visible on screen — scrapes the 3 cancer-
-//   screening rows (td[data-column-key="alert"/"lastDone"/"status"]),
-//   then clicks the modal's own Close button and removes the hiding
-//   flag. Runs at most once per patient, only while on the SOAP note
-//   (never once the Billing tab is up — CDSS isn't reachable from there
-//   per testing) and only after patient-history loading has finished,
-//   caching the result for computeAnalysis to use later once Analyze is
-//   clicked. A CDSS row only counts when it's genuinely green
-//   ("Compliant" — red/Noncompliant is never accepted no matter the
-//   date) AND its Last Done date is not in the future relative to the
-//   current DOS AND falls inside the same windows as before (colorectal
-//   7y, cervical 3y, breast same calendar year). Additive only: a code
-//   already proposed from the chart-text check is never re-added from
-//   CDSS (dedup via `!desired.has(code)`), and 3014F/3015F/3017F remain
-//   excluded from MANAGED_CODES exactly as before — nothing here or
-//   anywhere else in this file ever deletes a cancer-screening code
-//   that's already on the chart.
-// 5.58 (2026-08-25) - BUG FIX: isGetwellCommercialInsurance() missed "The
-//   Empire Plan" (and any Empire-branded name prefixed with "The ") because
-//   the "^empire" check requires the name to start with "empire" — "The
-//   Empire Plan" starts with "the", so it fell through and was never
-//   treated as commercial. Now strips a leading "the " before the checks
-//   run, so "The Empire Plan" matches the same as "Empire Plan"/"Empire
-//   BCBS". Verified: "The Empire Plan", "Empire Plan", "The Empire Plan -
-//   PPO" all now return true.
-// 5.57 (2026-08-25) - FIX: 99214 reuse gap was effectively 15 days (blocked
-//   a prior 99214 used exactly 15 days ago), while the Getwell rule is a
-//   14-day gap — once 14 days have passed since the last 99214, it can be
-//   billed again. was99214UsedWithinDays() is now called with 13 (blocks
-//   diffDays 0-13, allows 14+) instead of 15. Confirmed the Empire Plan /
-//   Empire BCBS commercial-insurance office-visit gating already applies
-//   here via isGetwellCommercialInsurance()'s "^empire" and
-//   "empire"+"bcbs" checks — no change needed there.
-// 5.56 (2026-08-20) - BUG FIX: isGetwellCommercialInsurance() missed
-//   "Other Blue Plans Empire BCBS - N" (and similar "Other Blue Plans
-//   ... Empire BCBS" variants) — it doesn't start with "Empire" or
-//   "Blue Cross", so neither existing check caught it, and the
-//   commercial-insurance + Preventive visit -> no office visit rule
-//   silently skipped it. Added a check that treats any insurance name
-//   containing both "empire" and "bcbs" as commercial (it's an
-//   Empire-branded BCBS plan), without touching the two existing
-//   anchored checks or any other payer classification.
+//   trigger (was causing lag and a visible popup); scraping code left in
+//   place unused pending a proper fix.
+// 5.59 (2026-08-25) - New rule: cancer screening also checks eCW's own
+//   CDSS PopHealth measures via an invisible background scrape, on top
+//   of the chart's HEALTH PROMOTION section. Additive only.
+// 5.58 (2026-08-25) - Fixed isGetwellCommercialInsurance() missing "The
+//   Empire Plan" (leading "The " broke the "^empire" check); now strips
+//   a leading "the " before checking.
+// 5.57 (2026-08-25) - Fixed 99214 reuse gap being effectively 15 days
+//   instead of Getwell's actual 14-day gap.
+// 5.56 (2026-08-20) - Fixed isGetwellCommercialInsurance() missing
+//   "Other Blue Plans Empire BCBS" variants; now matches any name
+//   containing both "empire" and "bcbs".
 //
-// 5.55 (2026-08-18) - PERF FIX to 5.54's ICD delete retry: it was
-//   adding a settle wait after EVERY ICD delete, even ones that
-//   worked cleanly on the first try, slowing down normal deletes
-//   that never had a problem. Now the wait only happens AFTER a
-//   bounce-back is actually detected, before the next retry — a
-//   clean delete returns immediately, same speed as before 5.54.
+// 5.55 (2026-08-18) - Perf fix: the ICD delete settle-wait added in 5.54
+//   now only happens after a bounce-back is actually detected.
 //
-// 5.54 (2026-08-18) - BUG FIX: ICD deletes (e.g. Z13.89) could silently
-//   no-op and get reported as "reappeared"/failed even though the code
-//   was still genuinely on the chart. Root cause: computeAnalysis()
-//   captures each ICD row's DOM reference once, up front; if an earlier
-//   delete/add in the same Start Action run causes eCW to re-render the
-//   ICD grid, that captured reference goes stale (detached from the
-//   page), and the old delete function treated "detached" as "already
-//   deleted" without ever clicking anything. New deleteICDRowWithRetry()
-//   re-reads the row fresh by code immediately before every attempt
-//   (up to 4, with an increasing settle wait after each real delete
-//   click) instead of relying on that stale reference, fixing the
-//   underlying no-op and also retrying genuine bounce-backs. Wired into
-//   both the main delete pass and the recheck pass (recheck pass no
-//   longer skips a code that failed on the first pass).
+// 5.54 (2026-08-18) - Fixed ICD deletes silently no-op'ing after the grid
+//   re-renders mid-run: rows are now re-read fresh by code before each
+//   delete attempt instead of relying on a possibly-stale reference.
 //
-// 5.53 (2026-08-18) - BUG FIX: computeAnalysis's local
-//   PREVENTIVE_VISIT_CODES set was missing G0402 (Medicare's
-//   "Welcome to Medicare"/Initial Preventive Physical Exam code) —
-//   it only had G0438/G0439. A chart billed with G0402 was wrongly
-//   treated as having NO preventive visit at all, so Analyze deleted
-//   the preventive bundle ICDs (Z00.01/Z00.121, Z71.3/Z71.82/89) and
-//   other preventive-gated codes even though G0402 was right there on
-//   the chart. G0402 added to the set.
+// 5.53 (2026-08-18) - Fixed PREVENTIVE_VISIT_CODES missing G0402
+//   (Medicare's Initial Preventive Physical Exam code), which caused
+//   preventive-gated codes to be wrongly deleted on G0402 charts.
 //
-// 5.52 (2026-08-18) - isStraightMedicareIns() broadened: any insurance
-//   name whose FIRST word is "Medicare" (e.g. "Medicare Healthfirst",
-//   "Medicare Advantage") is now treated as straight Medicare, not just
-//   an exact "Medicare"/"Medicare Part A/B" match. A payer name that
-//   mentions "Medicare" WITHOUT starting with it (e.g. "Healthfirst
-//   Medicare") is still commercial Medicare and gets the G0438/G0439
-//   auto-add rule from 5.51, unchanged.
+// 5.52 (2026-08-18) - isStraightMedicareIns() broadened to match any
+//   insurance starting with "Medicare" (e.g. "Medicare Advantage"), not
+//   just an exact match.
 //
-// 5.51 (2026-08-18) - Preventive quick action: commercial Medicare (a
-//   payer whose name mentions "Medicare" but isn't straight/plain
-//   Medicare — e.g. a Medicare Advantage plan branded under a
-//   commercial carrier) now gets G0438 (new patient) / G0439
-//   (established) added automatically, same as VNS Choice — no more
-//   manual-add reminder for these. Straight/plain Medicare (insurance
-//   name IS "Medicare"/"Medicare Part A/B", nothing else) is unchanged:
-//   still just a reminder to add G0402/G0438/G0439 manually, since which
-//   one applies depends on visit history this script can't confirm.
+// 5.51 (2026-08-18) - Preventive quick action: commercial Medicare (name
+//   mentions "Medicare" but isn't plain Medicare) now gets G0438/G0439
+//   added automatically instead of just a manual-add reminder.
 //
-// 5.50 (2026-08-16) - BUG FIX: OB (Obesity Counseling) button stayed
-//   enabled with no BMI documented at all, only failing after being
-//   clicked ("BMI not found on this page — skipped"). Now fades up
-//   front like every other missing-prerequisite case.
+// 5.50 (2026-08-16) - Fixed OB button staying enabled with no BMI
+//   documented; now fades up front like other missing-prerequisite cases.
 //
-// 5.49 (2026-08-16) - Z13.89 standardized to Z13.9 (same alcohol
-//   screening ICD): replaced with Z13.9 when alcohol screening applies,
-//   deleted outright with no replacement when it doesn't.
+// 5.49 (2026-08-16) - Z13.89 standardized to Z13.9 for alcohol screening.
 //
-// 5.48 (2026-08-15) - NEW RULE (all clients): Preventive/Preventive
-//   Counseling/Smoking Counseling/Obesity Counseling now all require at
-//   least one vital sign (BP, weight, height, pulse, temp, resp rate, O2
-//   sat) documented this encounter, via a new isVitalsDocumented() helper
-//   (ported from Bronx/Hasan Sheikh — Getwell had no equivalent). With no
-//   vitals at all, all four quick-action buttons fade and each one's hover
-//   tooltip reads "No vitals documented — <bundle> can't be applied" —
-//   checked last in computeQuickActionGating() so it always overrides
-//   every other individual rule. Nothing else changed.
+// 5.48 (2026-08-15) - New rule (all clients): Preventive/Preventive
+//   Counseling/Smoking/Obesity Counseling now all require at least one
+//   vital sign documented this encounter, via isVitalsDocumented().
 //
-// 5.47 (2026-08-15) - BUG FIX: mapBMIToZ68() had a `bmi < 19.5 return null`
-//   guard that silently skipped the entire Z68.xx add/fix/delete block for
-//   any adult patient with BMI in the 18.5-19.4 range (e.g. BMI 18.56) —
-//   Analyze showed "Nothing to add"/"Nothing to remove" for the BMI ICD no
-//   matter what was actually on the chart, even though the very next line
-//   already correctly maps anything under 20 to Z68.1 ("BMI 19 or less,
-//   adult"). Removed the guard so Z68.1 is reachable for every BMI < 20,
-//   restoring "BMI applies on every encounter" for this client (3008F/
-//   G8417/G8418/G8420 CPT logic was never gated by this and was unaffected).
+// 5.47 (2026-08-15) - Fixed mapBMIToZ68() silently skipping the Z68.xx
+//   block for BMI 18.5-19.4; removed the stale `bmi < 19.5` guard so
+//   Z68.1 is reachable for every BMI under 20.
 //
-// 5.46 (2026-08-13) - RULE CHANGE (reverts part of 5.45): Z13.31/Z13.9 and
-//   their screening CPT are now enforced as a true bundle — the ICD is
-//   only ever proposed/kept when its matching screening CPT is actually
-//   billable for this payer, with NO payer-specific carve-out. 5.45 had
-//   added a UHC exception that kept the ICD even when no CPT applied
-//   (since UHC blocks G-coded results); per explicit instruction, that
-//   split the bundle and is wrong — if the G-code isn't used for UHC,
-//   its paired Z-code isn't suggested either, exactly like the G-code
-//   itself. The CPT-support check (hasDepressionScreeningCpt/
-//   hasAlcoholScreeningCpt) is now computed once and shared by BOTH the
-//   add rule and the delete/cleanup rule, so they can never disagree —
-//   this also closes the add/delete loop from 5.42/5.45 for good, since
-//   the same condition now gates both directions.
+// 5.46 (2026-08-13) - Reverted 5.45's UHC carve-out: Z13.31/Z13.9 and
+//   their screening CPT are now a true bundle with no payer exception —
+//   the add and delete rules share one CPT-support check so they agree.
 //
-// 5.45 (2026-08-13) - BUG FIX: the depression/alcohol screening ICD
-//   cleanup (Z13.31/Z13.9) added in 5.42 fought with United Health Care's
-//   "no G-prefixed CPT" rule and produced an add/delete loop — reported
-//   live on Getwell: a patient with a documented alcohol screening only
-//   ever got Z13.9 added (no CPT), and every subsequent Analyze flagged
-//   Z13.9 for deletion, then re-added it after deleting, forever. Root
-//   cause: a NEGATIVE alcohol screen wants G9622 (and a negative
-//   depression screen wants G8510/G8431/G0444) — all G-prefixed, all
-//   wiped by the UHC rule, leaving no CPT the cleanup would accept as
-//   proof the screening was billed. Fixed by treating a documented
-//   screening (hasDep/hasAlc !== null) as sufficient on its own for UHC,
-//   since the matching CPT is deliberately never billable for this payer
-//   regardless of the result. Same bug existed in Bronx and Hasan
-//   Sheikh — same fix applied to both.
+// 5.45 (2026-08-13) - Fixed an add/delete loop on Z13.31/Z13.9: their
+//   matching screening CPTs are all G-prefixed and get wiped by UHC's
+//   "no G-code" rule, so a documented screening alone is now enough
+//   proof for UHC. Same fix ported to Bronx and Hasan Sheikh.
 //
-// 5.44 (2026-08-13) - BUG FIX: United Health Care's blanket "no G-prefixed
-//   CPT code" rule was deleting G0101/G0102/G0103 too, even though UHC
-//   does use these. Added UHC_GCODE_EXCEPTIONS = {G0101,G0102,G0103},
-//   checked in BOTH places the UHC G-code sweep runs (the `desired` map
-//   filter before toAdd is built, and the currentRows sweep that removes
-//   any leftover G-code already on the chart) — these 3 codes are now
-//   never proposed for deletion for UHC, everything else G-prefixed
-//   still is.
+// 5.44 (2026-08-13) - Fixed UHC's "no G-prefixed CPT" rule also deleting
+//   G0101/G0102/G0103, which UHC does use; added as exceptions.
 //
-// 5.43 (2026-08-13) - NEW RULE: NYCE PPO billing restrictions.
-//   1) No counseling services for NYCE PPO — Preventive Counseling was
-//      already blocked; Smoking Counseling (SM) and Obesity Counseling
-//      (OB) quick-action buttons are now also disabled for this payer.
-//   2) The existing "commercial insurance + Preventive visit → no office
-//      visit code" rule now also applies to NYCE PPO (which isn't
-//      classed as "commercial" but gets the same treatment). Added
-//      isNycePPOIns() helper, reused by both rules.
+// 5.43 (2026-08-13) - New rule: NYCE PPO gets no counseling services
+//   (SM/OB buttons disabled) and the commercial "Preventive visit -> no
+//   office visit code" rule now applies to it too.
 //
-// 5.42 (2026-08-13) - NEW RULE: depression/alcohol screening ICD cleanup.
-//   If Z13.31 (depression screening) or Z13.9/Z13.89 (alcohol screening)
-//   is sitting on the chart but there's no matching screening CPT on the
-//   claim (G8510/G8431/G0444/3725F for depression; G9622/3016F/G0442/
-//   H0049/99408 for alcohol) — either already present or about to be
-//   added this run — the ICD is now flagged for deletion. Previously
-//   these Z-codes were only ever ADDED when a screening was documented;
-//   nothing removed one that was left over from a prior visit or added
-//   by hand with no screening actually billed this encounter.
+// 5.42 (2026-08-13) - New rule: Z13.31/Z13.9 now get deleted if sitting
+//   on the chart with no matching screening CPT present or being added.
 //
 // 5.41 - rawCPTCodeSet function defined
 
-// 5.40 (2026-08-12) - NEW RULE: commercial-insurance office-visit gating.
-//   Getwell rule — Aetna, Cigna, BCBS/Blue Cross Blue Shield, Empire
-//   (starting word), United Healthcare, UMR, Oxford (starting word) are
-//   commercial payers. When the current chart's insurance is commercial
-//   AND a Preventive visit code (99381-99397/G0438/G0439) is present,
-//   the office-visit E&M code is not billable alongside it — any
-//   office-visit code already on the chart is proposed for removal and
-//   none is suggested. If the same commercial payer has no Preventive
-//   code on the chart, the office-visit code is suggested/corrected
-//   exactly as before. New isGetwellCommercialInsurance() reuses
-//   isUHCInsurance() for United Healthcare/UMR/Oxford (already
-//   start-anchored there) and adds Aetna/Cigna/BCBS/Blue Cross Blue
-//   Shield/Empire on top; gating uses the existing hasPreventiveVisit
-//   flag so it stays in sync with the same gating rules (already-billed,
-//   televisit, etc.) that determine whether a Preventive code truly
-//   counts this encounter.
+// 5.40 (2026-08-12) - New rule: commercial-insurance office-visit gating.
+//   For Aetna/Cigna/BCBS/Empire/UHC/UMR/Oxford, a Preventive visit code
+//   on the chart blocks billing an office-visit E&M code alongside it.
 //
-// 5.39 (2026-08-12) - BUG FIX: runPreventiveAction() now blocks with a
-//   "history still loading" notice if window.__ecwPatientHistory
-//   .isLoading() is true, instead of proceeding. isEstablishedPatient()
-//   can't distinguish "genuinely no prior encounters" from "history
-//   fetch hasn't finished yet" — both look like an empty getData(), and
-//   it silently defaulted to "New Patient" either way. Since this
-//   established/new call picks the actual CPT billed (99381-99387 vs
-//   99391-99397, or G0438 vs G0439 Medicare AWV), clicking Preventive
-//   right after opening/switching a chart — before the async,
-//   multi-request history fetch resolves — could bill a new-patient
-//   code (or a duplicate G0438) for a genuinely established patient.
-//   isLoading() already existed and was already used elsewhere (the
-//   "Loading visit history…" banner) but was never checked here.
+// 5.39 (2026-08-12) - Fixed runPreventiveAction() proceeding while patient
+//   history was still loading, which could misclassify an established
+//   patient as new (and bill the wrong preventive code) before the async
+//   history fetch resolved.
 //
-// 5.38 (2026-08-12) - NEW RULE: insurance-change carve-out for the
-//   preventive/counseling timeline gates. codeUsedInYear (annual
-//   G0444/G0442 depression/alcohol screening, "billed this calendar
-//   year" checks) and codeUsedInLastDays (30-day Preventive Counseling/
-//   Smoking/Obesity gates, 180-day social-needs gate) now skip any
-//   historical encounter that was billed under a DIFFERENT payer than
-//   the current encounter's insurance. Example: patient's insurance was
-//   MetroPlus and MetroPlus billed G0442 (alcohol screening) 10 days
-//   ago; patient is now on Healthfirst — Healthfirst can still bill
-//   G0442 today, since Healthfirst itself never used it, regardless of
-//   MetroPlus's history this year/month. Added getPayerBrand() (derives
-//   a payer "brand" key by stripping plan-variant words like PPO/HMO/
-//   Plan/Leaf/Premier/etc., so "Healthfirst" and "Healthfirst PPO"
-//   still count as the SAME payer — only a genuinely different payer
-//   like MetroPlus vs Healthfirst resets the timeline) and
-//   isDifferentPayerThanCurrent() (conservative: if either the current
-//   or historical insurance can't be parsed, treats them as the SAME
-//   payer so missing data never opens a duplicate-billing gap). This
-//   does NOT affect new-vs-established patient status — that stays
-//   based on the patient's full visit history regardless of insurance
-//   changes; an established patient on a new insurance is still
-//   established.
+// 5.38 (2026-08-12) - New rule: the preventive/counseling timeline gates
+//   (annual/30-day/180-day) now skip history billed under a different
+//   payer brand than the current insurance, via getPayerBrand().
 //
-// 5.37 (2026-08-12) - Fixed a regression from 5.36: that version's
-//   "former smoker" fix left a stale, unfixed copy of the
-//   affirmativeSmokerWordPresent check running FIRST against the raw
-//   socText (before explicitNegative/textForAffirmativeCheck existed),
-//   so a chart like "Tobacco use: Former smoker ... Additional
-//   Findings: Tobacco user Pipe smoker" still returned a confirmed
-//   CURRENT smoker (red) despite the explicit "Former smoker" answer.
-//   It also duplicate-declared `const affirmativeSmokerWordPresent` /
-//   `const explicitNegative` in the same scope, which is an outright
-//   SyntaxError ("Identifier has already been declared") and would
-//   have broken the whole script on load. Also restored the
-//   smokeless/chewing-tobacco/cigar-only fallback block (checks prior
-//   F17.210 in history) that 5.36 accidentally deleted. isConfirmedNonSmoker
-//   now has exactly one affirmativeSmokerWordPresent check, run against
-//   textForAffirmativeCheck (product-type "<word> smoker" phrases
-//   stripped out when an explicit former/non-smoker answer already
-//   exists), so "Pipe smoker"/"Cigar smoker"/etc. following a "Former
-//   smoker" answer no longer overrides it.
+// 5.37 (2026-08-12) - Fixed a regression from 5.36: a stale duplicate
+//   smoker-word check (plus a duplicate-declaration SyntaxError) still
+//   overrode an explicit "Former smoker" answer; also restored a
+//   smokeless-tobacco fallback block 5.36 had accidentally deleted.
 //
-// 5.35 (2026-08-11) - CRITICAL BUG FIX: "ANALYZE FAILED — Cannot access
-//   'toDelete' before initialization" for any Medicaid/Medicare-type payer
-//   (e.g. Metroplus). Root cause was PRE-EXISTING, from before any of this
-//   conversation's changes: the Medicaid/Medicare G0444/G0442 deletion
-//   block referenced `toDelete.push`/`toDelete.some`, but `const toDelete`
-//   wasn't declared until much further down in computeAnalysis — a
-//   temporal-dead-zone ReferenceError that fired on every single Analyze
-//   run for that payer type, 100% reproducible, not intermittent. The two
-//   blocks added in 5.34 (age cleanup, annual-billed-this-year cleanup)
-//   were written adjacent to that same pre-existing block and inherited
-//   the same bug, compounding it. Fixed by moving `const toDelete =
-//   [...gatedBundleCPTDeletes]` up to right after gatedBundleCPTDeletes is
-//   fully populated (before any of these three cleanup blocks run) and
-//   removing the now-duplicate later declaration. No behavior changes —
-//   this is purely a declaration-order fix. Verified no remaining
-//   toDelete usage precedes its declaration anywhere in the function.
+// 5.35 (2026-08-11) - Fixed a pre-existing "Cannot access 'toDelete'
+//   before initialization" crash on every Medicaid/Medicare Analyze run:
+//   moved the `toDelete` declaration above the code that referenced it.
 //
-// 5.34 (2026-08-11) - G0444/G0442 (annual depression/alcohol screening):
-//   added the missing "already billed this year -> delete" half of the
-//   rule (ported from Hasan Sheikh 1.70). The add side was already correct
-//   (only added when NOT already billed this calendar year AND age/other
-//   eligibility met; otherwise never added) — but if one was already
-//   sitting on THIS chart while a PRIOR encounter this same year had
-//   already billed it, nothing ever removed it (both codes are
-//   deliberately excluded from MANAGED_CODES). Now that case gets deleted
-//   outright too.
+// 5.34 (2026-08-11) - Added the missing "already billed this year" delete
+//   half of the G0444/G0442 rule (ported from Hasan Sheikh 1.70).
 //
-// 5.33 (2026-08-11) - Age gates for depression/alcohol/smoking screening
-//   codes and their positive/negative result codes (ported from Hasan
-//   Sheikh 1.71-1.73): depression screening (G0444 + result codes G8510/
-//   G8431) requires age 12+; alcohol screening (G0442 + result codes
-//   G9622/3016F) and smoking counseling (99406 + tobacco result codes
-//   G9275/G9276/1036F/1000F) require age 18+. None of these had ANY age
-//   gate before. The result codes (G8510/G8431/G9622/3016F/G9275/G9276/
-//   1036F/1000F) are all in MANAGED_CODES, so gating their `desired.set`
-//   calls on age also makes an already-present one auto-delete once the
-//   patient falls outside the age range — no extra cleanup code needed
-//   for those. G0444/G0442 are deliberately NOT in MANAGED_CODES (an
-//   already-billed one shouldn't be blanket-deleted just for being
-//   "undesired" this run), so added an explicit age-cleanup block next to
-//   the existing Medicaid/Medicare G0444/G0442 deletion block. Also added
-//   the same 18+ gate to the SM quick-action button (computeQuickActionGating)
-//   — since that gating already doubles as cleanup, this also covers
-//   auto-deleting an already-present 99406 for a too-young patient, and
-//   age-gated the Z13.31/Z13.9 screening-ICD suggestions to match.
+// 5.33 (2026-08-11) - Added age gates (12+/18+) to depression/alcohol/
+//   smoking screening codes and their result codes, none of which had
+//   any age gate before (ported from Hasan Sheikh 1.71-1.73).
 //
-// 5.32 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now doubles as
-//   cleanup, not just an add-guard. Whenever a quick-action button is
-//   faded — for ANY of its existing reasons (already billed this year/30
-//   days, wrong insurance, no chronic dx this encounter, not a confirmed
-//   smoker, BMI doesn't qualify, new patient, televisit, etc.) — that
-//   bundle's own CPT code is deleted if already on the chart: PV faded ->
-//   993xx/G0438/G0439 removed; PC faded -> 99401 removed; SM faded ->
-//   99406 removed; OB faded -> G0447 removed. A televisit disables all
-//   four buttons already (see computeQuickActionGating), so this also
-//   means no Preventive or Preventive Counseling code can survive a
-//   televisit. Existing hasPreventiveVisit/has99401ForZ71 logic now reads
-//   through this same gating, so the linked ICDs (Z00.01/Z00.121,
-//   Z71.3/Z71.82/Z71.89) cascade-delete automatically too. BMI Z68.xx is
-//   deliberately left untouched by this — Getwell keeps BMI independent
-//   of Preventive/Obesity by design (see 5.30 below), unlike Bronx.
-//   Same fix ported from Bronx 1.47.
+// 5.32 (2026-08-11) - Quick-action gating (PV/PC/SM/OB) now also deletes
+//   that bundle's CPT when the button is faded for any reason, cascading
+//   to its linked ICDs too. BMI stays independent, per Getwell design.
+//   Ported from Bronx 1.47.
 //
 // 5.31 (2026-08-10) - Fixed pediatric OB gating in both button and action
 //   guards. Under 18 uses documented BMI percentile >=95; missing percentile
