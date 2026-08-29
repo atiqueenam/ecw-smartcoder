@@ -2267,9 +2267,9 @@ function __smartCoderReadVersion(fallback) {
             if (age >= 18) {
                 desired.set('3008F', 'BMI documented (preventive visit)');
                 const bmiNum = parseFloat(bmi);
-                // Hasnayen rule 13: BMI < 18 -> G8418, 18-30 -> G8420,
-                // over 30 -> G8417 (Bronx's middle cutoff was 26).
-                const gCode = bmiNum < 18 ? 'G8418' : (bmiNum <= 30 ? 'G8420' : 'G8417');
+                // Hasnayen rule 13: BMI < 18 -> G8418, 18-25.99 -> G8420,
+                // >= 26 -> G8417.
+                const gCode = bmiNum < 18 ? 'G8418' : (bmiNum < 26 ? 'G8420' : 'G8417');
                 desired.set(gCode, `BMI ${bmi} (preventive visit)`);
             } else if (correctZ68Ped) {
                 desired.set('3008F', 'BMI documented (preventive visit)');
