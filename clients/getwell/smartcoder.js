@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.79
+// @name         Getwell SmartCoder by ATQ v5.80
 // @namespace    http://tampermonkey.net/
-// @version      5.79
+// @version      5.80
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.80 (2026-08-29) - Fixed HPI blood-work false positive: "Recent blood
+//   work reviewed" (a past draw being discussed, not one done today) was
+//   wrongly qualified because an unrelated "now" elsewhere in the HPI
+//   satisfied the whole-block today fallback. Added "recent"/"recently"
+//   to NOT_TODAY_RE alongside prior/previously/earlier.
 // 5.79 (2026-08-29) - RULE CHANGE (Getwell only): 99214's normal-path
 //   chronic-count requirement dropped from 2+ to 1+ — now 4+ qualifying
 //   dx with just 1 chronic dx qualifies (e.g. 1 chronic + 3 acute, or
@@ -2739,7 +2744,7 @@ function __smartCoderReadVersion(fallback) {
         // language describing a plan rather than something already done
         // at this visit. Any of these next to a blood-work mention rules
         // that mention out, regardless of "today" appearing elsewhere.
-        const NOT_TODAY_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\byesterday\b|\blast\s+(?:week|month|visit|time)\b|\b\d+\s*(?:day|week|month)s?\s+ago\b|\bago\b|\bprior\b|\bpreviously\b|\bearlier\b|\bnext\s+(?:week|month|visit|time)\b|\bupcoming\b|\bscheduled\b|\bwill\s+(?:be|need|get|have)\b|\bplan(?:ned|s)?\s+to\b|\bto\s+be\s+(?:done|drawn|obtained)\b|\bnot\s+yet\b|\bpending\b|\bat\s+(?:the\s+)?hospital\b|\bat\s+(?:the\s+)?(?:ER|emergency\s+room)\b/i;
+        const NOT_TODAY_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\byesterday\b|\blast\s+(?:week|month|visit|time)\b|\b\d+\s*(?:day|week|month)s?\s+ago\b|\bago\b|\bprior\b|\bpreviously\b|\bearlier\b|\brecent(?:ly)?\b|\bnext\s+(?:week|month|visit|time)\b|\bupcoming\b|\bscheduled\b|\bwill\s+(?:be|need|get|have)\b|\bplan(?:ned|s)?\s+to\b|\bto\s+be\s+(?:done|drawn|obtained)\b|\bnot\s+yet\b|\bpending\b|\bat\s+(?:the\s+)?hospital\b|\bat\s+(?:the\s+)?(?:ER|emergency\s+room)\b/i;
 
         function splitIntoSentences(str) {
             return str.split(/(?<=[.!?;])\s+|\n+/).map(s => s.trim()).filter(Boolean);
