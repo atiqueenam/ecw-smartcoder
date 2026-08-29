@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.80
+// @name         Getwell SmartCoder by ATQ v5.81
 // @namespace    http://tampermonkey.net/
-// @version      5.80
+// @version      5.81
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.81 (2026-08-29) - Fixed blood-work add/delete asymmetry: 36415 and
+//   99000 are always added together, but 99000 was excluded from
+//   MANAGED_CODES (add-only), so only 36415 ever got proposed for removal
+//   when blood work was no longer supported, leaving 99000 stranded on the
+//   chart. 99000 is now in MANAGED_CODES so both add and remove together.
 // 5.80 (2026-08-29) - Fixed HPI blood-work false positive: "Recent blood
 //   work reviewed" (a past draw being discussed, not one done today) was
 //   wrongly qualified because an unrelated "now" elsewhere in the HPI
@@ -2004,14 +2009,18 @@ function __smartCoderReadVersion(fallback) {
     // G0444/G0442 (once-a-year codes; add-side logic still gates them, but
     // if either is already on the chart it's left alone rather than removed
     // over an eligibility recheck that can be wrong/incomplete).
-    // NOTE: 3014F / 3015F / 3017F (cancer screening) and 99000 (blood draw)
-    // are add-only — never proposed for deletion. See below.
+    // NOTE: 3014F / 3015F / 3017F (cancer screening) are add-only — never
+    // proposed for deletion. See below.
+    // 99000 was previously add-only like those, but it's always added in
+    // lockstep with 36415 (same bloodWorkReason gate above) and must also be
+    // removed in lockstep — leaving it out of MANAGED_CODES caused 36415 to
+    // get flagged for deletion while 99000 silently stayed on the chart.
     const MANAGED_CODES = new Set([
         '3074F', '3075F', '3077F',
         '3078F', '3079F', '3080F',
         'G8752', 'G8753', 'G8754', 'G8755',
         'G8598', 'G8427', '1159F', '1160F',
-        '36415',
+        '36415', '99000',
         '0521F', '1125F', '1126F',
         '1157F', '1158F', '1170F',
         'G8510', 'G8431', 'G9622', '3016F',
