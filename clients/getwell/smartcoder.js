@@ -3128,7 +3128,7 @@ function __smartCoderReadVersion(fallback) {
         // capturing an empty/near-empty decoy instead of the actual HPI
         // content. Collect every match and keep the longest one, which is
         // always going to be the real narrative, not a bare label.
-        const HPI_SECTION_RE = /\bHPI:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|Assessment|Plan|Review\s+of\s+Systems|ROS|Physical\s+Exam|PE|Vital|Social\s+History|Family\s+History|Medical\s+History|Surgical\s+History|Chief\s+Complaint)\b|$)/gi;
+        const HPI_SECTION_RE = /\b(?:HPI:?|History\s+of\s+Present\s+Illness:?)\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|Assessment|Plan|Review\s+of\s+Systems|ROS|Physical\s+Exam|PE|Vital|Social\s+History|Family\s+History|Medical\s+History|Surgical\s+History|Chief\s+Complaint|Current\s+Medication)\b|$)/gi;
         let hpiText = '';
         let hpiSectionMatch;
         while ((hpiSectionMatch = HPI_SECTION_RE.exec(text)) !== null) {
