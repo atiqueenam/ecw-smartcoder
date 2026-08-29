@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.78
+// @name         Getwell SmartCoder by ATQ v5.79
 // @namespace    http://tampermonkey.net/
-// @version      5.78
+// @version      5.79
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,10 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.79 (2026-08-29) - RULE CHANGE (Getwell only): 99214's normal-path
+//   chronic-count requirement dropped from 2+ to 1+ — now 4+ qualifying
+//   dx with just 1 chronic dx qualifies (e.g. 1 chronic + 3 acute, or
+//   2 chronic + 2 acute). The 3-qualifying/all-3-chronic path is unchanged.
 // 5.77 (2026-08-29) - G9664 registered in Auto Link/Claim Link: prefers
 //   hyperlipidemia (E78.x), falls back to office-visit linking otherwise.
 //   Also fixes HPI_SECTION_RE to stop at "Current Medication:" and to
@@ -3887,10 +3891,11 @@ function __smartCoderReadVersion(fallback) {
         });
         const chronicCount = qualifying.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
 
-        // Normal path: 4+ qualifying dx, 2+ of them chronic.
+        // Normal path: 4+ qualifying dx, 1+ of them chronic (Getwell-specific;
+        // most other clients require 2+ chronic here).
         // Second path: exactly 3 qualifying dx, but all 3 are chronic —
         // fewer total codes, but all chronic is complex enough on its own.
-        const normalPathEligible = qualifying.length >= 4 && chronicCount >= 2;
+        const normalPathEligible = qualifying.length >= 4 && chronicCount >= 1;
         const threeChronicPathEligible = qualifying.length === 3 && chronicCount === 3;
         if (!normalPathEligible && !threeChronicPathEligible) return '99213';
 
