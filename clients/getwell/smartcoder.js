@@ -14,16 +14,19 @@
 // CHANGELOG (condensed; retains debugging/backtracking details)
 // 5.82 (2026-08-31) - Billing tab: exact-duplicate CPT rows (same code
 //   appearing 2+ times, e.g. 3008F/1160F/2010F added twice) are now
-//   auto-removed at the end of applyAnalysis() (the Analyze/Apply flow),
-//   via new al_removeExactDuplicateCPT() - keeps the first occurrence,
-//   deletes the rest with the existing deleteOneCPTRow() path. Placed
-//   here (not inside al_mainFlow/Auto Link) deliberately: Auto Link sorts
-//   the grid then links ICD<->CPT, and deleting duplicates after that sort
-//   could make the linking target the wrong row - so dedupe now runs
-//   before sort+link ever happens, right after add/delete/recheck. Only
-//   exact code matches are removed - ICD prefix-conflict detection
-//   (al_alertDuplicateICDStart) is untouched. Claim tab (cl_) duplicate
-//   handling is untouched - alert-only, no removal.
+//   auto-removed inside runAnalysis() (fires on every "Analyze Codes"
+//   click), via new al_removeExactDuplicateCPT() - keeps the first
+//   occurrence, deletes the rest with the existing deleteOneCPTRow() path.
+//   First attempt had this run only at the end of applyAnalysis(), gated
+//   behind "Start Action" - but that button stays disabled whenever
+//   "Nothing to add"/"Nothing to remove", so pure-duplicate charts (no
+//   other suggested changes) never got cleaned up. Moved to run
+//   unconditionally on Analyze instead, before computeAnalysis and before
+//   Auto Link's sort+link — deleting duplicates only after that sort could
+//   make the linking target the wrong row. Only exact code matches are
+//   removed - ICD prefix-conflict detection (al_alertDuplicateICDStart) is
+//   untouched. Claim tab (cl_) duplicate handling is untouched - alert-only,
+//   no removal.
 // 5.81 (2026-08-29) - Fixed blood-work add/delete asymmetry: 36415 and
 //   99000 are always added together, but 99000 was excluded from
 //   MANAGED_CODES (add-only), so only 36415 ever got proposed for removal
@@ -6244,19 +6247,30 @@ function __smartCoderReadVersion(fallback) {
         analysisRunning = true;
         renderSnapshotBlock();
         setTimeout(() => {
-            // CDSS cancer-screening data (if any) comes from whatever
-            // maybeStartCdssAfterHistory already cached in the background
-            // — see that function's comment. computeAnalysis just reads
-            // the cache as-is; if it's not there yet, this Analyze run
-            // simply proceeds without it (additive-only, never required).
-            try {
-                analysisState = computeAnalysis();
-            } catch (err) {
-                console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
-                analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
-            }
-            analysisRunning = false;
-            renderSnapshotBlock();
+            // Exact-duplicate CPT rows (same code showing up 2+ times) are
+            // collapsed here, on every Analyze click, BEFORE computeAnalysis
+            // runs and independent of whether Start Action ends up having
+            // anything to add/remove — that button stays disabled when
+            // "Nothing to add"/"Nothing to remove", so duplicate cleanup
+            // can't live behind it. Doing this before sort/link (Auto Link)
+            // also avoids deleting a row after the grid's already been
+            // sorted, which could make linking target the wrong row.
+            const cptRowsForDedupe = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+            al_removeExactDuplicateCPT(cptRowsForDedupe, () => {
+                // CDSS cancer-screening data (if any) comes from whatever
+                // maybeStartCdssAfterHistory already cached in the background
+                // — see that function's comment. computeAnalysis just reads
+                // the cache as-is; if it's not there yet, this Analyze run
+                // simply proceeds without it (additive-only, never required).
+                try {
+                    analysisState = computeAnalysis();
+                } catch (err) {
+                    console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
+                    analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
+                }
+                analysisRunning = false;
+                renderSnapshotBlock();
+            });
         }, 250);
     }
 
@@ -6403,17 +6417,6 @@ function __smartCoderReadVersion(fallback) {
                 renderSnapshotBlock();
             }
         }
-
-        // Exact-duplicate CPT rows (same code added twice - manually plus
-        // by this Analyze pass, or by a stray double-click) are collapsed
-        // here, right after add/delete/recheck and before actionRunning
-        // clears — i.e. before the coder can click Auto Link, which sorts
-        // then links ICD<->CPT. Removing duplicates before that sort/link
-        // step (rather than after, inside Auto Link) avoids deleting a row
-        // once the sort has already re-ordered the grid, which could make
-        // Auto Link's linking target the wrong row.
-        const cptRowsForDedupe = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-        await new Promise(resolve => al_removeExactDuplicateCPT(cptRowsForDedupe, resolve));
 
         actionRunning = false;
         analysisState = null;
