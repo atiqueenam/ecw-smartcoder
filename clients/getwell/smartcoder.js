@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.83
+// @name         Getwell SmartCoder by ATQ v5.84
 // @namespace    http://tampermonkey.net/
-// @version      5.83
+// @version      5.84
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,22 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.84 (2026-08-31) - Fixed a SECOND false-failure spot for duplicate
+//   deletes, missed by 5.83: after the main delete/add loop, applyAnalysis
+//   runs a separate post-hoc stability recheck (pollUntilStable) that
+//   re-verifies each "success" a moment later to catch eCW rows that
+//   silently bounce back. For deletes it was still checking "is ANY row
+//   with this code present" — true for a duplicate's kept instance — so
+//   it flipped an already-correct duplicate delete from success back to
+//   "Row reappeared after a moment — deletion did not actually stick."
+//   right after 5.83's fix had correctly logged it as removed. Now
+//   snapshots the per-code row count at the start of applyAnalysis (before
+//   any deletes run), and the recheck compares the stabilized current
+//   count against (that snapshot minus however many deletes for that code
+//   actually succeeded) instead of expecting zero — so a duplicate
+//   correctly settling at 1 remaining row no longer trips the recheck,
+//   while a genuine bounce-back (row count not actually dropping) still
+//   does.
 // 5.83 (2026-08-31) - Fixed false "Failed" in Action Results when Start
 //   Action deletes a duplicate CPT/ICD code: deleteOneCPTRow,
 //   deleteOneICDRow, and deleteICDRowWithRetry all verified success by
@@ -6357,6 +6373,25 @@ function __smartCoderReadVersion(fallback) {
         actionLog = [];
         renderSnapshotBlock();
 
+        // Snapshot of how many rows carry each code BEFORE any deletes run
+        // this pass. Needed by the stability check further down: for a
+        // duplicated code, one matching row is EXPECTED to remain after a
+        // correct delete (the kept instance), so that check can't just
+        // ask "is a row with this code still there" — it has to know how
+        // many should be left.
+        const cptCountBeforeRun = {};
+        getCPTRows().forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (!code) return;
+            cptCountBeforeRun[code] = (cptCountBeforeRun[code] || 0) + 1;
+        });
+        const icdCountBeforeRun = {};
+        getICDRows().forEach(entry => {
+            const code = entry.code.trim().toUpperCase();
+            if (!code) return;
+            icdCountBeforeRun[code] = (icdCountBeforeRun[code] || 0) + 1;
+        });
+
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
@@ -6426,6 +6461,33 @@ function __smartCoderReadVersion(fallback) {
         }
 
         await Promise.all(actionLog.filter(e => e.status === 'success').map(async entry => {
+            if (entry.action === 'delete') {
+                // COUNT-based recheck for deletes: a duplicated code is
+                // expected to still have (beforeCount - successfulDeletes)
+                // rows left, not zero. Compare the stabilized current count
+                // against that expected remainder rather than treating any
+                // remaining row as a sign the delete didn't stick.
+                const codeUpper = entry.code.toUpperCase();
+                const successfulDeletesForCode = actionLog.filter(e2 =>
+                    e2.action === 'delete' && (e2.kind || 'cpt') === (entry.kind || 'cpt') &&
+                    e2.code.toUpperCase() === codeUpper && e2.status === 'success'
+                ).length;
+                const beforeCount = entry.kind === 'icd'
+                    ? (icdCountBeforeRun[codeUpper] || 0)
+                    : (cptCountBeforeRun[codeUpper] || 0);
+                const expectedRemaining = Math.max(beforeCount - successfulDeletesForCode, 0);
+                const countCheckFn = entry.kind === 'icd'
+                    ? () => getICDRows().filter(r => r.code.toUpperCase() === codeUpper).length
+                    : () => getCPTRows().filter(r =>
+                          (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase() === codeUpper
+                      ).length;
+                const currentCount = await pollUntilStable(countCheckFn, 4500, 400);
+                if (currentCount > expectedRemaining) {
+                    entry.status = 'fail';
+                    entry.message = 'Row reappeared after a moment — deletion did not actually stick.';
+                }
+                return;
+            }
             const checkFn = entry.kind === 'icd'
                 ? () => !!findICDRowByCodeFast(entry.code)
                 : () => !!getCPTRowByCode(entry.code);
@@ -6433,9 +6495,6 @@ function __smartCoderReadVersion(fallback) {
             if (entry.action === 'add' && !stillPresent) {
                 entry.status = 'fail';
                 entry.message = 'Row disappeared after a moment — likely rejected by a background check (duplicate, modifier, or insurance rule). Not actually added.';
-            } else if (entry.action === 'delete' && stillPresent) {
-                entry.status = 'fail';
-                entry.message = 'Row reappeared after a moment — deletion did not actually stick.';
             }
         }));
         renderSnapshotBlock();
