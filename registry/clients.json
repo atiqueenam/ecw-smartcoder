@@ -1,10 +1,6 @@
 {
   "schemaVersion": 1,
-<<<<<<< HEAD
-  "generatedAt": "2026-08-31T04:17:16.292Z",
-=======
-  "generatedAt": "2026-08-31T04:14:04.112Z",
->>>>>>> e34293a82d00048453da5712b03884b322f8ac31
+  "generatedAt": "2026-08-31T04:21:16.921Z",
   "clients": [
     {
       "id": "bronx",
