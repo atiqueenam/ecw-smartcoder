@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.82
+// @name         Getwell SmartCoder by ATQ v5.83
 // @namespace    http://tampermonkey.net/
 // @version      5.83
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
@@ -12,6 +12,19 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.83 (2026-08-31) - Fixed false "Failed" in Action Results when Start
+//   Action deletes a duplicate CPT/ICD code: deleteOneCPTRow,
+//   deleteOneICDRow, and deleteICDRowWithRetry all verified success by
+//   checking whether ANY row with that code still existed — correct when
+//   a code appears once, but wrong for duplicates, where the kept
+//   instance always still matches that check, so the deletion of the
+//   correct row got reported as failed even though it actually
+//   succeeded (and for ICDs, burned all 4 retry attempts first). All
+//   three now verify by comparing the row-count for that code before vs.
+//   after the delete, requiring it to drop by at least one — true for
+//   both a single instance (drops to 0, unchanged behavior) and a
+//   duplicate (drops from N to N-1, correctly leaving the kept row(s)
+//   behind and reporting success).
 // 5.82 (2026-08-31) - Added exact-duplicate CPT/ICD detection to the main
 //   Analyze/Start Action pipeline (computeAnalysis/applyAnalysis) — the
 //   only duplicate logic that previously existed (al_alertDuplicateICDStart)
@@ -2131,15 +2144,29 @@ function __smartCoderReadVersion(fallback) {
         // Clear it first (best-effort, harmless no-op if nothing's open).
         clickAnyYesButton();
 
+        // COUNT-based "gone" check, not presence-based: when this code is
+        // duplicated (2+ rows share it), the row we're NOT deleting still
+        // matches `code` after this delete succeeds, so "does any row with
+        // this code still exist" would wrongly report failure even though
+        // the intended row was removed. Capture how many rows carry this
+        // code right now, and only require that count to drop by at least
+        // one — true whether this was the only instance (drops to 0, same
+        // as before) or one of several duplicates (drops from N to N-1,
+        // leaving the kept instance(s) behind).
+        const countBefore = getCPTRows().filter(r =>
+            r.querySelector('td:nth-child(2)')?.textContent.trim() === code
+        ).length;
+
         delBtn.click();
         const start = Date.now();
         const confirmTimer = setInterval(() => {
             if (clickAnyYesButton()) {
                 clearInterval(confirmTimer);
                 waitUntilGoneCPT(() => {
-                    return getCPTRows().find(r =>
+                    const countNow = getCPTRows().filter(r =>
                         r.querySelector('td:nth-child(2)')?.textContent.trim() === code
-                    );
+                    ).length;
+                    return countNow < countBefore ? null : true;
                 }, 6000, (gone) => callback({ ok: gone }));
                 return;
             }
@@ -2172,13 +2199,21 @@ function __smartCoderReadVersion(fallback) {
         // Clear it first (best-effort, harmless no-op if nothing's open).
         clickAnyYesButton();
 
+        // COUNT-based "gone" check — same reasoning as deleteOneCPTRow
+        // above: a duplicated ICD code still has a matching row (the kept
+        // instance) after this delete succeeds, so presence-based checking
+        // would wrongly report failure. Require the count for this code to
+        // drop by at least one instead of hitting zero.
+        const countBefore = getICDRows().filter(r => r.code === code).length;
+
         delBtn.click();
         const start = Date.now();
         const confirmTimer = setInterval(() => {
             if (clickAnyYesButton()) {
                 clearInterval(confirmTimer);
                 waitUntilGoneCPT(() => {
-                    return getICDRows().find(r => r.code === code);
+                    const countNow = getICDRows().filter(r => r.code === code).length;
+                    return countNow < countBefore ? null : true;
                 }, 6000, callback);
                 return;
             }
@@ -2206,6 +2241,16 @@ function __smartCoderReadVersion(fallback) {
             const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
             if (!entry) return { ok: true }; // already gone (or never there)
 
+            // Count-based, same reasoning as deleteOneICDRow: when this
+            // code is duplicated, one matching row is EXPECTED to remain
+            // (the kept instance) after a correct delete, so "is a row
+            // with this code still findable" is the wrong test — it would
+            // treat every successful duplicate-cleanup delete as a
+            // bounce-back and burn all 4 retry attempts. Track the count
+            // for this code at the start of the attempt and require it to
+            // drop, not hit zero.
+            const countBeforeAttempt = getICDRows().filter(r => r.code.toUpperCase() === code.toUpperCase()).length;
+
             const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
             if (!clicked) {
                 // Confirm click/timeout failed outright — brief pause, then
@@ -2214,14 +2259,15 @@ function __smartCoderReadVersion(fallback) {
                 continue;
             }
 
-            // Fast path: deleteOneICDRow already waited for the row to
-            // leave the DOM, so a normal, working delete confirms and
-            // returns here immediately — no added delay. Only a code that
-            // ACTUALLY bounces back pays an extra wait, and only on the
-            // retry after that happens (900ms, 1600ms, 2300ms), giving
-            // eCW's backend a little more time to commit before checking
-            // again.
-            if (!findICDRowByCodeFast(code)) return { ok: true };
+            // Fast path: deleteOneICDRow already waited for the count to
+            // drop, so a normal, working delete confirms and returns here
+            // immediately — no added delay. Only a code that ACTUALLY
+            // bounces back (count returns to countBeforeAttempt) pays an
+            // extra wait, and only on the retry after that happens (900ms,
+            // 1600ms, 2300ms), giving eCW's backend a little more time to
+            // commit before checking again.
+            const countAfter = getICDRows().filter(r => r.code.toUpperCase() === code.toUpperCase()).length;
+            if (countAfter < countBeforeAttempt) return { ok: true };
             if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
             // Still there (or back) — loop and try again.
         }
