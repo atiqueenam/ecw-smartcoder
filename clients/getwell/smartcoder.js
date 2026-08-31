@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.81
+// @name         Getwell SmartCoder by ATQ v5.82
 // @namespace    http://tampermonkey.net/
-// @version      5.81
+// @version      5.83
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,19 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.82 (2026-08-31) - Added exact-duplicate CPT/ICD detection to the main
+//   Analyze/Start Action pipeline (computeAnalysis/applyAnalysis) — the
+//   only duplicate logic that previously existed (al_alertDuplicateICDStart)
+//   was a separate Auto Link module that just alerted on ICD PREFIX
+//   collisions (first 3 chars) and never deleted anything, so a straight
+//   duplicate row (same CPT or same full ICD code appearing 2+ times)
+//   went undetected and unremoved by Analyze/Start Action. Now: any code
+//   duplicated on the grid is queued in "To remove" the moment Analyze
+//   runs, and Start Action deletes every earlier occurrence, keeping only
+//   the LAST (bottom-most) row for that code. ICD matching is a full-
+//   string EXACT match (uppercased/trimmed) only — never a prefix/
+//   category match, so e.g. R25.2 and R25.29 are correctly left alone as
+//   distinct codes, not flagged as duplicates of each other.
 // 5.81 (2026-08-29) - Fixed blood-work add/delete asymmetry: 36415 and
 //   99000 are always added together, but 99000 was excluded from
 //   MANAGED_CODES (add-only), so only 36415 ever got proposed for removal
@@ -2603,6 +2616,47 @@ function __smartCoderReadVersion(fallback) {
         // "Cannot access 'toDelete' before initialization" (ANALYZE FAILED)
         // for any Medicaid/Medicare-type payer (e.g. Metroplus).
         const toDelete = [...gatedBundleCPTDeletes];
+
+        // ---- Exact-duplicate detection (CPT + ICD) ----
+        // A code appearing 2+ times on the grid is always a straight
+        // duplicate (stray click, eCW glitch, etc.) — never a legitimate
+        // billing scenario — so Analyze queues every earlier occurrence
+        // for deletion and keeps only the LAST (bottom-most) row for that
+        // code. ICD matching here is a full-string EXACT match only
+        // (uppercased/trimmed) — never a prefix/category match, so e.g.
+        // R25.2 and R25.29 are different codes and are never flagged as
+        // duplicates of one another. This runs unconditionally, ahead of
+        // every other rule below, so a duplicate gets cleaned up even on
+        // charts where nothing else needs correcting.
+        const cptByCodeForDupes = {};
+        getCPTRows().forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (!code) return;
+            if (!cptByCodeForDupes[code]) cptByCodeForDupes[code] = [];
+            cptByCodeForDupes[code].push(row);
+        });
+        Object.entries(cptByCodeForDupes).forEach(([code, rows]) => {
+            if (rows.length < 2) return;
+            // Keep the last row, delete every earlier one.
+            rows.slice(0, -1).forEach(row => {
+                toDelete.push({ code, row, kind: 'cpt', reason: 'Duplicate CPT code — removing duplicate, keeping one instance' });
+            });
+        });
+
+        const icdByCodeForDupes = {};
+        getICDRows().forEach(entry => {
+            const code = entry.code.trim().toUpperCase();
+            if (!code) return;
+            if (!icdByCodeForDupes[code]) icdByCodeForDupes[code] = [];
+            icdByCodeForDupes[code].push(entry);
+        });
+        Object.entries(icdByCodeForDupes).forEach(([code, entries]) => {
+            if (entries.length < 2) return;
+            // Keep the last row, delete every earlier one.
+            entries.slice(0, -1).forEach(entry => {
+                toDelete.push({ code, row: entry.row, kind: 'icd', reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
+            });
+        });
 
         const desired = new Map(); // code -> reason
 
