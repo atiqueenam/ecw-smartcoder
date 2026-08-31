@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.82
+// @name         Getwell SmartCoder by ATQ v5.81
 // @namespace    http://tampermonkey.net/
-// @version      5.82
+// @version      5.81
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,21 +12,6 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
-// 5.82 (2026-08-31) - Billing tab: exact-duplicate CPT rows (same code
-//   appearing 2+ times, e.g. 3008F/1160F/2010F added twice) are now
-//   auto-removed inside runAnalysis() (fires on every "Analyze Codes"
-//   click), via new al_removeExactDuplicateCPT() - keeps the first
-//   occurrence, deletes the rest with the existing deleteOneCPTRow() path.
-//   First attempt had this run only at the end of applyAnalysis(), gated
-//   behind "Start Action" - but that button stays disabled whenever
-//   "Nothing to add"/"Nothing to remove", so pure-duplicate charts (no
-//   other suggested changes) never got cleaned up. Moved to run
-//   unconditionally on Analyze instead, before computeAnalysis and before
-//   Auto Link's sort+link — deleting duplicates only after that sort could
-//   make the linking target the wrong row. Only exact code matches are
-//   removed - ICD prefix-conflict detection (al_alertDuplicateICDStart) is
-//   untouched. Claim tab (cl_) duplicate handling is untouched - alert-only,
-//   no removal.
 // 5.81 (2026-08-29) - Fixed blood-work add/delete asymmetry: 36415 and
 //   99000 are always added together, but 99000 was excluded from
 //   MANAGED_CODES (add-only), so only 36415 ever got proposed for removal
@@ -4814,17 +4799,20 @@ function __smartCoderReadVersion(fallback) {
 
     function al_mainFlow() {
         al_deleteUnwantedCodes(() => {
-            const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
-            const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-            al_linkCPTGeneric(icdRows, cptRows);
-            al_handleUnlistedCPTs(cptRows);
-            al_applySLModifierForPedsVaccines();
-            al_apply95ModifierForTelevisit();
-            al_apply59ModifierFor96372();
-            al_apply25ModifierFor99211();
-            al_alertDuplicateICDStart(icdRows);
-            al_alertDuplicateCPT(cptRows);
-            al_validatePreventiveCPT(cptRows);
+            const cptRowsPreDedupe = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+            al_removeExactDuplicateCPT(cptRowsPreDedupe, () => {
+                const icdRows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr"));
+                const cptRows = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+                al_linkCPTGeneric(icdRows, cptRows);
+                al_handleUnlistedCPTs(cptRows);
+                al_applySLModifierForPedsVaccines();
+                al_apply95ModifierForTelevisit();
+                al_apply59ModifierFor96372();
+                al_apply25ModifierFor99211();
+                al_alertDuplicateICDStart(icdRows);
+                al_alertDuplicateCPT(cptRows);
+                al_validatePreventiveCPT(cptRows);
+            });
         });
     }
 
@@ -6247,30 +6235,19 @@ function __smartCoderReadVersion(fallback) {
         analysisRunning = true;
         renderSnapshotBlock();
         setTimeout(() => {
-            // Exact-duplicate CPT rows (same code showing up 2+ times) are
-            // collapsed here, on every Analyze click, BEFORE computeAnalysis
-            // runs and independent of whether Start Action ends up having
-            // anything to add/remove — that button stays disabled when
-            // "Nothing to add"/"Nothing to remove", so duplicate cleanup
-            // can't live behind it. Doing this before sort/link (Auto Link)
-            // also avoids deleting a row after the grid's already been
-            // sorted, which could make linking target the wrong row.
-            const cptRowsForDedupe = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
-            al_removeExactDuplicateCPT(cptRowsForDedupe, () => {
-                // CDSS cancer-screening data (if any) comes from whatever
-                // maybeStartCdssAfterHistory already cached in the background
-                // — see that function's comment. computeAnalysis just reads
-                // the cache as-is; if it's not there yet, this Analyze run
-                // simply proceeds without it (additive-only, never required).
-                try {
-                    analysisState = computeAnalysis();
-                } catch (err) {
-                    console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
-                    analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
-                }
-                analysisRunning = false;
-                renderSnapshotBlock();
-            });
+            // CDSS cancer-screening data (if any) comes from whatever
+            // maybeStartCdssAfterHistory already cached in the background
+            // — see that function's comment. computeAnalysis just reads
+            // the cache as-is; if it's not there yet, this Analyze run
+            // simply proceeds without it (additive-only, never required).
+            try {
+                analysisState = computeAnalysis();
+            } catch (err) {
+                console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
+                analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
+            }
+            analysisRunning = false;
+            renderSnapshotBlock();
         }, 250);
     }
 
