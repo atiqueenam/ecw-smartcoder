@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.81
+// @name         Getwell SmartCoder by ATQ v5.82
 // @namespace    http://tampermonkey.net/
-// @version      5.81
+// @version      5.82
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,18 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.82 (2026-08-31) - Billing tab: exact-duplicate CPT rows (same code
+//   appearing 2+ times, e.g. 3008F/1160F/2010F added twice) are now
+//   auto-removed at the end of applyAnalysis() (the Analyze/Apply flow),
+//   via new al_removeExactDuplicateCPT() - keeps the first occurrence,
+//   deletes the rest with the existing deleteOneCPTRow() path. Placed
+//   here (not inside al_mainFlow/Auto Link) deliberately: Auto Link sorts
+//   the grid then links ICD<->CPT, and deleting duplicates after that sort
+//   could make the linking target the wrong row - so dedupe now runs
+//   before sort+link ever happens, right after add/delete/recheck. Only
+//   exact code matches are removed - ICD prefix-conflict detection
+//   (al_alertDuplicateICDStart) is untouched. Claim tab (cl_) duplicate
+//   handling is untouched - alert-only, no removal.
 // 5.81 (2026-08-29) - Fixed blood-work add/delete asymmetry: 36415 and
 //   99000 are always added together, but 99000 was excluded from
 //   MANAGED_CODES (add-only), so only 36415 ever got proposed for removal
@@ -4440,6 +4452,33 @@ function __smartCoderReadVersion(fallback) {
         }
     }
 
+    // Removes exact-duplicate CPT rows from the Billing tab grid (same code
+    // appearing 2+ times), keeping the first occurrence and deleting the
+    // rest via the vetted deleteOneCPTRow() path. Prefix-level conflicts
+    // (handled separately for ICDs by al_alertDuplicateICDStart) are left
+    // alone — this only removes rows whose CPT code matches exactly.
+    function al_removeExactDuplicateCPT(cptRows, callback) {
+        const seen = new Set();
+        const toDelete = [];
+        for (const row of cptRows) {
+            const code = row.querySelector('td:nth-child(2)')?.textContent.trim().toUpperCase();
+            if (!code) continue;
+            if (seen.has(code)) {
+                toDelete.push({ row, code });
+            } else {
+                seen.add(code);
+            }
+        }
+        if (!toDelete.length) { callback(); return; }
+        let i = 0;
+        function next() {
+            if (i >= toDelete.length) { callback(); return; }
+            const { row, code } = toDelete[i++];
+            deleteOneCPTRow(row, code, () => next());
+        }
+        next();
+    }
+
     function al_alertDuplicateCPT(cptRows) {
         const cptMap = {};
         for (const row of cptRows) {
@@ -6364,6 +6403,17 @@ function __smartCoderReadVersion(fallback) {
                 renderSnapshotBlock();
             }
         }
+
+        // Exact-duplicate CPT rows (same code added twice - manually plus
+        // by this Analyze pass, or by a stray double-click) are collapsed
+        // here, right after add/delete/recheck and before actionRunning
+        // clears — i.e. before the coder can click Auto Link, which sorts
+        // then links ICD<->CPT. Removing duplicates before that sort/link
+        // step (rather than after, inside Auto Link) avoids deleting a row
+        // once the sort has already re-ordered the grid, which could make
+        // Auto Link's linking target the wrong row.
+        const cptRowsForDedupe = Array.from(document.querySelectorAll("#billingTbl4 tbody tr"));
+        await new Promise(resolve => al_removeExactDuplicateCPT(cptRowsForDedupe, resolve));
 
         actionRunning = false;
         analysisState = null;
