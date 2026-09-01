@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.84
+// @name         Getwell SmartCoder by ATQ v5.85
 // @namespace    http://tampermonkey.net/
-// @version      5.84
+// @version      5.85
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,21 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.85 (2026-09-01) - Two rule fixes:
+//   1) 99000 is no longer tied to blood work alone. If no blood draw is
+//      found this run, 99000 is now also kept/added on its own when a
+//      Pap smear code (Q0091/G0101) or a urine test code (any CPT
+//      already on the chart starting with "8") is present — 36415 is
+//      NOT added in that case, only 99000. If blood work, Pap smear, and
+//      urine test are all absent, 99000 still gets deleted as before
+//      (it remains in MANAGED_CODES).
+//   2) EKG (93000) linking: Analyze now checks, whenever 93000 is
+//      already on the chart or being added this run, whether any of its
+//      linking ICDs (E78.5, I10, R00.2, R03.0, R06.02, R07.9) are
+//      present in the ICD grid. If none are, it proposes Z13.6 so Auto
+//      Link/Claim Link (which already treat Z13.6 as part of 93000's
+//      linking set) have something correct to attach 93000 to instead
+//      of falling through to the office-visit codes.
 // 5.84 (2026-08-31) - Fixed a SECOND false-failure spot for duplicate
 //   deletes, missed by 5.83: after the main delete/add loop, applyAnalysis
 //   runs a separate post-hoc stability recheck (pollUntilStable) that
@@ -2910,6 +2925,23 @@ function __smartCoderReadVersion(fallback) {
         if (bloodWorkReason) {
             desired.set('36415', bloodWorkReason);
             desired.set('99000', bloodWorkReason);
+        } else {
+            // No blood draw this run — 99000 can still be kept/added on
+            // its own when a Pap smear (Q0091/G0101) or a urine test
+            // (any CPT code already on the chart starting with "8", e.g.
+            // the 8xxxx lab-panel range) is present. 36415 is NOT added
+            // in this branch — it's blood-draw-specific. If none of
+            // blood work / Pap smear / urine test apply, 99000 is left
+            // out of "desired" and — since it's in MANAGED_CODES — gets
+            // deleted like before.
+            const PAP_SMEAR_CODES = ['Q0091', 'G0101'];
+            const hasPapSmear = PAP_SMEAR_CODES.some(c => rawCPTCodesNow.includes(c));
+            const hasUrineTestCode = rawCPTCodesNow.some(c => /^8/.test(c));
+            if (hasPapSmear) {
+                desired.set('99000', 'Pap smear code (Q0091/G0101) present on chart');
+            } else if (hasUrineTestCode) {
+                desired.set('99000', 'Urine test code (CPT starting with 8) present on chart');
+            }
         }
 
         // ---- Chief Complaint: H. pylori (any spelling/spacing variant) ----
@@ -3172,6 +3204,21 @@ function __smartCoderReadVersion(fallback) {
         }
         if (age >= 18 && hasAlc !== null && hasAlcoholScreeningCpt && !currentICDCodesForScreening.includes('Z13.9')) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
+        }
+
+        // ---- EKG (93000) linking ICD check ----
+        // 93000 links to one of EKG_LINK_ICDS below (see ecgICDs in the
+        // Auto Link / Claim Link rule tables). Whenever 93000 is already
+        // on the chart OR being added this run, Analyze now also checks
+        // whether any of those linking codes are present in the ICD
+        // grid. If none are, it proposes Z13.6 so there's always
+        // something for Auto Link/Claim Link to attach 93000 to instead
+        // of falling through to the office-visit codes.
+        const EKG_LINK_ICDS = ['E78.5', 'I10', 'R00.2', 'R03.0', 'R06.02', 'R07.9'];
+        const hasEKGCpt = currentCodes.has('93000') || desired.has('93000');
+        const hasEKGLinkICD = EKG_LINK_ICDS.some(c => currentICDCodesForScreening.includes(c));
+        if (hasEKGCpt && !hasEKGLinkICD && !currentICDCodesForScreening.includes('Z13.6')) {
+            toAdd.push({ code: 'Z13.6', reason: 'EKG (93000) present with no linking diagnosis on chart — adding Z13.6 for linking', kind: 'icd' });
         }
 
         // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
