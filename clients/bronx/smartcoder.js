@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.76
+// @name         Bronx Health SmartCoder v1.77
 // @namespace    http://tampermonkey.net/
-// @version      1.76
+// @version      1.77
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.77 (2026-09-01) - 93000 (EKG) no longer auto-proposed for "To Add" when
+//   the CC mentions EKG/ECG — Bronx no longer wants SmartCoder adding this
+//   code itself. If 93000 is already on the chart it's left as-is (never
+//   deleted — it was never in MANAGED_CODES to begin with) and the
+//   existing Z13.6-for-93000 linking helper still fires off the
+//   already-on-chart code same as before. Auto Link / Claim Link CPT rule
+//   tables for 93000 (customICDCollector) are untouched — only the
+//   auto-add proposal is removed.
 // 1.76 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
 //   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
 //   visit linking when none present. Was previously completely
@@ -2287,10 +2295,11 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
-        // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added; EKG → 93000 ----
-        if (/\bekg\b|\becg\b/i.test(ccText)) {
-            desired.set('93000', 'EKG mentioned in CC');
-        }
+        // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added.
+        // 93000 is also no longer auto-added regardless of CC mentioning
+        // EKG/ECG: if it's already on the chart it's left alone (93000 is
+        // not in MANAGED_CODES, so it was never auto-deleted either way),
+        // but SmartCoder itself will not propose adding it. ----
 
         // ---- Age-gated CPTs: 1125F, 1126F, 1170F, 1157F, 1158F ----
         // Plain age check ONLY — kept for 65+, removed if under 65. No
