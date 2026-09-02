@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.87
+// @name         Hasan Sheikh SmartCoder v1.88
 // @namespace    http://tampermonkey.net/
-// @version      1.87
+// @version      1.88
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
 //
+// 1.88 (2026-09-02) - Advance Care Planning (99497/99498) registered in
+//   both al_cptRules and cl_cptRules as customICDCollector against
+//   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted,
+//   so Auto Link/Claim Link fell through to office-visit ICDs
+//   unconditionally. Same fix: Getwell 5.86, Hasnayen 1.30.
 // 1.87 (2026-08-29) - G9664 registered in both Auto Link and Claim Link CPT
 //   rule tables: prefers hyperlipidemia (E78.x) ICDs, falls back to office
 //   visit linking when none present. Was previously completely
@@ -3450,7 +3455,13 @@ function __smartCoderReadVersion(fallback) {
             "1111F": { type: "al_officeVisit" },
             "99051": { type: "al_officeVisit" },
             "82274": { type: "al_officeVisit" },
-            "99000": { type: "al_officeVisit" }
+            "99000": { type: "al_officeVisit" },
+            // Advance Care Planning — link to a chronic-disease ICD only
+            // (CHRONIC_DISEASE_ICD_CODES, same list the 99213/99214 rule
+            // uses); office-visit ICDs are used only if no chronic ICD is
+            // on the chart.
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
         });
         return rules;
     }
@@ -4644,7 +4655,12 @@ function __smartCoderReadVersion(fallback) {
             "1111F": { type: "cl_officeVisit" },
             "99051": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
-            "99000": { type: "cl_officeVisit" }
+            "99000": { type: "cl_officeVisit" },
+            // Advance Care Planning — link to a chronic-disease ICD only,
+            // office-visit ICDs only as fallback. See al_buildCPTRules'
+            // matching comment for 99497/99498.
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
         });
         return rules;
     }

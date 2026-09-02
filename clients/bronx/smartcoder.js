@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.78
+// @name         Bronx Health SmartCoder v1.79
 // @namespace    http://tampermonkey.net/
-// @version      1.78
+// @version      1.79
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.79 (2026-09-02) - Advance Care Planning (99497/99498) registered in
+//   both al_cptRules and cl_cptRules as customICDCollector against
+//   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted
+//   in Bronx (no ACP rule existed here at all), so if a practice ever adds
+//   99497/99498 it now links to a chronic-disease ICD when one is on the
+//   chart, only falling back to office-visit ICDs when none is present.
+//   Same fix: Getwell 5.86, Hasnayen 1.30, Hasan Sheikh 1.88.
 // 1.78 (2026-09-02) - 99215 already on the chart now also blocks proposing
 //   a DIFFERENT computed office-visit code (e.g. 99214) alongside it, not
 //   just protects 99215 from deletion once it's there. Deletion protection
@@ -3818,7 +3825,14 @@ function __smartCoderReadVersion(fallback) {
             "36415": { type: "officeVisitThenZ13" },
             "1111F": { type: "al_officeVisit" },
             "82274": { type: "al_officeVisit" },
-            "99000": { type: "al_officeVisit" }
+            "99000": { type: "al_officeVisit" },
+            // Advance Care Planning — link to a chronic-disease ICD only
+            // (CHRONIC_DISEASE_ICD_CODES, same list the 99213/99214 rule
+            // uses); office-visit ICDs are used only if no chronic ICD is
+            // on the chart. Same fix: Getwell 5.86, Hasnayen 1.30, Hasan
+            // Sheikh 1.88.
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
         });
         return rules;
     }
@@ -4975,7 +4989,9 @@ function __smartCoderReadVersion(fallback) {
             "36415": { type: "officeVisitThenZ13" },
             "1111F": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
-            "99000": { type: "cl_officeVisit" }
+            "99000": { type: "cl_officeVisit" },
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
         });
         return rules;
     }

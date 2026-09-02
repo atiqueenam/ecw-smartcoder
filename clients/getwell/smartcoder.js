@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.85
+// @name         Getwell SmartCoder by ATQ v5.86
 // @namespace    http://tampermonkey.net/
-// @version      5.85
+// @version      5.86
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,14 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.86 (2026-09-02) - Advance Care Planning (99497/99498) registered in
+//   both al_cptRules and cl_cptRules as customICDCollector against
+//   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted
+//   in either rule table, so al_handleUnlistedCPTs/cl_handleUnlistedCPTs
+//   fell through to office-visit ICDs unconditionally — Auto Link/Claim
+//   Link now link 99497/99498 to a chronic-disease ICD when one is on the
+//   chart, only falling back to office-visit ICDs when none is present.
+//   Same fix: Hasnayen 1.30, Hasan Sheikh 1.88.
 // 5.85 (2026-09-01) - Two rule fixes:
 //   1) 99000 is no longer tied to blood work alone. If no blood draw is
 //      found this run, 99000 is now also kept/added on its own when a
@@ -4395,7 +4403,9 @@ function __smartCoderReadVersion(fallback) {
             "1111F": { type: "al_officeVisit" },
             "99051": { type: "al_officeVisit" },
             "82274": { type: "al_officeVisit" },
-            "99000": { type: "al_officeVisit" }
+            "99000": { type: "al_officeVisit" },
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
         });
         return rules;
     }
@@ -5425,7 +5435,9 @@ function __smartCoderReadVersion(fallback) {
             "1111F": { type: "cl_officeVisit" },
             "99051": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
-            "99000": { type: "cl_officeVisit" }
+            "99000": { type: "cl_officeVisit" },
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
         });
         return rules;
     }
