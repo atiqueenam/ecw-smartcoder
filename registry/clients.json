@@ -1,6 +1,10 @@
 {
   "schemaVersion": 1,
+<<<<<<< HEAD
   "generatedAt": "2026-09-02T04:21:51.106Z",
+=======
+  "generatedAt": "2026-09-02T04:17:08.010Z",
+>>>>>>> 88e4742102541ddef05788294ba3c78ee22dad30
   "clients": [
     {
       "id": "bronx",
@@ -11,7 +15,11 @@
       ],
       "version": "1.78",
       "file": "clients/bronx/smartcoder.js",
+<<<<<<< HEAD
       "sha256": "eb96c8b99acc7f472e586116e1ba1b298556f56beb2c8874e562ec601a42abfb"
+=======
+      "sha256": "e71c031f3a172d1a609e3c1288d5294882865cc01ecda97b89763c55fdcb1e95"
+>>>>>>> 88e4742102541ddef05788294ba3c78ee22dad30
     },
     {
       "id": "getwell",
@@ -44,7 +52,11 @@
       ],
       "version": "1.29",
       "file": "clients/hasnayen/smartcoder.js",
+<<<<<<< HEAD
       "sha256": "f86c9b23975b2d3e66970d6acd20cc8610451532c76664fe49ad5295aa75d62a"
+=======
+      "sha256": "3f7563f9fcdf7c935d78fd1423be7afe0058c97bc14ae722f4c195929f2f417f"
+>>>>>>> 88e4742102541ddef05788294ba3c78ee22dad30
     }
   ]
 }
