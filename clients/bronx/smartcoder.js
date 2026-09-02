@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.77
+// @name         Bronx Health SmartCoder v1.78
 // @namespace    http://tampermonkey.net/
-// @version      1.77
+// @version      1.78
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.78 (2026-09-02) - 99215 already on the chart now also blocks proposing
+//   a DIFFERENT computed office-visit code (e.g. 99214) alongside it, not
+//   just protects 99215 from deletion once it's there. Deletion protection
+//   (PRACTICE_PROTECTED_OV_CODES) already covered this; the add-guard
+//   (currentCodes/practiceAddedHigherNewPatientCode check) didn't, so a
+//   practice-added 99215 could still get a second office-visit code added
+//   next to it. Only this add-guard changed — everything else in the
+//   office-visit rule (99213/99214 computation, 99204/99205 handling,
+//   deletion sweep) is untouched.
 // 1.77 (2026-09-01) - 93000 (EKG) no longer auto-proposed for "To Add" when
 //   the CC mentions EKG/ECG — Bronx no longer wants SmartCoder adding this
 //   code itself. If 93000 is already on the chart it's left as-is (never
@@ -2849,8 +2858,15 @@ function __smartCoderReadVersion(fallback) {
             const practiceAddedHigherNewPatientCode = ovIsNewPatient &&
                 (currentCodes.has('99204') || currentCodes.has('99205'));
 
+            // 99215 given directly by the practice on an established visit
+            // is protected from deletion below regardless of visit type —
+            // it must also block adding a DIFFERENT computed office-visit
+            // code (e.g. 99214) alongside it, not just protect it once it's
+            // already there.
+            const practiceAdded99215 = currentCodes.has('99215');
+
             if (ovCode) {
-                if (!currentCodes.has(ovCode) && !practiceAddedHigherNewPatientCode) {
+                if (!currentCodes.has(ovCode) && !practiceAddedHigherNewPatientCode && !practiceAdded99215) {
                     toAdd.unshift({
                         code: ovCode,
                         reason: ovReason,
