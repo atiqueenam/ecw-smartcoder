@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-01T07:35:41.178Z",
+  "generatedAt": "2026-09-02T04:17:08.010Z",
   "clients": [
     {
       "id": "bronx",
@@ -11,7 +11,7 @@
       ],
       "version": "1.77",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "5854ad2e07723e16a8a529b937ca299ebb3148aff47573fbdd38f61ab72d64c3"
+      "sha256": "e71c031f3a172d1a609e3c1288d5294882865cc01ecda97b89763c55fdcb1e95"
     },
     {
       "id": "getwell",
@@ -44,7 +44,7 @@
       ],
       "version": "1.29",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "0b41ce3398594ae9614f7cf41f85c2891fb10e1c798d10f1649f6494947ded69"
+      "sha256": "3f7563f9fcdf7c935d78fd1423be7afe0058c97bc14ae722f4c195929f2f417f"
     }
   ]
 }
