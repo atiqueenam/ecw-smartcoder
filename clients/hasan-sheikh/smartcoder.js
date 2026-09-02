@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.88
+// @name         Hasan Sheikh SmartCoder v1.89
 // @namespace    http://tampermonkey.net/
-// @version      1.88
+// @version      1.89
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
 //
+// 1.89 (2026-09-02) - 99213-vs-99214 rule (6.iii): added the "3-chronic
+//   path" from Getwell's equivalent rule — exactly 3 qualifying dx, all 3
+//   chronic, now also qualifies for 99214 (previously only the 4+ dx /
+//   >=1 chronic "normal path" qualified, so a 3-dx-all-chronic chart
+//   always defaulted to 99213). The existing 30-day 99214-reuse gate
+//   (codeUsedInLastDays) is unchanged and applies to both paths the same
+//   way.
 // 1.88 (2026-09-02) - Advance Care Planning (99497/99498) registered in
 //   both al_cptRules and cl_cptRules as customICDCollector against
 //   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted,
@@ -2549,11 +2556,19 @@ function __smartCoderReadVersion(fallback) {
                         return true;
                     });
                     const chronicCount = qualifying.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
-                    // rule 6.iii: 4+ qualifying dx, >=1 chronic, AND not
-                    // used within the last 30 days
-                    if (qualifying.length >= 4 && chronicCount >= 1 && !codeUsedInLastDays('99214', 30)) {
+                    // rule 6.iii: eligible for 99214 via either path below,
+                    // AND not used within the last 30 days —
+                    // Normal path: 4+ qualifying dx, >=1 chronic.
+                    // 3-chronic path: exactly 3 qualifying dx, all 3 chronic
+                    // — fewer total codes, but all chronic is complex
+                    // enough on its own (same as Getwell's rule).
+                    const normalPathEligible = qualifying.length >= 4 && chronicCount >= 1;
+                    const threeChronicPathEligible = qualifying.length === 3 && chronicCount === 3;
+                    if ((normalPathEligible || threeChronicPathEligible) && !codeUsedInLastDays('99214', 30)) {
                         ovCode = '99214';
-                        ovReason = `4+ dx with ${chronicCount} chronic — 99214 (not used in last 30 days)`;
+                        ovReason = normalPathEligible
+                            ? `4+ dx with ${chronicCount} chronic — 99214 (not used in last 30 days)`
+                            : `3 dx, all chronic — 99214 (not used in last 30 days)`;
                     } else {
                         ovCode = '99213'; // rule 6.iv: default
                         ovReason = 'Established visit — 99213 (default)';
