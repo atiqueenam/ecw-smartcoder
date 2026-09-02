@@ -44,11 +44,7 @@
       ],
       "version": "1.29",
       "file": "clients/hasnayen/smartcoder.js",
-<<<<<<< HEAD
-      "sha256": "f86c9b23975b2d3e66970d6acd20cc8610451532c76664fe49ad5295aa75d62a"
-=======
       "sha256": "3f7563f9fcdf7c935d78fd1423be7afe0058c97bc14ae722f4c195929f2f417f"
->>>>>>> 88e4742102541ddef05788294ba3c78ee22dad30
     }
   ]
 }
