@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.79
+// @name         Bronx Health SmartCoder v1.80
 // @namespace    http://tampermonkey.net/
-// @version      1.79
+// @version      1.80
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,52 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.80 (2026-09-04) - Four Bronx-only rule changes:
+//   (1) 99214 day gap is now counseling-aware. Unchanged at 7 days when no
+//   counseling code is in play. When one IS in play the gap widens to 14
+//   days, so a 99214 billed 8-14 days ago now yields 99213 and the
+//   counseling code survives instead of being deleted by the
+//   99214-vs-99401/99406 exclusivity rule. Past 14 days, 99214 is taken as
+//   before and the counseling code is deleted as before. Rationale: 99214
+//   pays more, but not enough to justify losing a counseling code on an
+//   encounter where 99214 was just billed. "In play" = the code is already
+//   on the chart (P/C and SM buttons are clicked before Start Action —
+//   NOTHING is auto-added here) AND its quick-action gating is currently
+//   satisfied, so an ineligible one being deleted this same run can't widen
+//   the gap on its way out. Only one counseling code is ever billed per
+//   encounter, so 99401 is checked first and 99406 only if 99401 isn't it.
+//   The exclusivity block itself is untouched.
+//   (2) "New York State Medicaid" (plus NY/NYS spellings) now recognized by
+//   isMedicaidInsurance() as straight Medicaid, so every Medicaid rule
+//   applies to it. Added as an anchored alternative rather than loosening
+//   the existing /^medicaid\b/ anchor, which is a deliberate fix against
+//   unrelated payers carrying "Medicaid" later in the name. MetroPlus
+//   exclusion unchanged.
+//   (3) Alcohol screening detection fixed for the AUDIT (2018 Edition)
+//   widget, which was going entirely undetected (evaluateAlcohol returned
+//   null) for three independent reasons: (a) on the discrete
+//   single-category widgets the "Drug/Alcohol:" label exists ONLY inside
+//   the .cattablink header, which extractStructuredScreeningText() was
+//   removing outright — the label is now pulled out first and re-emitted at
+//   the START of its own category's text, normalized to end with a colon,
+//   which keeps the original anti-glue fix intact (a colon-less header can
+//   no longer attach to the END of the previous category) while restoring
+//   the anchor the section splitter needs; (b) the frequency form of the
+//   intake question ("How often do you have a drink containing alcohol?
+//   Never") has no colon before its answer, so the yes/no matcher never saw
+//   it — added as a peer of the yes/no question, Never = negative and any
+//   other frequency band = positive, consistent with the existing "any
+//   reported use counts" precedent; (c) "Total Score" accepted as an
+//   equivalent of "Points" so a scored AUDIT isn't read as unscored.
+//   Subtype/content relevance test widened from audit-c to audit.
+//   "Interpretation: Alcohol Education" is deliberately NOT interpreted —
+//   the score path already resolves it.
+//   (4) The no-vitals -> 99212 rule no longer applies to the F/U (follow
+//   up) visit type. F/U with no vitals now falls through to the normal
+//   established-visit evaluation, landing on 99213 by default or 99214 when
+//   the chronic-dx + day-gap rules are met. ESTPT, CON and LAB are
+//   unaffected, and the separate no-vitals gate that fades the PV/P-C/SM/OB
+//   quick-action buttons is untouched.
 // 1.79 (2026-09-02) - Advance Care Planning (99497/99498) registered in
 //   both al_cptRules and cl_cptRules as customICDCollector against
 //   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted
@@ -1139,6 +1185,13 @@ function __smartCoderReadVersion(fallback) {
         if (!insurance) return false;
         const name = insurance.trim();
         if (/metro\s*plus/i.test(name)) return false;
+        // "New York State Medicaid" (and the NY/NYS spellings of the same
+        // payer) is straight Medicaid under a different display name, so
+        // every Medicaid rule applies to it. Kept as an explicit anchored
+        // alternative rather than loosening the /^medicaid\b/ anchor below
+        // — that anchoring is a deliberate fix so an unrelated payer with
+        // "Medicaid" somewhere later in its name isn't caught.
+        if (/^\s*n(?:ew\s*)?y(?:ork)?\.?\s*(?:state\s*)?medicaid\b/i.test(name)) return true;
         return /^\s*medicaid\b/i.test(name);
     }
 
@@ -1387,9 +1440,29 @@ function __smartCoderReadVersion(fallback) {
         const parts = [];
         categories.forEach(cat => {
             const clone = cat.cloneNode(true);
+            // The .cattablink header carries the ONLY copy of the category
+            // label on the discrete single-category widgets (e.g. the
+            // "Drug/Alcohol:" AUDIT widget) — removing it outright left
+            // extractScreeningSections() with no anchor at all, so that
+            // whole category became invisible to evaluateAlcohol/
+            // evaluateTobacco. Instead of dropping it, its label text is
+            // pulled out first and re-emitted at the START of this
+            // category's own text, normalized to end with a colon. That
+            // keeps the original anti-glue fix intact (a colon-less header
+            // like "Social Determinants" can no longer attach itself to
+            // the END of the PREVIOUS category, because it now sits
+            // anchored at the front of its own) while restoring the label
+            // the section splitter needs.
+            let label = "";
+            const link = clone.querySelector('.cattablink');
+            if (link) {
+                label = (link.textContent || "").replace(/\s+/g, " ").trim();
+                if (label && !/:$/.test(label)) label += ":";
+            }
             clone.querySelectorAll('.leftPaneData, .cattablink').forEach(el => el.remove());
             const t = (clone.textContent || "").replace(/\s+/g, " ").trim();
-            if (t) parts.push(t);
+            const combined = [label, t].filter(Boolean).join(" ").trim();
+            if (combined) parts.push(combined);
         });
         return parts.join(" ");
     }
@@ -1469,7 +1542,7 @@ function __smartCoderReadVersion(fallback) {
     function evaluateAlcohol(sections) {
         const relevant = sections.filter(s =>
             /^Drugs?\/Alcohol$/.test(s.label) &&
-            (/alcohol|audit-?c/i.test(s.subtype) || /alcohol|drink/i.test(s.content))
+            (/alcohol|audit/i.test(s.subtype) || /alcohol|drink|audit/i.test(s.content))
         );
         if (!relevant.length) return null;
 
@@ -1485,6 +1558,20 @@ function __smartCoderReadVersion(fallback) {
         const drinkQuestion = combined.match(/drink[^:]*?:\s*(Yes|No)\b/i);
         if (drinkQuestion) return /no/i.test(drinkQuestion[1]);
 
+        // 1b) The AUDIT / AUDIT-C FREQUENCY form of the same intake
+        // question ("How often do you have a drink containing alcohol?
+        // Never"). eCW renders this one with no colon before the answer —
+        // the question ends in "?" and the answer follows in an <i> — so
+        // the colon-based matcher above never saw it and the whole screen
+        // fell through as undetected. Ranked with the yes/no question
+        // because it IS that question, just asked as a frequency: "Never"
+        // is a confirmed negative; any other frequency band (Monthly or
+        // less, 2-4 times a month, 2-3 times a week, 4 or more times a
+        // week) is reported use and therefore positive, consistent with
+        // the "any reported use counts" precedent in step 2 below.
+        const drinkFrequency = combined.match(/drink[^?:]{0,60}[?:]\s*(Never|Monthly or less|2\s*-\s*4 times a month|2\s*-\s*3 times a week|4 or more times a week)\b/i);
+        if (drinkFrequency) return /never/i.test(drinkFrequency[1]);
+
         // 2) No plain yes/no question on this note — go by the raw AUDIT-C/
         // Alcohol Screen "Points" value instead of eCW's own "Interpretation"
         // label. Confirmed against real examples: "Points: 1, Interpretation:
@@ -1492,7 +1579,11 @@ function __smartCoderReadVersion(fallback) {
         // use counts), while "Points: 0" — with or without an
         // "Interpretation" line at all — is negative. Take the highest
         // points value across every relevant section on the note.
-        const pointsMatches = [...combined.matchAll(/\bPoints?\s*:?\s*(\d+)/gi)];
+        // "Total Score" is the label the AUDIT (2018 Edition) widget uses
+        // for the exact same number that older Alcohol Screen/AUDIT-C
+        // widgets label "Points" — accepted here as an equivalent so a
+        // scored AUDIT isn't read as unscored.
+        const pointsMatches = [...combined.matchAll(/\b(?:Points?|Total\s+Score)\s*:?\s*(\d+)/gi)];
         if (pointsMatches.length) {
             const maxPoints = Math.max(...pointsMatches.map(m => Number(m[1])));
             return maxPoints === 0;
@@ -2764,6 +2855,42 @@ function __smartCoderReadVersion(fallback) {
         let computedOvCodeForBilling = null;
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
+
+        // Follow-up visit types, for the no-vitals carve-out in the
+        // established branch below. classifyVisitType() folds F/U in with
+        // ESTPT and CON into a single 'established' category, so the RAW
+        // appointment-caption visit type has to be tested separately here
+        // — only F/U is exempt, ESTPT is not.
+        function isFollowUpVisitTypeForOV(vt) {
+            const v = (vt || '').toLowerCase().trim();
+            return v === 'f/u' || v === 'fu' || v === 'follow up' || v === 'follow-up';
+        }
+
+        // ── Counseling code held against the office-visit level ─────────
+        // 99401 and 99406 can never be billed alongside 99214 (see the
+        // billing-exclusivity block further down), and 99214 pays more —
+        // but not so much more that it's worth losing a counseling code on
+        // an encounter where 99214 was ALREADY billed a few days ago. So
+        // the 99214 day gap widens from 7 to 14 days whenever a counseling
+        // code is genuinely in play for this encounter.
+        //
+        // "In play" means BOTH of:
+        //   1. the code is already ON the chart — the P/C and SM quick
+        //      actions are clicked before Start Action, so an applicable
+        //      counseling code is present by the time this runs. Nothing
+        //      is auto-added here; if the button wasn't clicked there is
+        //      no counseling code to protect and the gap stays at 7.
+        //   2. its quick-action gating is currently satisfied — an
+        //      ineligible one (30-day overlap, blocked payer, no chronic
+        //      dx, televisit, no vitals, non-smoker, under-age) is being
+        //      deleted elsewhere in this same run, so it must not widen
+        //      the gap on its way out.
+        // Only ONE counseling code is ever billed per encounter, so 99401
+        // is checked first and 99406 only if 99401 isn't the one.
+        const counselingHeldForOV =
+            (rawCPTCodesNow.includes('99401') && !gating.pc.disabled) ? '99401' :
+            (rawCPTCodesNow.includes('99406') && !gating.sm.disabled) ? '99406' :
+            null;
         if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
             let ovCode;
             let ovIsNewPatient = false;
@@ -2828,8 +2955,16 @@ function __smartCoderReadVersion(fallback) {
                     ovReason = isOnlyMedRefill
                         ? 'Televisit (CON), CC is med refill/renewal/review only — 99212'
                         : 'Televisit (CON) — 99213';
-                } else if (!isVitalsDocumented(text)) {
-                    // rule 6.ii
+                } else if (!isVitalsDocumented(text) && !isFollowUpVisitTypeForOV(visitType)) {
+                    // rule 6.ii — no vitals documented downgrades to 99212,
+                    // EXCEPT on a follow-up (F/U) visit type. On F/U this
+                    // rule no longer applies at all: the visit falls
+                    // through to the normal established-visit evaluation
+                    // below unchanged, so it lands on 99213 by default or
+                    // 99214 when the chronic-dx + day-gap rules are met.
+                    // ESTPT / CON / LAB behave exactly as before. (The
+                    // separate no-vitals gate that fades the PV/P-C/SM/OB
+                    // quick-action buttons is untouched.)
                     ovCode = '99212';
                     ovReason = 'No vitals documented — 99212';
                 } else {
@@ -2847,13 +2982,23 @@ function __smartCoderReadVersion(fallback) {
                     // the chart — regardless of how many other (non-chronic)
                     // diagnoses are also present, and no longer gated on a
                     // 4+ total dx count — qualifies for 99214, as long as
-                    // 99214 hasn't already been billed in the past 7 days.
-                    if (chronicCount >= 1 && !codeUsedInLastDays('99214', 7)) {
+                    // 99214 hasn't already been billed inside the day gap.
+                    //
+                    // The gap itself is now counseling-aware (revenue
+                    // balance, see counselingHeldForOV above): 7 days when
+                    // no counseling code is in play, 14 days when one is.
+                    // Stretching it to 14 is what makes the encounter fall
+                    // to 99213 and so KEEP the counseling code, instead of
+                    // taking 99214 and losing it to the exclusivity rule.
+                    const ovGapDays = counselingHeldForOV ? 14 : 7;
+                    if (chronicCount >= 1 && !codeUsedInLastDays('99214', ovGapDays)) {
                         ovCode = '99214';
-                        ovReason = `${chronicCount} chronic dx present — 99214 (not used in last 7 days)`;
+                        ovReason = `${chronicCount} chronic dx present — 99214 (not used in last ${ovGapDays} days)`;
                     } else {
                         ovCode = '99213'; // rule 6.iv: default
-                        ovReason = 'Established visit — 99213 (default)';
+                        ovReason = (chronicCount >= 1 && counselingHeldForOV)
+                            ? `99214 billed within the last 14 days and ${counselingHeldForOV} applies this encounter — 99213 + ${counselingHeldForOV}`
+                            : 'Established visit — 99213 (default)';
                     }
                 }
             }
