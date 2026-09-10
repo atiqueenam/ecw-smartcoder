@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.30
+// @name         Hasnayen Medical SmartCoder v1.31
 // @namespace    http://tampermonkey.net/
-// @version      1.30
+// @version      1.31
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,25 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.31 (2026-09-10) - Two fixes:
+//   (1) isMedicaidInsurance()/isMedicaidOrMedicareIns() only ever matched
+//   a payer name that literally BEGAN with "Medicaid" — real plans named
+//   "New York State Medicaid"/"NY State Medicaid"/"NYS Medicaid" never
+//   matched despite the code's own comment claiming otherwise, so every
+//   Medicaid-specific rule using those two functions (G0444/G0442
+//   removal, the 99401/annual-G-code payer exclusion, Obesity Counseling
+//   gating) silently treated New York State Medicaid as a non-Medicaid
+//   commercial payer. Added STATE_MEDICAID_RE to also match those state-
+//   Medicaid naming conventions. (Other Medicaid checks that already
+//   used a plain .includes('MEDICAID') substring test were unaffected
+//   and already worked correctly for this plan name.)
+//   (2) evaluateAlcohol() ported Bronx's AUDIT (2018 Edition) fix: that
+//   widget's frequency-form intake question ("How often do you have a
+//   drink containing alcohol? Never"), its "Total Score" label (instead
+//   of "Points"), and its "audit"-only subtype/content wording were all
+//   previously unrecognized, so a fully documented, negative AUDIT
+//   screen (Total Score 0) was read as no alcohol screening at all —
+//   meaning G9622 and the annual G0442 never got suggested for it.
 // 1.30 (2026-09-02) - Advance Care Planning (99497/99498) registered in
 //   both al_cptRules and cl_cptRules as customICDCollector against
 //   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted,
@@ -1080,13 +1099,21 @@ function __smartCoderReadVersion(fallback) {
         return /^S\d{2}/i.test(code || "");
     }
 
+    // BUG FIX (2026-09-10): this only matched a payer name that literally
+    // BEGAN with "Medicaid" — so a real plan like "New York State
+    // Medicaid" (or "NY State Medicaid"/"NYS Medicaid") never matched and
+    // was silently treated as a non-Medicaid commercial payer. Now also
+    // matches those state-Medicaid naming conventions, in addition to the
+    // plain "Medicaid"/"Medicare" start. Still deliberately NOT a bare
+    // /medicaid/i (see isMedicaidInsurance below for why).
+    const STATE_MEDICAID_RE = /^\s*(?:(?:new\s*york|ny)\s+state|nys)\s+medicaid\b/i;
     function isMedicaidOrMedicareIns(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
         // MetroPlus is its own distinct payer (G0444/G0442 ARE billable for
         // it) even though it's administratively Medicaid — never exclude it.
         if (/metro\s*plus/i.test(name)) return false;
-        return /^\s*medicaid\b/i.test(name) || /^\s*medicare\b/i.test(name);
+        return /^\s*medicaid\b/i.test(name) || STATE_MEDICAID_RE.test(name) || /^\s*medicare\b/i.test(name);
     }
 
     function isUHCInsurance(insurance) {
@@ -1157,11 +1184,25 @@ function __smartCoderReadVersion(fallback) {
     // same anchored pattern as isMedicaidOrMedicareIns() above, including
     // the MetroPlus carve-out (MetroPlus is administratively Medicaid but
     // G0444/G0442/99401 ARE billable for it, so it must never match here).
+    //
+    // BUG FIX (2026-09-10): the comment above always claimed this covered
+    // "New York State Medicaid", but the anchor only matched a name that
+    // literally started with the word "Medicaid" — "New York State
+    // Medicaid" starts with "New York", not "Medicaid", so it never
+    // actually matched and every Medicaid-specific rule in this file
+    // (G0444/G0442 removal, the 99401/annual-G-code payer exclusion list,
+    // the Medicaid CPT-count check, the telehealth POS rule, Obesity
+    // Counseling gating) silently treated real New York State Medicaid
+    // charts as a non-Medicaid commercial payer. Now also matches the
+    // "New York State Medicaid"/"NY State Medicaid"/"NYS Medicaid" naming
+    // conventions via STATE_MEDICAID_RE (declared above, shared with
+    // isMedicaidOrMedicareIns), while still rejecting an unrelated payer
+    // that merely contains the word "Medicaid" somewhere in its name.
     function isMedicaidInsurance(insurance) {
         if (!insurance) return false;
         const name = insurance.trim();
         if (/metro\s*plus/i.test(name)) return false;
-        return /^\s*medicaid\b/i.test(name);
+        return /^\s*medicaid\b/i.test(name) || STATE_MEDICAID_RE.test(name);
     }
 
     // Eligible unless the payer is on Hasnayen's rule-2 exclusion list.
@@ -1497,10 +1538,37 @@ function __smartCoderReadVersion(fallback) {
     // related (not the immediate result code G9622/3016F, nor the annual
     // G0442 code) ever got suggested, regardless of insurance, visit type,
     // or billing history — those gates never even got a chance to run.
+    // BUG FIX (2026-09-10): the AUDIT (2018 Edition) widget — a distinct,
+    // full 10-question AUDIT form seen on this client's charts, not the
+    // shorter AUDIT-C — was going completely undetected as alcohol
+    // screening, for three separate reasons all fixed below (ported from
+    // Bronx's identical fix):
+    //   (a) subtype/content relevance test below only recognized
+    //       "audit-c" wording, not the bare "audit" this widget's own
+    //       label uses, so a chart titled just "AUDIT (2018 Edition)"
+    //       never even entered the `relevant` set and was skipped
+    //       entirely — evaluateAlcohol returned null as if no alcohol
+    //       screening existed on the note at all.
+    //   (b) this widget asks the intake question as a FREQUENCY
+    //       ("How often do you have a drink containing alcohol? Never")
+    //       rather than the plain Yes/No form other widgets use, and
+    //       answers with no colon before the answer (question ends in
+    //       "?", answer follows directly) — the old drinkQuestion regex
+    //       required a literal Yes/No token and never matched "Never".
+    //   (c) this widget labels its numeric score "Total Score" instead
+    //       of "Points", so the old Points-only regex never found it,
+    //       and its own Interpretation tier ("Alcohol Education") is
+    //       neither "Negative"/"Positive" nor one of the
+    //       None/Low/Minimal/... risk-tier words the old fallback
+    //       recognized — so even the Interpretation fallback missed it.
+    // Net effect before this fix: a documented, scored AUDIT (Total
+    // Score 0, i.e. a confirmed negative screen) was read as "no answer
+    // at all", so neither the immediate result code (G9622) nor the
+    // annual G0442 screening code was ever suggested for it.
     function evaluateAlcohol(sections) {
         const relevant = sections.filter(s =>
             /^(Drugs?\/Alcohol|Alcohol)$/.test(s.label) &&
-            (/alcohol|audit-?c/i.test(s.subtype) || /alcohol|drink/i.test(s.content))
+            (/alcohol|audit/i.test(s.subtype) || /alcohol|drink|audit/i.test(s.content))
         );
         if (!relevant.length) return null;
 
@@ -1508,29 +1576,49 @@ function __smartCoderReadVersion(fallback) {
 
         // 1) The plain intake question ("Did you have a drink containing
         // alcohol in the past year?: Yes/No") wins over everything else
-        // whenever it's present — verified against real Bronx charts where
-        // an AUDIT-C's own "Interpretation: Negative"/scored Points still
-        // got overridden by an explicit "No" elsewhere in the same intake,
-        // and conversely an explicit "Yes" was always treated as positive
-        // even when paired with a technically-low AUDIT-C score.
+        // whenever it's present — verified against real charts where an
+        // AUDIT-C's own "Interpretation: Negative"/scored Points still got
+        // overridden by an explicit "No" elsewhere in the same intake, and
+        // conversely an explicit "Yes" was always treated as positive even
+        // when paired with a technically-low AUDIT-C score.
         // v1.2: this client's widget answers right after the "?", not a colon.
         const drinkQuestion = combined.match(/drink[^:?]*?[:?]\s*(Yes|No)\b/i);
         if (drinkQuestion) return /no/i.test(drinkQuestion[1]);
 
-        // 2) No plain yes/no question on this note — go by the raw AUDIT-C/
-        // Alcohol Screen "Points" value instead of eCW's own "Interpretation"
-        // label. Confirmed against real examples: "Points: 1, Interpretation:
-        // Negative" is treated as a POSITIVE alcohol screen (any reported
-        // use counts), while "Points: 0" — with or without an
-        // "Interpretation" line at all — is negative. Take the highest
-        // points value across every relevant section on the note.
-        const pointsMatches = [...combined.matchAll(/\bPoints?\s*:?\s*(\d+)/gi)];
+        // 1b) The AUDIT / AUDIT-C FREQUENCY form of the same intake
+        // question ("How often do you have a drink containing alcohol?
+        // Never"). "Never" is a confirmed negative; any other frequency
+        // band (Monthly or less, 2-4 times a month, 2-3 times a week, 4 or
+        // more times a week) is reported use and therefore positive,
+        // consistent with the "any reported use counts" precedent in
+        // step 2 below.
+        const drinkFrequency = combined.match(/drink[^?:]{0,60}[?:]\s*(Never|Monthly or less|2\s*-\s*4 times a month|2\s*-\s*3 times a week|4 or more times a week)\b/i);
+        if (drinkFrequency) return /never/i.test(drinkFrequency[1]);
+
+        // 2) No plain yes/no or frequency question on this note — go by
+        // the raw AUDIT-C/Alcohol Screen "Points" value instead of eCW's
+        // own "Interpretation" label. Confirmed against real examples:
+        // "Points: 1, Interpretation: Negative" is treated as a POSITIVE
+        // alcohol screen (any reported use counts), while "Points: 0" —
+        // with or without an "Interpretation" line at all — is negative.
+        // Take the highest points value across every relevant section on
+        // the note. "Total Score" is the label the AUDIT (2018 Edition)
+        // widget uses for the exact same number that older Alcohol
+        // Screen/AUDIT-C widgets label "Points" — accepted here as an
+        // equivalent so a scored AUDIT isn't read as unscored.
+        const pointsMatches = [...combined.matchAll(/\b(?:Points?|Total\s+Score)\s*:?\s*(\d+)/gi)];
         if (pointsMatches.length) {
             const maxPoints = Math.max(...pointsMatches.map(m => Number(m[1])));
             return maxPoints === 0;
         }
 
-        // 3) No Points field at all — fall back to eCW's own Interpretation.
+        // 3) No Points/Total Score field at all — fall back to eCW's own
+        // Interpretation. "Interpretation: Alcohol Education" (the AUDIT
+        // (2018 Edition) widget's own risk-tier label at a Total Score of
+        // 0) is deliberately NOT matched here — it isn't a Negative/
+        // Positive label or a None/Low/Minimal/... risk word, and by the
+        // time this fallback runs, a genuine "Total Score 0" note has
+        // already returned true at step 2 above anyway.
         const interp = combined.match(/Interpretation\s*:?\s+(Negative|Positive)\b/i);
         if (interp) return /negative/i.test(interp[1]);
 
