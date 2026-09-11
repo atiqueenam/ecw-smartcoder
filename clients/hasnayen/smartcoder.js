@@ -2703,7 +2703,7 @@ function __smartCoderReadVersion(fallback) {
         // they're left out of `desired` and the MANAGED_CODES diff below
         // flags them for removal. 3048F/3049F/3050F are all LDL-management
         // F-codes — each maintains the exact same hyperlipidemia-based rule.
-        const hasDiabetesICDForFCodes = getICDRows().some(e => /^E(0[89]|1[013])\b/i.test(e.code));
+        const hasDiabetesICDForFCodes = getICDRows().some(e => /^(E(0[89]|1[013])|R73\.03)\b/i.test(e.code));
         const hasHyperlipidemiaICDForFCodes = getICDRows().some(e => /^E78\b/i.test(e.code));
         ['3044F', '3051F'].forEach(code => {
             if (hasDiabetesICDForFCodes && rawCPTCodesNow.includes(code)) {
