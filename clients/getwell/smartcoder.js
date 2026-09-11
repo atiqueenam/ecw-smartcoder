@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.86
+// @name         Getwell SmartCoder by ATQ v5.87
 // @namespace    http://tampermonkey.net/
-// @version      5.86
+// @version      5.87
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.87 (2026-09-11) - Fixed OFFICE_VISIT_EM_CODES missing 99201/99202/99204/
+//   99205: adding 99203 for a new patient left a pre-existing 99204 (or other
+//   new-patient level) on the chart instead of deleting it, since the list only
+//   recognized 99203 among new-patient codes. Now includes the full 99201-99205
+//   range so any other office-visit code present gets flagged for removal
+//   whenever the correct one is suggested/corrected.
+//
 // 5.86 (2026-09-02) - Advance Care Planning (99497/99498) registered in
 //   both al_cptRules and cl_cptRules as customICDCollector against
 //   CHRONIC_DISEASE_ICD_CODES, fallback office-visit. Previously unlisted
@@ -4001,7 +4008,7 @@ function __smartCoderReadVersion(fallback) {
     }
 
     // ====================== OFFICE VISIT E&M (visit-type driven) ======================
-    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99203'];
+    const OFFICE_VISIT_EM_CODES = ['99211', '99212', '99213', '99214', '99215', '99201', '99202', '99203', '99204', '99205'];
 
     // Chronic disease ICD list used for the 99213-vs-99214 complexity check.
     const CHRONIC_DISEASE_ICD_CODES = new Set([
