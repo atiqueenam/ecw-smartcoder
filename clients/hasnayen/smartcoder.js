@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.31
+// @name         Hasnayen Medical SmartCoder v1.32
 // @namespace    http://tampermonkey.net/
-// @version      1.31
+// @version      1.32
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,17 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.32 (2026-09-10) - Depression ("Dep" flag / G8510 vs G8431) "Total
+//   Score" check was scanning the ENTIRE encounter note with no section
+//   boundary, so a "Total Score" belonging to any OTHER screening on the
+//   same note — most notably the AUDIT (2018 Edition) alcohol screening,
+//   which uses this exact same label — could get mixed into the
+//   depression score check. A PHQ-9 genuinely scored 0 could still be
+//   read as "depression screening positive" if the alcohol AUDIT on the
+//   same note had a nonzero Total Score. Added
+//   getDepressionScreeningSectionText()/findDepressionScreeningCategoryDiv()
+//   to scope the score read to just the Depression Screening/PHQ-9
+//   category itself (DOM-scoped, with a text-bounded fallback).
 // 1.31 (2026-09-10) - Two fixes:
 //   (1) isMedicaidInsurance()/isMedicaidOrMedicareIns() only ever matched
 //   a payer name that literally BEGAN with "Medicaid" — real plans named
@@ -992,8 +1003,51 @@ function __smartCoderReadVersion(fallback) {
         return null;
     }
 
+    // Finds the Depression Screening (PHQ-9/PHQ-2) category div the same
+    // way, so its "Total Score" can be read in isolation — see
+    // getDepressionScreeningSectionText() below for why this matters.
+    function findDepressionScreeningCategoryDiv() {
+        const candidates = document.querySelectorAll('div[id^="readOnlyCategory_"]');
+        for (const div of candidates) {
+            const heading = div.querySelector('.cattablink');
+            const headingText = (heading ? heading.textContent : "") || "";
+            if (/Depression Screening/i.test(headingText)) return div;
+            // Some charts render the widget with only the hpilink's own
+            // "PHQ-9"/"PHQ-2" label and no separate "Depression Screening"
+            // cattablink heading at all.
+            if (div.querySelector('[label^="PHQ"]')) return div;
+        }
+        return null;
+    }
+
+    // BUG FIX (2026-09-10): extractClinicalFlags() used to scan the
+    // ENTIRE encounter note for "Total Score \d+" with no section
+    // boundary at all, so a "Total Score" belonging to ANY OTHER
+    // screening on the same note — most notably the AUDIT (2018 Edition)
+    // alcohol screening, which uses this exact same "Total Score" label —
+    // got swept into the depression score check. A PHQ-9 genuinely
+    // scored 0 could still come back reporting "depression screening
+    // positive," because depScores.every(s => s === 0) saw the PHQ-9's
+    // own 0 mixed together with an unrelated, nonzero alcohol AUDIT
+    // score from elsewhere on the page. This scopes the score read to
+    // just the Depression Screening category's own DOM node, falling
+    // back to a text-bounded scan (stopping at the next known category
+    // label) only if the live DOM node can't be found.
+    function getDepressionScreeningSectionText(fallbackText) {
+        const domDiv = findDepressionScreeningCategoryDiv();
+        if (domDiv) return domDiv.textContent || "";
+
+        const text = fallbackText || "";
+        const idx = text.search(/Depression Screening|PHQ-?\d/i);
+        if (idx === -1) return "";
+        const rest = text.slice(idx);
+        const m = rest.match(/^[\s\S]*?(?=\b(?:Tobacco Use|Drugs?\/Alcohol|Alcohol|Tobacco|Social Determinants|Misc|Sexual Hx|Health Promotion and Disease Prevention|Tobacco Control \(Standard\)|PRAPARE|AUDIT)\b|$)/i);
+        return m ? m[0] : rest;
+    }
+
     // Reads via .textContent (not innerText) so it works even if this
     // section is hidden behind the billing tab.
+
     function getHealthPromotionSectionText(text) {
         const domDiv = findHealthPromotionCategoryDiv();
         if (domDiv) return domDiv.textContent || "";
@@ -1694,8 +1748,9 @@ function __smartCoderReadVersion(fallback) {
     function extractClinicalFlags(text) {
         const hpiText = text;
 
-        const depPresent = /Depression Screening|PHQ-?\d/i.test(hpiText);
-        const depScoreMatches = [...hpiText.matchAll(/Total\s+Score\s+(\d+)/gi)];
+        const depressionText = getDepressionScreeningSectionText(hpiText);
+        const depPresent = /Depression Screening|PHQ-?\d/i.test(depressionText || hpiText);
+        const depScoreMatches = [...(depressionText || "").matchAll(/Total\s+Score\s+(\d+)/gi)];
         const depScores = depScoreMatches.map(m => Number(m[1]));
         const hasDep = depPresent ? (depScores.length ? depScores.every(s => s === 0) : null) : null;
 
