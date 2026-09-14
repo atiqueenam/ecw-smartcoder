@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-11T06:08:32.527Z",
+  "generatedAt": "2026-09-14T04:51:46.794Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.80",
+      "version": "1.82",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "a1af2911b7f8e85edcb9d8d91bcc4160c8302a48c77eb0feb3f1553abf95e9f6"
+      "sha256": "2a0bb65e6f925b258d3eb032852b5a8a330b8e08f4d1630b64038a881c9b3561"
     },
     {
       "id": "getwell",
