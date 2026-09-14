@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.80
+// @name         Bronx Health SmartCoder v1.82
 // @namespace    http://tampermonkey.net/
-// @version      1.80
+// @version      1.82
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,16 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.82 (2026-09-14) - FOBT visit type now classified the same as LAB:
+//   classifyVisitType() recognizes "fobt" and maps it to the 'lab'
+//   category, so FOBT/LAB visits always land on 99212 — added if no
+//   office-visit code is present, and any other office-visit code already
+//   on the chart is deleted and replaced with 99212 (existing generic
+//   office-visit add/replace logic, unchanged).
+// 1.81 (2026-09-14) - 95250/95251 (CGM placement/interpretation) ICD-linking
+//   rule changed from exact "E11.9" match to a "startsWith" prefix match on
+//   "E11", in both the al_ and cl_ linking modules, so any E11.xx diabetes
+//   code found on the chart links these CPTs, not just E11.9 specifically.
 // 1.80 (2026-09-04) - Four Bronx-only rule changes:
 //   (1) 99214 day gap is now counseling-aware. Unchanged at 7 days when no
 //   counseling code is in play. When one IS in play the gap widens to 14
@@ -3642,14 +3652,14 @@ function __smartCoderReadVersion(fallback) {
     // client: NP -> new patient, ESTPT/F-U -> established (follow up),
     // CON -> televisit (established category, but isTelevisitNote in
     // computeAnalysis is what actually flags it as a televisit — see
-    // there, no longer based on CPT 98012), LAB -> lab (always 99212, see
-    // rule sheet item 8). Anything else gets no E&M recommendation.
+    // there, no longer based on CPT 98012), LAB/FOBT -> lab (always 99212,
+    // see rule sheet item 8). Anything else gets no E&M recommendation.
     function classifyVisitType(visitType) {
         const v = (visitType || '').toLowerCase().trim();
         if (v === 'np') return 'new';
         if (v === 'estpt' || v === 'f/u' || v === 'fu' || v === 'follow up' || v === 'follow-up') return 'established';
         if (v === 'con' || v === 'televisit') return 'established';
-        if (v === 'lab') return 'lab';
+        if (v === 'lab' || v === 'fobt') return 'lab';
         return null;
     }
 
@@ -3950,9 +3960,9 @@ function __smartCoderReadVersion(fallback) {
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "al_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "al_officeVisit" },
             // 95250/95251 (CGM placement/interpretation) follow the same
-            // rule — both link to the diabetic ICD (E11.9).
-            "95250": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
-            "95251": { type: "exact", icds: ["E11.9"], fallback: "al_officeVisit" },
+            // rule — link to any E11.xx diabetic ICD (prefix match, not just E11.9).
+            "95250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            "95251": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "al_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "al_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "al_officeVisit" },
@@ -5114,9 +5124,9 @@ function __smartCoderReadVersion(fallback) {
             "87110": { type: "exact", icds: ["Z11.8"], fallback: "cl_officeVisit" },
             "82950": { type: "exact", icds: ["Z13.1"], fallback: "cl_officeVisit" },
             // 95250/95251 (CGM placement/interpretation) follow the same
-            // rule — both link to the diabetic ICD (E11.9).
-            "95250": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
-            "95251": { type: "exact", icds: ["E11.9"], fallback: "cl_officeVisit" },
+            // rule — link to any E11.xx diabetic ICD (prefix match, not just E11.9).
+            "95250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "95251": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "95249": { type: "exact", icds: ["Z46.89"], fallback: "cl_officeVisit" },
             "3014F": { type: "exact", icds: ["Z71.2", "Z12.31"], fallback: "cl_officeVisit" },
             "3015F": { type: "exact", icds: ["Z12.4","Z71.2"], fallback: "cl_officeVisit" },
