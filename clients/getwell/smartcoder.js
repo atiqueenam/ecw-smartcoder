@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.87
+// @name         Getwell SmartCoder by ATQ v5.88
 // @namespace    http://tampermonkey.net/
-// @version      5.87
+// @version      5.88
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,21 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.88 (2026-09-15) - Fixed office-visit-vs-preventive mutual exclusivity:
+//   when the encounter's visit type resolved to a real office visit (e.g.
+//   "NP" -> 99203) and a preventive E&M code (99385, G0438, etc.) was
+//   already sitting on the chart, adding/confirming the office-visit code
+//   never removed the stale preventive CPT — only OTHER office-visit codes
+//   were cleaned up, and the linked preventive-bundle ICDs (Z00.01, Z71.3,
+//   Z71.82/89) were evaluated against a separate, earlier hasPreventiveVisit
+//   flag. Net effect: adding 99203 left 99385 in place, and only after
+//   manually deleting 99385 and re-running did the ICD-bundle cleanup show
+//   up — a two-step, order-dependent fix instead of one. Now
+//   visitType/visitCategory are computed once up front, a single
+//   isRealOfficeVisit flag drives both the new preventive-CPT deletion
+//   (added right alongside the existing office-visit-code cleanup) and the
+//   ICD-bundle decision (hasPreventiveVisitForBundle), so a single Start
+//   Action removes the old preventive CPT and its linked ICDs together.
 // 5.87 (2026-09-11) - Fixed OFFICE_VISIT_EM_CODES missing 99201/99202/99204/
 //   99205: adding 99203 for a new patient left a pre-existing 99204 (or other
 //   new-patient level) on the chart instead of deleting it, since the list only
@@ -2643,6 +2658,15 @@ function __smartCoderReadVersion(fallback) {
         // Preventive or Counseling code can survive a televisit either.
         const gating = computeQuickActionGating(insurance, flags, text);
 
+        // Hoisted from further down (was computed right before the
+        // office-visit block) so it's available up here too — needed for
+        // the office-visit/preventive mutual-exclusivity fix below. Both
+        // functions are pure DOM/string readers with no dependency on
+        // anything else computed in this function, so moving the read up
+        // is safe.
+        const visitType = getVisitType();
+        const visitCategory = classifyVisitType(visitType);
+
         // BUG FIX (2026-08-18): this set was missing G0402 (the Medicare
         // "Welcome to Medicare" / Initial Preventive Physical Exam code) —
         // it only had G0438/G0439 from the Medicare AWV family. A chart
@@ -2664,6 +2688,39 @@ function __smartCoderReadVersion(fallback) {
         // longer counts for downstream bundle logic; the code itself is
         // deleted below, right alongside its linked ICDs.
         const hasPreventiveVisit = hasPreventiveVisitRaw && !gating.pv.disabled;
+
+        // BUG FIX (2026-09-15): a plain office-visit E&M code (e.g. 99203)
+        // and a preventive-visit E&M code (e.g. 99385) are mutually
+        // exclusive — eCW/payers don't allow billing both for the same
+        // encounter. Previously, when this was a real office-visit
+        // encounter (per the appointment's visit-type, e.g. "NP"), the
+        // code only cleaned up OTHER office-visit codes (99201-99205/
+        // 99211-99215) and left any already-present preventive CPT (like
+        // 99385) untouched — so adding/confirming 99203 never removed the
+        // stale 99385, and the two sat on the chart together. Meanwhile
+        // the linked preventive-bundle ICDs (Z00.01, Z71.3, Z71.82/89)
+        // WERE being flagged via hasPreventiveVisit below, so the user saw
+        // a half-finished, order-dependent cleanup: deleting 99385 by hand
+        // and re-running would suddenly show the ICD-bundle deletions
+        // (correct on their own, but arriving a click late) while the
+        // actual redundant CPT swap never happened automatically. This
+        // flag captures "this encounter should carry a plain office-visit
+        // code, not a preventive one" up front, computed the same way the
+        // office-visit block already decides that below (a recognized
+        // visit-type category, unless commercial/NYCE-PPO insurance blocks
+        // the office code in favor of an existing Preventive) — see the
+        // isRealOfficeVisit note further down for the actual CPT deletion.
+        const isCommercialInsForOV = isGetwellCommercialInsurance(insurance);
+        const isNycePPOForOV = isNycePPOIns(insurance);
+        const blockOfficeVisitForCommercialPreventive = (isCommercialInsForOV || isNycePPOForOV) && hasPreventiveVisit;
+        const isRealOfficeVisit = !!visitCategory && !blockOfficeVisitForCommercialPreventive;
+        // Preventive-linked bundle ICDs (Z00.01/Z00.121, Z71.3/Z71.82/89)
+        // should follow this same office-visit-wins decision, not just the
+        // raw "is a preventive code sitting on the chart" check — otherwise
+        // they'd stay tied to a preventive CPT that's about to be deleted
+        // by the office-visit rule below, producing exactly the
+        // one-cleanup-lags-a-click-behind symptom described above.
+        const hasPreventiveVisitForBundle = hasPreventiveVisit && !isRealOfficeVisit;
 
         // ---- Quick-action gating cleanup ----
         // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
@@ -3369,7 +3426,7 @@ function __smartCoderReadVersion(fallback) {
         // NOTE: unlike the Preventive bundle, BMI (below) is intentionally
         // NOT included in this delete-when-unused treatment for Getwell —
         // see the BMI note right below. ----
-        if (!hasPreventiveVisit) {
+        if (!hasPreventiveVisitForBundle) {
             const preventiveBundleEntries = getICDRows().filter(e =>
                 e.code.toUpperCase() === 'Z00.01' || e.code.toUpperCase() === 'Z00.121');
             preventiveBundleEntries.forEach(e => {
@@ -3443,7 +3500,7 @@ function __smartCoderReadVersion(fallback) {
         // clearOtherQuickActionBundles() comment above) — they only belong
         // on the chart when one of those two is actually being billed.
         const has99401ForZ71 = rawCPTCodesNow.includes('99401') && !gating.pc.disabled;
-        const z71BundleNeeded = hasPreventiveVisit || has99401ForZ71;
+        const z71BundleNeeded = hasPreventiveVisitForBundle || has99401ForZ71;
         if (!z71BundleNeeded) {
             const z71BundleEntries = getICDRows().filter(e =>
                 ['Z71.3', 'Z71.82', 'Z71.89'].includes(e.code.toUpperCase()));
@@ -3499,8 +3556,9 @@ function __smartCoderReadVersion(fallback) {
         // from the ICD list. Shown at the TOP of Proposed Changes (unshift,
         // not push) — added if missing, and any OTHER office-visit code
         // already on the chart gets flagged for removal if it's not right.
-        const visitType = getVisitType();
-        const visitCategory = classifyVisitType(visitType);
+        // visitType/visitCategory are now computed earlier in this function
+        // (see the BUG FIX 2026-09-15 note above) so the mutual-exclusivity
+        // logic there can use them too — not redeclared here.
         // ---- Commercial-insurance + Preventive: no office visit code ----
         // Per Getwell rule: Aetna, Cigna, BCBS/Blue Cross Blue Shield,
         // Empire (starting word), United Healthcare, UMR, Oxford (starting
@@ -3513,9 +3571,8 @@ function __smartCoderReadVersion(fallback) {
         // NYCE PPO gets the exact same treatment — its own payer, not
         // classed as "commercial" above, but no office-visit code is
         // billable alongside a Preventive visit for this payer either.
-        const isCommercialInsForOV = isGetwellCommercialInsurance(insurance);
-        const isNycePPOForOV = isNycePPOIns(insurance);
-        const blockOfficeVisitForCommercialPreventive = (isCommercialInsForOV || isNycePPOForOV) && hasPreventiveVisit;
+        // isCommercialInsForOV/isNycePPOForOV/blockOfficeVisitForCommercialPreventive
+        // are also now computed earlier (same BUG FIX note) — reused as-is.
         if (blockOfficeVisitForCommercialPreventive) {
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
@@ -3545,6 +3602,17 @@ function __smartCoderReadVersion(fallback) {
                 currentRows.forEach(r => {
                     if (OFFICE_VISIT_EM_CODES.includes(r.code) && r.code !== ovCode) {
                         toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Wrong office-visit code for this visit type (should be ${ovCode})` });
+                    }
+                });
+                // BUG FIX (2026-09-15): this is a real office-visit
+                // encounter (see isRealOfficeVisit above) — any preventive
+                // E&M code already on the chart (99385, G0438, etc.) is
+                // mutually exclusive with the office-visit code and must
+                // be removed in this same pass, not left for a second
+                // Start Action after the ICD bundle cleanup already ran.
+                currentRows.forEach(r => {
+                    if (PREVENTIVE_VISIT_CODES.has(r.code) && !toDelete.some(d => d.code === r.code)) {
+                        toDelete.unshift({ code: r.code, row: r.row, kind: 'cpt', reason: `Office visit (${visitType}) — preventive E&M not billed together with an office visit, removed` });
                     }
                 });
             }
