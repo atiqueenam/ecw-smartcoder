@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.83
+// @name         Bronx Health SmartCoder v1.84
 // @namespace    http://tampermonkey.net/
-// @version      1.83
+// @version      1.84
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.84 (2026-09-16) - Fixed pediatric BMI-for-age G-code mapping: Z68.53
+//   (85th-<95th percentile) was wrongly mapped to G8420 (same as the
+//   5th-<85th band) in both the PEDIATRIC_BMI_Z_TO_GCODE table and the
+//   Coding Snapshot's percentile->G-code calculation; now correctly maps
+//   to G8417 (same as Z68.54/95th+). Obesity-counseling eligibility gate
+//   (95th percentile and up only) was already correct and unchanged.
 // 1.83 (2026-09-16) - Added exact-duplicate CPT/ICD detection to the
 //   Analyze/Start Action pipeline (computeAnalysis's toDelete build): a
 //   code appearing 2+ times on the grid (e.g. the same office-visit code
@@ -2327,7 +2333,7 @@ function __smartCoderReadVersion(fallback) {
         // Under 18: BMI-for-age percentile, not raw BMI. Preferred source
         // is a documented "BMI %:" percentile in the note; if that's not
         // there, falls back to an already-present Z68.51-Z68.54 ICD code. ----
-        const PEDIATRIC_BMI_Z_TO_GCODE = { 'Z68.51': 'G8418', 'Z68.52': 'G8420', 'Z68.53': 'G8420', 'Z68.54': 'G8417' };
+        const PEDIATRIC_BMI_Z_TO_GCODE = { 'Z68.51': 'G8418', 'Z68.52': 'G8420', 'Z68.53': 'G8417', 'Z68.54': 'G8417' };
         function pediatricZ68FromPercentile(pct) {
             if (pct == null || isNaN(pct)) return null;
             if (pct < 5) return 'Z68.51';
@@ -6384,7 +6390,7 @@ function __smartCoderReadVersion(fallback) {
         let bmiCode = "";
         if (isPediatric && bmiPercentile) {
             const pctNum = parseFloat(bmiPercentile);
-            const gCode = pctNum < 5 ? "G8418" : (pctNum < 95 ? "G8420" : "G8417");
+            const gCode = pctNum < 5 ? "G8418" : (pctNum < 85 ? "G8420" : "G8417");
             bmiCode = `3008F, ${gCode}`;
         } else if (bmi && !isPediatric) {
             const bmiNum = parseFloat(bmi);

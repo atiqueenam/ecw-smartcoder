@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.87
+// @name         Getwell SmartCoder by ATQ v5.88
 // @namespace    http://tampermonkey.net/
-// @version      5.87
+// @version      5.88
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,12 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.88 (2026-09-16) - Fixed pediatric BMI-for-age G-code mapping: Z68.53
+//   (85th-<95th percentile) was wrongly mapped to G8420 (same as the
+//   5th-<85th band) in both the PEDIATRIC_BMI_Z_TO_GCODE table and the
+//   Coding Snapshot's percentile->G-code calculation; now correctly maps
+//   to G8417 (same as Z68.54/95th+). Obesity-counseling eligibility gate
+//   (95th percentile and up only) was already correct and unchanged.
 // 5.87 (2026-09-11) - Fixed OFFICE_VISIT_EM_CODES missing 99201/99202/99204/
 //   99205: adding 99203 for a new patient left a pre-existing 99204 (or other
 //   new-patient level) on the chart instead of deleting it, since the list only
@@ -2795,7 +2801,7 @@ function __smartCoderReadVersion(fallback) {
         const PEDIATRIC_BMI_Z_TO_GCODE = {
             'Z68.51': 'G8418',
             'Z68.52': 'G8420',
-            'Z68.53': 'G8420',
+            'Z68.53': 'G8417',
             'Z68.54': 'G8417'
         };
         function pediatricZ68FromPercentile(pct) {
@@ -6766,7 +6772,7 @@ function __smartCoderReadVersion(fallback) {
         let bmiCode = "";
         if (isPediatric && bmiPercentile) {
             const pctNum = parseFloat(bmiPercentile);
-            const gCode = pctNum < 5 ? "G8418" : (pctNum < 95 ? "G8420" : "G8417");
+            const gCode = pctNum < 5 ? "G8418" : (pctNum < 85 ? "G8420" : "G8417");
             bmiCode = `3008F, ${gCode}`;
         } else if (bmi && !isPediatric) {
             const bmiNum = parseFloat(bmi);
