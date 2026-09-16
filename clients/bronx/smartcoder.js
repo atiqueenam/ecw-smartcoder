@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.82
+// @name         Bronx Health SmartCoder v1.83
 // @namespace    http://tampermonkey.net/
-// @version      1.82
+// @version      1.83
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.83 (2026-09-16) - Added exact-duplicate CPT/ICD detection to the
+//   Analyze/Start Action pipeline (computeAnalysis's toDelete build): a
+//   code appearing 2+ times on the grid (e.g. the same office-visit code
+//   added twice) now queues every earlier occurrence for deletion,
+//   keeping only the last row, so Start Action reports and removes the
+//   duplicate instead of leaving both on the chart. CPT matching is
+//   exact-code; ICD matching is full-string exact (not prefix-level).
+//   Also added CPT 99606 to the Auto Link button's unconditional
+//   auto-deletion list (al_deleteUnwantedCodes's cptsToDelete).
 // 1.82 (2026-09-14) - FOBT visit type now classified the same as LAB:
 //   classifyVisitType() recognizes "fobt" and maps it to the 'lab'
 //   category, so FOBT/LAB visits always land on 99212 — added if no
@@ -2606,6 +2615,49 @@ function __smartCoderReadVersion(fallback) {
         }
 
         const toDelete = [...gatedBundleCPTDeletes];
+
+        // ---- Exact-duplicate detection (CPT + ICD) ----
+        // A code appearing 2+ times on the grid is always a straight
+        // duplicate (stray click, eCW glitch, etc.) — never a legitimate
+        // billing scenario — so Analyze queues every earlier occurrence
+        // for deletion and keeps only the LAST (bottom-most) row for that
+        // code. ICD matching here is a full-string EXACT match only
+        // (uppercased/trimmed) — never a prefix/category match, so e.g.
+        // R25.2 and R25.29 are different codes and are never flagged as
+        // duplicates of one another. This runs unconditionally, ahead of
+        // every other rule below, so a duplicate (e.g. the same office-visit
+        // code added twice) gets cleaned up even on charts where nothing
+        // else needs correcting.
+        const cptByCodeForDupes = {};
+        getCPTRows().forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (!code) return;
+            if (!cptByCodeForDupes[code]) cptByCodeForDupes[code] = [];
+            cptByCodeForDupes[code].push(row);
+        });
+        Object.entries(cptByCodeForDupes).forEach(([code, rows]) => {
+            if (rows.length < 2) return;
+            // Keep the last row, delete every earlier one.
+            rows.slice(0, -1).forEach(row => {
+                toDelete.push({ code, row, kind: 'cpt', reason: 'Duplicate CPT code — removing duplicate, keeping one instance' });
+            });
+        });
+
+        const icdByCodeForDupes = {};
+        getICDRows().forEach(entry => {
+            const code = entry.code.trim().toUpperCase();
+            if (!code) return;
+            if (!icdByCodeForDupes[code]) icdByCodeForDupes[code] = [];
+            icdByCodeForDupes[code].push(entry);
+        });
+        Object.entries(icdByCodeForDupes).forEach(([code, entries]) => {
+            if (entries.length < 2) return;
+            // Keep the last row, delete every earlier one.
+            entries.slice(0, -1).forEach(entry => {
+                toDelete.push({ code, row: entry.row, kind: 'icd', reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
+            });
+        });
+
         currentRows.forEach(r => {
             if (MANAGED_CODES.has(r.code) && !desired.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                 const reason = exclusionReasons.get(r.code) || 'Not applicable / wrong value for current chart';
@@ -4286,7 +4338,7 @@ function __smartCoderReadVersion(fallback) {
             'G9903', '4000F', '1034F', '3080F', '3077F',
             '3050F', '3046F', '0521F',
             '3048F', '3061F', '3062F',
-            '3725F', 'H0049', 'H0001', 'G8754', 'G8752',
+            '3725F', 'H0049', 'H0001', 'G8754', 'G8752', '99606',
         ]);
         const icdsToDelete = new Set([
             'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
