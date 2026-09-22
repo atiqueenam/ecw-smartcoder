@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.34
+// @name         Hasnayen Medical SmartCoder v1.35
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,13 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.35 (2026-09-22) - Z13.6 retired entirely, including as the rule-19
+//   last-resort link target: 93000 (EKG) now falls straight through to
+//   the office-visit codes when none of E78.5/R00.2/R06.02/R07.9/I10/
+//   R00.1 are on the chart. Removed Z13.6 from the ecgICDs list in both
+//   the Auto Link and Claim Link rule tables and removed the
+//   computeAnalysis add-rule. Also added an unconditional delete rule:
+//   if Z13.6 is already on the chart for any reason, it's removed.
 // 1.34 (2026-09-22) - Fixed Auto Link not showing/persisting ICD codes on
 //   some interfaces: a CPT row can render TWO icd1-icd4 input sets with
 //   identical data-fieldname values (a hidden smart-suggestion set plus
@@ -2767,25 +2774,15 @@ function __smartCoderReadVersion(fallback) {
             toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
-        // ---- EKG/ECG: if 93000 is on the CPT list (existing or about to be
-        // added) and none of the ECG-related ICDs are already on the chart,
-        // add Z13.6 so Auto Link / Claim Link have something to link 93000
-        // to. ----
-        // Hasnayen rule 19: 93000 must link to one of these ICDs, in this
-        // priority order. If none of them is present, fall back to I10;
-        // if I10 itself isn't on the chart either, add Z13.6 and link
-        // that instead. (The actual slot assignment happens in the AL/CL
-        // rule tables, whose 93000 icdList is this same ordered list; the
-        // 25 modifier is applied by al_applyHasnayen25Modifiers.)
-        const EKG_LINK_ICDS = ['E78.5', 'R00.2', 'R06.02', 'R07.9', 'I10', 'R00.1'];
-        const has93000 = rawCPTCodeSet.has('93000') || desired.has('93000');
-        const hasEkgLinkIcd = currentICDCodesForScreening.some(c => EKG_LINK_ICDS.includes(c));
-        const hasZ136Already = currentICDCodesForScreening.includes('Z13.6');
-        if (has93000 && !hasEkgLinkIcd && !hasZ136Already) {
-            // No priority ICD present and (by definition) no I10 either —
-            // Z13.6 is the documented last-resort link target.
-            toAdd.push({ code: 'Z13.6', reason: '93000 present, none of E78.5/R00.2/R06.02/R07.9/I10/R00.1 on chart — Z13.6 added for linking', kind: 'icd' });
-        }
+        // ---- EKG/ECG: Z13.6 is no longer used at all for EKG (93000)
+        // linking, including as a last resort. Hasnayen rule 19: 93000
+        // must link to one of E78.5/R00.2/R06.02/R07.9/I10/R00.1, in that
+        // priority order (the actual slot assignment happens in the AL/CL
+        // rule tables, whose 93000 icdList is this same ordered list). If
+        // none of them is present, 93000 now falls straight through to
+        // the office-visit codes instead of us adding Z13.6. (Z13.6
+        // deletion, if it's already on the chart for any reason, is
+        // handled unconditionally in the ICD-grid cleanup loop below.)
 
         const toDelete = [...gatedBundleCPTDeletes];
         currentRows.forEach(r => {
@@ -2850,6 +2847,9 @@ function __smartCoderReadVersion(fallback) {
         // the add rule above, so add and delete can never disagree.
         getICDGridEntriesFast().forEach(entry => {
             const code = entry.code.toUpperCase();
+            if (code === 'Z13.6' && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Z13.6 is no longer used for EKG (93000) linking or any other purpose — always deleted if present' });
+            }
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
@@ -4240,14 +4240,14 @@ function __smartCoderReadVersion(fallback) {
         const bmiBPICDs = ["Z00.01","Z68","Z00.121","Z00.00","Z00.129","E66.3","E66.9","E66.01","E66.09","R63.6"];
         const bmiOnlyICDs = ["Z00.01","Z00.121","Z00.00","Z00.129","Z68"];
         // Hasnayen rule 19: 93000 must be linked to one of these ICDs in
-        // THIS priority order — E78.5, R00.2, R06.02, R07.9, I10, R00.1 —
-        // falling back to I10, and to Z13.6 when I10 isn't on the chart
-        // either (computeAnalysis adds Z13.6 in that case, see the
-        // "EKG/ECG" block there). Because the list order is the priority
+        // THIS priority order — E78.5, R00.2, R06.02, R07.9, I10, R00.1.
+        // If none of them is present, it now falls through to the
+        // office-visit codes (Z13.6 is never added or used as a fallback
+        // link target anymore). Because the list order is the priority
         // order, these codes deliberately do NOT use useRowOrder — the
         // customICDCollector list-order path (al_matchICDsFromList) is
         // what honours it.
-        const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1","Z13.6"];
+        const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1"];
         // Rule 15 (auto-consolidating vitamin-deficiency ICDs to E56.9)
         // has been removed, but E56.9/D51.9 remain valid link targets for
         // B12 injections if either is already on the chart.
@@ -5096,8 +5096,8 @@ function __smartCoderReadVersion(fallback) {
 
         // ---- Rule 19: if 93000 stays on the chart it gets a 25 modifier.
         // (Its ICD-link priority order is handled by the 93000 entry in
-        // al_buildCPTRules; the I10/Z13.6 fallback is handled by
-        // computeAnalysis's EKG block.)
+        // al_buildCPTRules; if none of those ICDs are present it falls
+        // through to the office-visit codes — no Z13.6 fallback.)
         cptRows.forEach(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
             if (code === '93000') al_apply25Modifier(row);
@@ -5539,9 +5539,9 @@ function __smartCoderReadVersion(fallback) {
         prevCodes.forEach(c => { rules[c] = { type: "customICDCollector", icdList: prevICDs }; });
 
         // Hasnayen rule 19 — same 93000 ICD-link priority order as the
-        // Auto Link table above (E78.5, R00.2, R06.02, R07.9, I10, R00.1,
-        // then Z13.6 as the last-resort link target).
-        const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1","Z13.6"];
+        // Auto Link table above (E78.5, R00.2, R06.02, R07.9, I10, R00.1);
+        // falls through to the office-visit codes if none are present.
+        const ecgICDs = ["E78.5","R00.2","R06.02","R07.9","I10","R00.1"];
         // Rule 15 (auto-consolidating vitamin-deficiency ICDs to E56.9)
         // has been removed; E56.9/D51.9 remain valid link targets for B12.
         const b12ICDs = ["D51.9","E56.9"];

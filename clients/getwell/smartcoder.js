@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.88
+// @name         Getwell SmartCoder by ATQ v5.89
 // @namespace    http://tampermonkey.net/
-// @version      5.88
+// @version      5.89
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,14 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.89 (2026-09-22) - Z13.6 retired entirely: no longer added when 93000
+//   (EKG) has no linking diagnosis on the chart — 93000/93005/93010 now
+//   fall straight through to the office-visit codes instead. Removed
+//   Z13.6 from the ecgICDs list in both the Auto Link and Claim Link
+//   rule tables (customICDCollector's existing fallback already routes
+//   to office-visit when no ICD in the list matches, so no rule-type
+//   change was needed). Also added an unconditional delete rule: if
+//   Z13.6 is already on the chart for any reason, it's removed.
 // 5.88 (2026-09-16) - Fixed pediatric BMI-for-age G-code mapping: Z68.53
 //   (85th-<95th percentile) was wrongly mapped to G8420 (same as the
 //   5th-<85th band) in both the PEDIATRIC_BMI_Z_TO_GCODE table and the
@@ -3228,19 +3236,12 @@ function __smartCoderReadVersion(fallback) {
         }
 
         // ---- EKG (93000) linking ICD check ----
-        // 93000 links to one of EKG_LINK_ICDS below (see ecgICDs in the
-        // Auto Link / Claim Link rule tables). Whenever 93000 is already
-        // on the chart OR being added this run, Analyze now also checks
-        // whether any of those linking codes are present in the ICD
-        // grid. If none are, it proposes Z13.6 so there's always
-        // something for Auto Link/Claim Link to attach 93000 to instead
-        // of falling through to the office-visit codes.
-        const EKG_LINK_ICDS = ['E78.5', 'I10', 'R00.2', 'R03.0', 'R06.02', 'R07.9'];
-        const hasEKGCpt = currentCodes.has('93000') || desired.has('93000');
-        const hasEKGLinkICD = EKG_LINK_ICDS.some(c => currentICDCodesForScreening.includes(c));
-        if (hasEKGCpt && !hasEKGLinkICD && !currentICDCodesForScreening.includes('Z13.6')) {
-            toAdd.push({ code: 'Z13.6', reason: 'EKG (93000) present with no linking diagnosis on chart — adding Z13.6 for linking', kind: 'icd' });
-        }
+        // Z13.6 is no longer used at all for EKG (93000) linking. If none
+        // of the real EKG-related ICDs (see ecgICDs in the Auto Link /
+        // Claim Link rule tables) are present, 93000 now falls straight
+        // through to the office-visit codes instead of us adding Z13.6.
+        // (Z13.6 deletion, if it's already on the chart for any reason,
+        // is handled unconditionally in the ICD-grid cleanup loop below.)
 
         // ---- Depression/alcohol screening ICD cleanup: Z13.31 or Z13.9
         // (or Z13.89) on the chart with no matching screening CPT means
@@ -3254,6 +3255,9 @@ function __smartCoderReadVersion(fallback) {
         // the add rule above, so add and delete can never disagree.
         getICDGridEntriesFast().forEach(entry => {
             const code = entry.code.toUpperCase();
+            if (code === 'Z13.6' && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Z13.6 is no longer used for EKG (93000) linking or any other purpose — always deleted if present' });
+            }
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
@@ -4240,7 +4244,7 @@ function __smartCoderReadVersion(fallback) {
 
         const bmiBPICDs = ["Z00.01","Z68","Z00.121","Z00.00","Z00.129","E66.3","E66.9","E66.01","E66.09","R63.6"];
         const bmiOnlyICDs = ["Z00.01","Z00.121","Z00.00","Z00.129","Z68"];
-        const ecgICDs = ["E78.5","I10","R00.2","R03.0","R06.02","R07.9","Z13.6"];
+        const ecgICDs = ["E78.5","I10","R00.2","R03.0","R06.02","R07.9"];
         const b12ICDs = ["D51.9","E53.9"];
 
         Object.assign(rules, {
@@ -5265,7 +5269,7 @@ function __smartCoderReadVersion(fallback) {
         ];
         prevCodes.forEach(c => { rules[c] = { type: "customICDCollector", icdList: prevICDs }; });
 
-        const ecgICDs = ["E78.5","I10","R00.0","R00.1","R00.2","R03.0","R06.02","R07.9","Z13.6"];
+        const ecgICDs = ["E78.5","I10","R00.0","R00.1","R00.2","R03.0","R06.02","R07.9"];
         const b12ICDs = ["D51.9","E53.9"];
 
         Object.assign(rules, {
