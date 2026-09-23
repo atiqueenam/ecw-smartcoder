@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.88
+// @name         Bronx Health SmartCoder v1.89
 // @namespace    http://tampermonkey.net/
-// @version      1.88
+// @version      1.89
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.89 (2026-09-23) - 92228 (remote retinal imaging) now links to any
+//   diabetes ICD on the chart — E11, E10, E13, E08 or E09 (first found, in
+//   that priority order) — instead of E11 only, in both the Auto Link and
+//   Claim Link rule tables; still falls back to the office-visit codes when
+//   no diabetes ICD is present. Nothing else changed.
 // 1.88 (2026-09-23) - Advance Care Planning (99497/99498) ICD links are now
 //   serial: the chronic-disease ICDs on the chart are linked in the order
 //   they appear in the ICD grid (lowest row number first, ascending),
@@ -4047,7 +4052,7 @@ function __smartCoderReadVersion(fallback) {
             "83014": { type: "exact", icds: ["B96.81"], fallback: "al_officeVisit" },
             "86580": { type: "exact", icds: ["Z11.1"], fallback: "al_officeVisit" },
             "87811": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
-            "92228": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
+            "92228": { type: "startsWith", icds: ["E11","E10","E13","E08","E09"], fallback: "al_officeVisit" },
             "92250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "82962": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "94060": { type: "exact", icds: ["R06.2"], fallback: "al_officeVisit" },
@@ -5211,7 +5216,7 @@ function __smartCoderReadVersion(fallback) {
             "83014": { type: "exact", icds: ["B96.81"], fallback: "cl_officeVisit" },
             "86580": { type: "exact", icds: ["Z11.1"], fallback: "cl_officeVisit" },
             "87811": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
-            "92228": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "92228": { type: "startsWith", icds: ["E11","E10","E13","E08","E09"], fallback: "cl_officeVisit" },
             "92250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "82962": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "94060": { type: "exact", icds: ["R06.2"], fallback: "cl_officeVisit" },

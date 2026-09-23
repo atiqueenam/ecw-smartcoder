@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.91
+// @name         Getwell SmartCoder by ATQ v5.92
 // @namespace    http://tampermonkey.net/
-// @version      5.91
+// @version      5.92
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.92 (2026-09-23) - 92228 (remote retinal imaging) now links to any
+//   diabetes ICD on the chart — E11, E10, E13, E08 or E09 (first found, in
+//   that priority order) — instead of E11 only, in both the Auto Link and
+//   Claim Link rule tables; still falls back to the office-visit codes when
+//   no diabetes ICD is present. Getwell's Auto Link table had no
+//   92228 entry at all (it was linking as an unlisted CPT to office-visit
+//   codes); added it. Nothing else changed.
 // 5.91 (2026-09-23) - Advance Care Planning (99497/99498) ICD links are now
 //   serial: the chronic-disease ICDs on the chart are linked in the order
 //   they appear in the ICD grid (lowest row number first, ascending),
@@ -4394,6 +4401,7 @@ function __smartCoderReadVersion(fallback) {
             "83014": { type: "exact", icds: ["B96.81"], fallback: "al_officeVisit" },
             "86580": { type: "exact", icds: ["Z11.1"], fallback: "al_officeVisit" },
             "87811": { type: "exact", icds: ["Z11.52"], fallback: "al_officeVisit" },
+            "92228": { type: "startsWith", icds: ["E11","E10","E13","E08","E09"], fallback: "al_officeVisit" },
             "92250": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "82962": { type: "startsWith", icds: ["E11"], fallback: "al_officeVisit" },
             "94060": { type: "exact", icds: ["R06.2"], fallback: "al_officeVisit" },
@@ -5538,7 +5546,7 @@ function __smartCoderReadVersion(fallback) {
             "83014": { type: "exact", icds: ["B96.81"], fallback: "cl_officeVisit" },
             "86580": { type: "exact", icds: ["Z11.1"], fallback: "cl_officeVisit" },
             "87811": { type: "exact", icds: ["Z11.52"], fallback: "cl_officeVisit" },
-            "92228": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
+            "92228": { type: "startsWith", icds: ["E11","E10","E13","E08","E09"], fallback: "cl_officeVisit" },
             "92250": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "82962": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "94060": { type: "exact", icds: ["R06.2"], fallback: "cl_officeVisit" },
