@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.92
+// @name         Getwell SmartCoder by ATQ v5.93
 // @namespace    http://tampermonkey.net/
-// @version      5.92
+// @version      5.93
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.93 (2026-09-23) - Fixed Auto Link not showing/persisting ICD codes on
+//   some interfaces (ported from Bronx 1.85 / Hasnayen 1.34): a CPT row can
+//   render TWO icd1-icd4 input sets with identical data-fieldname values
+//   (a hidden smart-suggestion set plus the classic set, depending on
+//   isSmartIcdToCptMappingSuggestionsEnabled). The plain querySelector in
+//   the al_ linking functions could grab the hidden set, so the serial
+//   number got written but no code displayed and the value silently
+//   didn't persist on tab close. Added al_getICDInput(row, slot), which
+//   picks the input whose <td> is actually visible, and routed every al_
+//   ICD-slot read/write through it. No rule logic changed.
 // 5.92 (2026-09-23) - 92228 (remote retinal imaging) now links to any
 //   diabetes ICD on the chart — E11, E10, E13, E08 or E09 (first found, in
 //   that priority order) — instead of E11 only, in both the Auto Link and
@@ -4207,6 +4217,27 @@ function __smartCoderReadVersion(fallback) {
         }
     }
 
+    // Some interfaces render TWO icd1-icd4 input sets per CPT row with
+    // identical data-fieldname values (a hidden smart-suggestion set plus
+    // the classic set, depending on isSmartIcdToCptMappingSuggestionsEnabled).
+    // A plain querySelector can grab the hidden one, so the serial number
+    // gets written but no ICD code ever displays and the value doesn't
+    // persist. This picks the input whose <td> is actually visible.
+    function al_getICDInput(row, slot) {
+        const inputs = row.querySelectorAll(`input[data-fieldname="icd${slot}"]`);
+        if (inputs.length === 0) return null;
+        if (inputs.length === 1) return inputs[0];
+        for (const inp of inputs) {
+            const td = inp.closest('td');
+            if (td && !td.classList.contains('ng-hide') && td.offsetParent !== null) return inp;
+        }
+        for (const inp of inputs) {
+            const td = inp.closest('td');
+            if (td && !td.classList.contains('ng-hide')) return inp;
+        }
+        return inputs[inputs.length - 1];
+    }
+
     function al_refreshICDDisplay(row) {
         row.querySelectorAll('td.ng-binding[title]').forEach(td => {
             td.dispatchEvent(new Event('mouseover'));
@@ -4472,11 +4503,11 @@ function __smartCoderReadVersion(fallback) {
             const matches = cptRows.filter(row => row.querySelector('td:nth-child(2)')?.textContent.trim() === code);
             matches.forEach(row => {
                 for (let i = 1; i <= 4; i++) {
-                    const input = row.querySelector(`input[data-fieldname="icd${i}"]`);
+                    const input = al_getICDInput(row, i);
                     if (input) al_setInputValue(input, '');
                 }
                 topICDs.forEach((num, idx) => {
-                    const input = row.querySelector(`input[data-fieldname="icd${idx + 1}"]`);
+                    const input = al_getICDInput(row, idx + 1);
                     if (input) al_setInputValue(input, num);
                 });
                 al_refreshICDDisplay(row);
@@ -4508,7 +4539,7 @@ function __smartCoderReadVersion(fallback) {
             const matches = cptRows.filter(row => row.querySelector('td:nth-child(2)')?.textContent.trim() === cpt);
             matches.forEach(row => {
                 for (let i = 1; i <= 4; i++) {
-                    const input = row.querySelector(`input[data-fieldname="icd${i}"]`);
+                    const input = al_getICDInput(row, i);
                     if (input) al_setInputValue(input, '');
                 }
 
@@ -4550,7 +4581,7 @@ function __smartCoderReadVersion(fallback) {
                     }
 
                     if (firstRowNum) {
-                        const input1 = row.querySelector('input[data-fieldname="icd1"]');
+                        const input1 = al_getICDInput(row, 1);
                         if (input1) al_setInputValue(input1, firstRowNum);
                         slot = 2;
                     }
@@ -4561,7 +4592,7 @@ function __smartCoderReadVersion(fallback) {
                     if (z68Row && slot <= 4) {
                         const z68Num = z68Row.querySelector('td:first-child center.ng-binding')?.textContent.trim();
                         if (z68Num) {
-                            const input = row.querySelector(`input[data-fieldname="icd${slot}"]`);
+                            const input = al_getICDInput(row, slot);
                             if (input) al_setInputValue(input, z68Num);
                         }
                     }
@@ -4599,7 +4630,7 @@ function __smartCoderReadVersion(fallback) {
                             if (icdRow) {
                                 const rowNum = icdRow.querySelector('td:first-child center.ng-binding')?.textContent.trim();
                                 if (rowNum) {
-                                    const input = row.querySelector(`input[data-fieldname="icd${idx + 1}"]`);
+                                    const input = al_getICDInput(row, idx + 1);
                                     if (input) al_setInputValue(input, rowNum);
                                 }
                             }
@@ -4626,7 +4657,7 @@ function __smartCoderReadVersion(fallback) {
                     if (found) {
                         const rowNum = found.querySelector('td:first-child center.ng-binding')?.textContent.trim();
                         if (rowNum) {
-                            const input = row.querySelector(`input[data-fieldname="icd${idx + 1}"]`);
+                            const input = al_getICDInput(row, idx + 1);
                             if (input) al_setInputValue(input, rowNum);
                             foundAny = true;
                         }
