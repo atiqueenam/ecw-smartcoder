@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.86
+// @name         Bronx Health SmartCoder v1.87
 // @namespace    http://tampermonkey.net/
-// @version      1.86
+// @version      1.87
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.87 (2026-09-23) - Any insurance name STARTING with "Medicare" is now
+//   treated as Medicare (fixes "Medicare Part B Empire" getting age-banded
+//   993xx). isStraightMedicareIns() and the office-visit E&M rule's own
+//   Medicare regex changed from an exact "Medicare [Part A/B]" match to a
+//   start-anchored /^medicare\b/i, so these payers get G0438/G0439 from the
+//   Preventive quick action plus every other straight-Medicare rule
+//   (preventive counsel block, etc.). Names that only CONTAIN "Medicare"
+//   (e.g. "Healthfirst Medicare") are unchanged; isEmpireIns unchanged.
 // 1.86 (2026-09-22) - Z13.6 retired entirely: no longer added when 93000
 //   (EKG) has no linking diagnosis on the chart — 93000/93005/93010 now
 //   fall straight through to the office-visit codes instead. Removed
@@ -2262,7 +2270,7 @@ function __smartCoderReadVersion(fallback) {
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
@@ -3548,7 +3556,9 @@ function __smartCoderReadVersion(fallback) {
         name = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
         // Normalize stray dashes/extra spacing between words.
         name = name.replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
-        return /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(name);
+        // 1.87: ANY insurance name that starts with "Medicare" is treated
+        // as Medicare (e.g. "Medicare Part B Empire"), whatever follows it.
+        return /^medicare\b/i.test(name);
     }
 
     // Established = at least one PRIOR encounter exists in patient history
