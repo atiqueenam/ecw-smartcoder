@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.89
+// @name         Getwell SmartCoder by ATQ v5.90
 // @namespace    http://tampermonkey.net/
-// @version      5.89
+// @version      5.90
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.90 (2026-09-23) - G0447 modifier rule (Auto Link + Claim Link). The
+//   HackeRudro sorting extension counts G0447 as an "other" service and
+//   so puts 25 on the office-visit E&M (and the preventive code) whenever
+//   G0447 is present. SmartCoder now sets 59 on G0447 itself (like
+//   G0444/G0442) and removes any 25 that existed only because of G0447,
+//   re-evaluating HackeRudro's rules with G0447 left out: the office visit
+//   keeps 25 if a preventive or any other qualifying code still justifies
+//   it; the preventive code keeps 25 only with an office visit plus a
+//   non-G0447 other code. 99211 stays 25; only "25" values are cleared.
 // 5.89 (2026-09-22) - Z13.6 retired entirely: no longer added when 93000
 //   (EKG) has no linking diagnosis on the chart — 93000/93005/93010 now
 //   fall straight through to the office-visit codes instead. Removed
@@ -4951,6 +4960,103 @@ function __smartCoderReadVersion(fallback) {
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
+    // G0447 modifier rule (Getwell, 5.90). The separate "ECW Sorting by
+    // HackeRudro" extension puts 25 on the office-visit E&M (and on the
+    // preventive code, when one is present) whenever G0447 is on the chart,
+    // because it lists G0447 among its "other" services. That extension
+    // can't be edited, so SmartCoder corrects it here: G0447 itself gets 59
+    // (same as G0444/G0442), and G0447 no longer justifies a 25 on any
+    // other code. A 25 is only removed when HackeRudro's own rules,
+    // re-evaluated with G0447 left out, would not have given it; a 25 earned
+    // from any other code stays. 99211 is exempt (always 25). Only a value
+    // of exactly "25" is ever cleared, so 95/SL/etc. are never touched.
+    // Must run AFTER the HackeRudro button — re-clicking HackeRudro later
+    // will put its original modifiers back.
+    const G0447_MOD_PREVENTIVE = [
+        "99381","99382","99383","99384","99385","99386","99387",
+        "99391","99392","99393","99394","99395","99396","99397",
+        "99401","99402","99403","99404","G0402","G0438","G0439"
+    ];
+    const G0447_MOD_NO_MOD_PREVENTIVE = ["G0402","G0438","G0439"];
+    // HackeRudro's "others" list with G0447 removed.
+    const G0447_MOD_OTHERS_EX_G0447 = [
+        "99495","99496","99406","99407","99408","Q0091",
+        "90471","90472","90460","90461","93000","96372","20610","99497",
+        "G0008","G0009","99484","99483","99409","99173","99172",
+        "97804","97803","97802","96374","96373","94762","94761","94760",
+        "94012","94011","93018","93017","93016","93015","93010","93005",
+        "92270","92265","92260","92250","92242","92240","92235","92230",
+        "92229","92228","92227",
+        "91322","91321","91320","91319","91318","91310","91304"
+    ];
+
+    // Given the CPT codes on the chart (G0447 present), returns which codes
+    // must NOT carry 25 — i.e. codes whose 25 came only from G0447.
+    function g0447_codesToStrip25(presentCPTs) {
+        const has = list => list.some(c => presentCPTs.includes(c));
+        const hasOffice = has(OFFICE_VISIT_EM_CODES);
+        const hasPreventive = has(G0447_MOD_PREVENTIVE);
+        const hasOtherEx = has(G0447_MOD_OTHERS_EX_G0447);
+        const strip = new Set();
+        // Office visit keeps 25 via Rule A (preventive, no other) or
+        // Rule B (any other code except G0447).
+        const officeKeeps = hasOffice && (hasPreventive || hasOtherEx);
+        if (!officeKeeps) {
+            OFFICE_VISIT_EM_CODES.forEach(c => { if (c !== "99211") strip.add(c); });
+        }
+        // Preventive keeps 25 only via Rule B with a non-G0447 other code.
+        const preventiveKeeps = hasOffice && hasOtherEx;
+        if (!preventiveKeeps) {
+            G0447_MOD_PREVENTIVE.forEach(c => {
+                if (!G0447_MOD_NO_MOD_PREVENTIVE.includes(c)) strip.add(c);
+            });
+        }
+        return strip;
+    }
+
+    // Auto Link side (billing tab, #billingTbl4).
+    function al_applyG0447ModifierRule() {
+        const tbody = document.querySelector("#billingTbl4 tbody");
+        if (!tbody) return;
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        const codeOf = row => row.querySelector("td:nth-child(2)")?.textContent.trim();
+        const presentCPTs = rows.map(codeOf).filter(Boolean);
+        if (!presentCPTs.includes("G0447")) return;
+        const strip = g0447_codesToStrip25(presentCPTs);
+        rows.forEach(row => {
+            const cptCode = codeOf(row);
+            if (!cptCode) return;
+            const isG0447 = cptCode === "G0447";
+            if (!isG0447 && !strip.has(cptCode)) return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope) {
+                    // Decide inside the callback so earlier queued
+                    // $applyAsync writes (e.g. televisit 95) are respected.
+                    scope.$applyAsync(() => {
+                        if (!scope.cpt) return;
+                        if (isG0447) scope.cpt.mod1 = "59";
+                        else if (String(scope.cpt.mod1 || "").trim() === "25") scope.cpt.mod1 = "";
+                    });
+                } else {
+                    const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                                     row.querySelector('input[name="mod1"]') ||
+                                     row.querySelector('input[id*="mod1"]');
+                    if (!modInput) return;
+                    if (!isG0447 && modInput.value.trim() !== "25") return;
+                    modInput.focus();
+                    modInput.value = isG0447 ? "59" : "";
+                    modInput.dispatchEvent(new Event("input", { bubbles: true }));
+                    modInput.dispatchEvent(new Event("change", { bubbles: true }));
+                    modInput.blur();
+                }
+            } catch (e) {
+                console.error("G0447 modifier error:", cptCode, e);
+            }
+        });
+        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    }
+
     // 99211 always gets modifier 25 (significant, separately identifiable
     // E/M service), no matter what else is on the chart. Nothing else is
     // touched by this rule — G0402/G0438/G0439 and the rest of the
@@ -4998,6 +5104,7 @@ function __smartCoderReadVersion(fallback) {
                 al_applySLModifierForPedsVaccines();
                 al_apply95ModifierForTelevisit();
                 al_apply59ModifierFor96372();
+                al_applyG0447ModifierRule();
                 al_apply25ModifierFor99211();
                 al_alertDuplicateICDStart(icdRows);
                 al_alertDuplicateCPT(cptRows);
@@ -5807,6 +5914,24 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
+    // G0447 modifier rule, Claim Link side — same logic as
+    // al_applyG0447ModifierRule (see comment there).
+    function cl_applyG0447ModifierRule(cptRows) {
+        const presentCPTs = cptRows.map(cl_getCPTCode).filter(Boolean);
+        if (!presentCPTs.includes('G0447')) return;
+        const strip = g0447_codesToStrip25(presentCPTs);
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            const modInput = cl_getCPTMod1Input(row);
+            if (!code || !modInput) return;
+            if (code === 'G0447') {
+                cl_setInputValue(modInput, '59');
+            } else if (strip.has(code) && modInput.value.trim() === '25') {
+                cl_setInputValue(modInput, '');
+            }
+        });
+    }
+
     // 99211 always gets modifier 25 (unconditional, no matter what else
     // is on the chart). Nothing else is touched by this rule —
     // G0402/G0438/G0439 and the rest of the office-visit family are
@@ -5959,6 +6084,7 @@ function __smartCoderReadVersion(fallback) {
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
         cl_apply59ModifierFor96372(cptRows);
+        cl_applyG0447ModifierRule(cptRows);
         cl_apply25ModifierFor99211(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
         cl_uncheckMedRecBillToInsForHealthfirst(cptRows);
