@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.91
+// @name         Hasan Sheikh SmartCoder v1.92
 // @namespace    http://tampermonkey.net/
-// @version      1.91
+// @version      1.92
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.92 (2026-09-23) - Advance Care Planning (99497/99498) ICD links are now
+//   serial: the chronic-disease ICDs on the chart are linked in the order
+//   they appear in the ICD grid (lowest row number first, ascending),
+//   instead of the order of the chronic-disease list. Added useRowOrder
+//   to the 99497/99498 entries in both the Auto Link and Claim Link rule
+//   tables. Nothing else changed.
 //
 // 1.91 (2026-09-22) - Z13.6 retired entirely: removed from the ecgICDs
 //   list in both the Auto Link and Claim Link rule tables, so 93000
@@ -3490,8 +3496,8 @@ function __smartCoderReadVersion(fallback) {
             // (CHRONIC_DISEASE_ICD_CODES, same list the 99213/99214 rule
             // uses); office-visit ICDs are used only if no chronic ICD is
             // on the chart.
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true }
         });
         return rules;
     }
@@ -4689,8 +4695,8 @@ function __smartCoderReadVersion(fallback) {
             // Advance Care Planning — link to a chronic-disease ICD only,
             // office-visit ICDs only as fallback. See al_buildCPTRules'
             // matching comment for 99497/99498.
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true }
         });
         return rules;
     }

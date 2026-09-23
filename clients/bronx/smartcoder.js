@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.87
+// @name         Bronx Health SmartCoder v1.88
 // @namespace    http://tampermonkey.net/
-// @version      1.87
+// @version      1.88
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.88 (2026-09-23) - Advance Care Planning (99497/99498) ICD links are now
+//   serial: the chronic-disease ICDs on the chart are linked in the order
+//   they appear in the ICD grid (lowest row number first, ascending),
+//   instead of the order of the chronic-disease list. Added useRowOrder
+//   to the 99497/99498 entries in both the Auto Link and Claim Link rule
+//   tables. Nothing else changed.
 // 1.87 (2026-09-23) - Any insurance name STARTING with "Medicare" is now
 //   treated as Medicare (fixes "Medicare Part B Empire" getting age-banded
 //   993xx). isStraightMedicareIns() and the office-visit E&M rule's own
@@ -4091,8 +4097,8 @@ function __smartCoderReadVersion(fallback) {
             // uses); office-visit ICDs are used only if no chronic ICD is
             // on the chart. Same fix: Getwell 5.86, Hasnayen 1.30, Hasan
             // Sheikh 1.88.
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true }
         });
         return rules;
     }
@@ -5250,8 +5256,8 @@ function __smartCoderReadVersion(fallback) {
             "1111F": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
             "99000": { type: "cl_officeVisit" },
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true }
         });
         return rules;
     }

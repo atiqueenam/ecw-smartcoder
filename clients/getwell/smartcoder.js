@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.90
+// @name         Getwell SmartCoder by ATQ v5.91
 // @namespace    http://tampermonkey.net/
-// @version      5.90
+// @version      5.91
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.91 (2026-09-23) - Advance Care Planning (99497/99498) ICD links are now
+//   serial: the chronic-disease ICDs on the chart are linked in the order
+//   they appear in the ICD grid (lowest row number first, ascending),
+//   instead of the order of the chronic-disease list. Added useRowOrder
+//   to the 99497/99498 entries in both the Auto Link and Claim Link rule
+//   tables (Getwell's Auto Link collector gained the same useRowOrder
+//   branch Claim Link and the other clients already had). Nothing else changed.
 // 5.90 (2026-09-23) - G0447 modifier rule (Auto Link + Claim Link). The
 //   HackeRudro sorting extension counts G0447 as an "other" service and
 //   so puts 25 on the office-visit E&M (and the preventive code) whenever
@@ -4430,8 +4437,8 @@ function __smartCoderReadVersion(fallback) {
             "99051": { type: "al_officeVisit" },
             "82274": { type: "al_officeVisit" },
             "99000": { type: "al_officeVisit" },
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "al_officeVisit", useRowOrder: true }
         });
         return rules;
     }
@@ -4560,12 +4567,27 @@ function __smartCoderReadVersion(fallback) {
                 }
 
                 if (rule.type === "customICDCollector") {
-                    const matchedICDs = al_matchICDsFromList(rule.icdList, allICDs);
-                    if (matchedICDs.length) {
-                        matchedICDs.slice(0, 4).forEach((icd, idx) => {
-                            const icdRow = icdRows.find(r =>
-                                r.querySelector("td:nth-child(3)")?.textContent.trim().toUpperCase() === icd
+                    let matchedRows = [];
+                    if (rule.useRowOrder) {
+                        // Preserve the order ICDs appear in the ICD grid
+                        // (serial, ascending), rather than rule.icdList order.
+                        matchedRows = icdRows.filter(r => {
+                            const val = r.querySelector("td:nth-child(3)")?.textContent.trim().toUpperCase();
+                            if (!val) return false;
+                            return rule.icdList.some(code =>
+                                code.includes('.') ? val === code.toUpperCase() : val.startsWith(code.toUpperCase())
                             );
+                        });
+                    } else {
+                        const matchedICDs = al_matchICDsFromList(rule.icdList, allICDs);
+                        matchedRows = matchedICDs
+                            .map(icd => icdRows.find(r =>
+                                r.querySelector("td:nth-child(3)")?.textContent.trim().toUpperCase() === icd
+                            ))
+                            .filter(Boolean);
+                    }
+                    if (matchedRows.length) {
+                        matchedRows.slice(0, 4).forEach((icdRow, idx) => {
                             if (icdRow) {
                                 const rowNum = icdRow.querySelector('td:first-child center.ng-binding')?.textContent.trim();
                                 if (rowNum) {
@@ -5560,8 +5582,8 @@ function __smartCoderReadVersion(fallback) {
             "99051": { type: "cl_officeVisit" },
             "82274": { type: "cl_officeVisit" },
             "99000": { type: "cl_officeVisit" },
-            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" },
-            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit" }
+            "99497": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true },
+            "99498": { type: "customICDCollector", icdList: Array.from(CHRONIC_DISEASE_ICD_CODES), fallback: "cl_officeVisit", useRowOrder: true }
         });
         return rules;
     }
