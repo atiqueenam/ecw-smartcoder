@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.37
+// @name         Hasnayen Medical SmartCoder v1.38
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
+
+// 1.38 (2026-09-25) - Preventive: a new patient (NP visit type) now gets
+//   the new-patient preventive code (9938x / G0438) instead of the
+//   established one (9939x / G0439). New-vs-established now trusts the NP
+//   appointment type first (isEstablishedForPreventive()) and falls back to
+//   patient history only for other visit types. Same fix: Bronx.
+//   Nothing else changed.
 
 // 1.37 (2026-09-23) - 92228 (remote retinal imaging) now links to any
 //   diabetes ICD on the chart — E11, E10, E13, E08 or E09 (first found, in
@@ -3871,6 +3878,18 @@ function __smartCoderReadVersion(fallback) {
         return data.some(enc => enc.encounter_date && enc.encounter_date !== currentDos);
     }
 
+    // BUG FIX (same fix as Bronx): the Preventive quick action used
+    // isEstablishedPatient() (patient-history-based) as its ONLY source for
+    // new-vs-established, so a patient scheduled as NP whose history lookup
+    // returned stale/incidental data got the established-patient preventive
+    // code (9939x / G0439) instead of the new-patient one (9938x / G0438).
+    // An NP appointment is authoritative for "new patient"; every other
+    // visit type still falls back to the patient-history check as before.
+    function isEstablishedForPreventive() {
+        if (classifyVisitType(getVisitType()) === 'new') return false;
+        return isEstablishedPatient();
+    }
+
     // Age-band mapping per eCW's Preventive Medicine E&M list.
     function mapAgeToPreventiveCPT(age, established) {
         if (age == null) return null;
@@ -6401,7 +6420,7 @@ function __smartCoderReadVersion(fallback) {
     function computeQuickActionGating(insurance, flags, text) {
         const insuranceNorm = normalizeInsuranceForMatch(insurance);
         const isTelevisit = isTelevisitNow();
-        const established = isEstablishedPatient();
+        const established = isEstablishedForPreventive();
         const dosYear = getCurrentDosYear();
         const PREVENTIVE_ALL_CODES = [...ALL_PREVENTIVE_EM_CODES, ...MEDICARE_AWV_CODES];
 
@@ -6642,7 +6661,7 @@ function __smartCoderReadVersion(fallback) {
             const z71Opposite = z71Code === "Z71.89" ? "Z71.82" : "Z71.89";
             codes.push(z71Code);
 
-            const established = isEstablishedPatient();
+            const established = isEstablishedForPreventive();
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
