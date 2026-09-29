@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.89
+// @name         Bronx Health SmartCoder v1.91
 // @namespace    http://tampermonkey.net/
-// @version      1.89
+// @version      1.91
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,21 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.91 (2026-09-29) - Fixed duplicate ICD cleanup deleting BOTH copies
+//   (e.g. E78.5 entered twice -> both removed). The delete checks asked
+//   "is any row with this code still there?", which is always true for a
+//   duplicate's kept copy, so every duplicate delete looked failed and the
+//   retry removed the kept copy too. Now all ICD/CPT delete checks compare
+//   row counts, deleteICDRowWithRetry removes exactly one row per call and
+//   never retries once an earlier attempt landed, duplicate cleanup can't
+//   go below 1 row, the stability recheck expects the kept copy, and the
+//   recheck pass never re-runs a duplicate cleanup. Also stops duplicate
+//   CPT deletes being falsely logged as "Failed". Same fix: Getwell 5.94.
+// 1.90 (2026-09-29) - Auto Link no longer deletes Z02.1 unconditionally.
+//   It's now removed only when a preventive visit CPT (99381-99397 or
+//   G0402/G0438/G0439) is on the chart, since Z02.1 can't sit alongside
+//   the preventive Z00.01/Z00.121. Without a preventive code, Z02.1 stays.
+//   Same fix: Getwell 5.95. Nothing else changed.
 // 1.89 (2026-09-23) - 92228 (remote retinal imaging) now links to any
 //   diabetes ICD on the chart — E11, E10, E13, E08 or E09 (first found, in
 //   that priority order) — instead of E11 only, in both the Auto Link and
@@ -1969,7 +1984,23 @@ function __smartCoderReadVersion(fallback) {
         clickCPTDeleteWithRetry(row, expectedCode, code, delBtn, callback);
     }
 
-    function clickCPTDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry) {
+    // 1.91: count helpers for duplicate-safe delete verification. With a
+    // duplicated code, the kept instance still matches after a correct
+    // delete, so "is any row with this code left" is the wrong test —
+    // success means the count for that code dropped by at least one.
+    function cptCodeCount(code) {
+        const c = String(code || '').trim().toUpperCase();
+        return getCPTRows().filter(r =>
+            (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase() === c
+        ).length;
+    }
+    function icdCodeCount(code) {
+        const c = String(code || '').trim().toUpperCase();
+        return getICDRows().filter(r => r.code.toUpperCase() === c).length;
+    }
+
+    function clickCPTDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry, countBefore) {
+        if (countBefore === undefined) countBefore = cptCodeCount(code);
         row.scrollIntoView({ block: 'center' });
         setTimeout(() => {
             delBtn.click();
@@ -1978,11 +2009,7 @@ function __smartCoderReadVersion(fallback) {
             const confirmTimer = setInterval(() => {
                 if (clickAnyYesButton()) {
                     clearInterval(confirmTimer);
-                    waitUntilGoneCPT(() => {
-                        return getCPTRows().find(r =>
-                            r.querySelector('td:nth-child(2)')?.textContent.trim() === code
-                        );
-                    }, 6000, (gone) => callback({ ok: gone }));
+                    waitUntilGoneCPT(() => cptCodeCount(code) >= countBefore, 6000, (gone) => callback({ ok: gone }));
                     return;
                 }
                 const elapsed = Date.now() - start;
@@ -1991,11 +2018,14 @@ function __smartCoderReadVersion(fallback) {
                     // still settling into view) — re-find the row fresh
                     // and retry once before giving up.
                     clearInterval(confirmTimer);
+                    // First click already landed (no dialog needed)? Don't
+                    // click again — on a duplicate that would hit the kept row.
+                    if (cptCodeCount(code) < countBefore) { callback({ ok: true }); return; }
                     const freshRow = getCPTRowByCode(expectedCode || code);
                     if (!freshRow) { callback({ ok: false }); return; }
                     const freshBtn = freshRow.querySelector('button, i.blue-delete, .blue-delete');
                     if (!freshBtn) { callback({ ok: false }); return; }
-                    clickCPTDeleteWithRetry(freshRow, expectedCode, code, freshBtn, callback, true);
+                    clickCPTDeleteWithRetry(freshRow, expectedCode, code, freshBtn, callback, true, countBefore);
                     return;
                 }
                 if (elapsed > 6000) {
@@ -2060,7 +2090,8 @@ function __smartCoderReadVersion(fallback) {
         clickICDDeleteWithRetry(row, expectedCode, code, delBtn, callback);
     }
 
-    function clickICDDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry) {
+    function clickICDDeleteWithRetry(row, expectedCode, code, delBtn, callback, isRetry, countBefore) {
+        if (countBefore === undefined) countBefore = icdCodeCount(code);
         row.scrollIntoView({ block: 'center' });
         setTimeout(() => {
             delBtn.click();
@@ -2069,9 +2100,7 @@ function __smartCoderReadVersion(fallback) {
             const confirmTimer = setInterval(() => {
                 if (clickAnyYesButton()) {
                     clearInterval(confirmTimer);
-                    waitUntilGoneCPT(() => {
-                        return getICDRows().find(r => r.code === code);
-                    }, 6000, callback);
+                    waitUntilGoneCPT(() => icdCodeCount(code) >= countBefore, 6000, callback);
                     return;
                 }
                 const elapsed = Date.now() - start;
@@ -2080,11 +2109,12 @@ function __smartCoderReadVersion(fallback) {
                     // still settling into view) — re-find the row fresh
                     // and retry once before giving up.
                     clearInterval(confirmTimer);
+                    if (icdCodeCount(code) < countBefore) { callback(true); return; }
                     const entry = getICDRows().find(r => r.code.toUpperCase() === (expectedCode || code).toUpperCase());
                     if (!entry) { callback(false); return; }
                     const freshBtn = entry.row.querySelector('button, i.blue-delete, .blue-delete');
                     if (!freshBtn) { callback(false); return; }
-                    clickICDDeleteWithRetry(entry.row, expectedCode, code, freshBtn, callback, true);
+                    clickICDDeleteWithRetry(entry.row, expectedCode, code, freshBtn, callback, true, countBefore);
                     return;
                 }
                 if (elapsed > 6000) {
@@ -2103,29 +2133,49 @@ function __smartCoderReadVersion(fallback) {
     // few times with an increasing settle wait after each attempt,
     // re-reading the row fresh each time (never reusing a stale DOM
     // reference across attempts).
-    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
+    async function deleteICDRowWithRetry(code, maxAttempts = 4, opts = {}) {
+        // 1.91: one call = remove exactly ONE row for this code. Target
+        // count is fixed once before the first attempt; each retry first
+        // lets the grid settle and stops if an earlier attempt already
+        // landed. Before, a still-present duplicate looked like a failed
+        // delete, so the retry removed the kept copy too (E78.5 x2 -> 0).
+        // opts.keepAtLeast: never go below this many rows (duplicate
+        // cleanup passes 1).
+        const keepAtLeast = opts.keepAtLeast || 0;
+        const settledCount = async () => {
+            let last = icdCodeCount(code), stable = 1;
+            const start = Date.now();
+            while (Date.now() - start < 2500) {
+                await new Promise(r => setTimeout(r, 300));
+                const cur = icdCodeCount(code);
+                if (cur === last) { if (++stable >= 2) return cur; } else { stable = 1; last = cur; }
+            }
+            return last;
+        };
+        const originalCount = icdCodeCount(code);
+        if (originalCount === 0) return { ok: true };
+        const targetCount = originalCount - 1;
+        if (targetCount < keepAtLeast) return { ok: true, skipped: true };
+
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (attempt > 1) {
+                const now = await settledCount();
+                if (now <= targetCount) return { ok: true };
+            }
             const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
-            if (!entry) return { ok: true }; // already gone (or never there)
+            if (!entry) return { ok: true };
 
             const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
             if (!clicked) {
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
-
-            // Fast path: deleteOneICDRow already waited for the row to
-            // leave the DOM, so a normal, working delete confirms and
-            // returns here immediately — no added delay. Only a code that
-            // ACTUALLY bounces back pays an extra wait, and only on the
-            // retry after that happens (900ms, 1600ms, 2300ms), giving
-            // eCW's backend a little more time to commit before checking
-            // again.
-            if (!findICDRowByCodeFast(code)) return { ok: true };
+            if (icdCodeCount(code) <= targetCount) {
+                if (await settledCount() <= targetCount) return { ok: true };
+            }
             if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
-            // Still there (or back) — loop and try again.
         }
-        return { ok: false };
+        return { ok: icdCodeCount(code) <= targetCount };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -2692,7 +2742,7 @@ function __smartCoderReadVersion(fallback) {
             if (entries.length < 2) return;
             // Keep the last row, delete every earlier one.
             entries.slice(0, -1).forEach(entry => {
-                toDelete.push({ code, row: entry.row, kind: 'icd', reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
+                toDelete.push({ code, row: entry.row, kind: 'icd', dup: true, reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
             });
         });
 
@@ -4406,9 +4456,22 @@ function __smartCoderReadVersion(fallback) {
             '3725F', 'H0049', 'H0001', 'G8754', 'G8752', '99606',
         ]);
         const icdsToDelete = new Set([
-            'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
+            'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
             'Z00.129', 'Z11.3', 'Z11.4', 'Z71.6','Z00.00'
         ]);
+        // Z02.1 (pre-employment exam) can't coexist with the preventive
+        // Z00.01/Z00.121, so it's deleted ONLY when a preventive visit code
+        // (99381-99397 or Medicare AWV G0402/G0438/G0439) is on the CPT
+        // grid. With no preventive code, Z02.1 is left on the chart.
+        const AL_Z021_PREVENTIVE_CPTS = new Set([
+            '99381', '99382', '99383', '99384', '99385', '99386', '99387',
+            '99391', '99392', '99393', '99394', '99395', '99396', '99397',
+            'G0402', 'G0438', 'G0439'
+        ]);
+        const al_hasPreventiveCPT = Array.from(document.querySelectorAll('#billingTbl4 tbody tr')).some(row =>
+            AL_Z021_PREVENTIVE_CPTS.has((row.querySelector('td:nth-child(2)')?.textContent || '').trim().toUpperCase())
+        );
+        if (al_hasPreventiveCPT) icdsToDelete.add('Z02.1');
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
         function al_getICDRows() { return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')); }
@@ -6220,10 +6283,23 @@ function __smartCoderReadVersion(fallback) {
         actionLog = [];
         renderSnapshotBlock();
 
+        // 1.91: per-code row counts before any deletes, so the stability
+        // recheck below knows how many rows a duplicate should leave.
+        const cptCountBeforeRun = {};
+        getCPTRows().forEach(row => {
+            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (code) cptCountBeforeRun[code] = (cptCountBeforeRun[code] || 0) + 1;
+        });
+        const icdCountBeforeRun = {};
+        getICDRows().forEach(entry => {
+            const code = entry.code.trim().toUpperCase();
+            if (code) icdCountBeforeRun[code] = (icdCountBeforeRun[code] || 0) + 1;
+        });
+
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                result = await deleteICDRowWithRetry(item.code);
+                result = await deleteICDRowWithRetry(item.code, 4, { keepAtLeast: item.dup ? 1 : 0 });
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -6289,6 +6365,25 @@ function __smartCoderReadVersion(fallback) {
         }
 
         await Promise.all(actionLog.filter(e => e.status === 'success').map(async entry => {
+            if (entry.action === 'delete') {
+                // 1.91: count-based — a duplicate should settle at
+                // (before - successful deletes), not zero.
+                const codeUpper = entry.code.toUpperCase();
+                const kind = entry.kind || 'cpt';
+                const successfulDeletes = actionLog.filter(e2 =>
+                    e2.action === 'delete' && (e2.kind || 'cpt') === kind &&
+                    e2.code.toUpperCase() === codeUpper && e2.status === 'success'
+                ).length;
+                const beforeCount = kind === 'icd' ? (icdCountBeforeRun[codeUpper] || 0) : (cptCountBeforeRun[codeUpper] || 0);
+                const expectedRemaining = Math.max(beforeCount - successfulDeletes, 0);
+                const countFn = kind === 'icd' ? () => icdCodeCount(codeUpper) : () => cptCodeCount(codeUpper);
+                const currentCount = await pollUntilStable(countFn, 4500, 400);
+                if (currentCount > expectedRemaining) {
+                    entry.status = 'fail';
+                    entry.message = 'Row reappeared after a moment — deletion did not actually stick.';
+                }
+                return;
+            }
             const checkFn = entry.kind === 'icd'
                 ? () => !!findICDRowByCodeFast(entry.code)
                 : () => !!getCPTRowByCode(entry.code);
@@ -6314,6 +6409,9 @@ function __smartCoderReadVersion(fallback) {
         if (recheck) {
             for (const item of recheck.toDelete) {
                 if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
+                // 1.91: never re-run a duplicate cleanup on the recheck pass —
+                // a grid that hasn't caught up still shows both rows.
+                if (item.dup && actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
                 let result;
                 if (item.kind === 'icd') {
                     const ok = await new Promise(resolve => deleteOneICDRow(item.row, item.code, resolve));
