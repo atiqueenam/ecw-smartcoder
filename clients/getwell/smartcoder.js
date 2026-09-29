@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.93
+// @name         Getwell SmartCoder by ATQ v5.94
 // @namespace    http://tampermonkey.net/
-// @version      5.93
+// @version      5.94
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,14 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.94 (2026-09-29) - Fixed duplicate ICD cleanup deleting BOTH copies
+//   (e.g. E78.5 entered twice -> both removed). deleteICDRowWithRetry
+//   re-captured its "before" count on every retry, so when eCW's grid
+//   briefly showed the deleted row bouncing back and the save then landed,
+//   the retry deleted the kept instance too. Now the target count is fixed
+//   once per call, each retry first waits for the grid to settle and stops
+//   if the earlier attempt already landed, duplicate cleanups can never go
+//   below 1 row, and the recheck pass never re-runs a duplicate cleanup.
 // 5.93 (2026-09-23) - Fixed Auto Link not showing/persisting ICD codes on
 //   some interfaces (ported from Bronx 1.85 / Hasnayen 1.34): a CPT row can
 //   render TWO icd1-icd4 input sets with identical data-fieldname values
@@ -2329,42 +2337,57 @@ function __smartCoderReadVersion(fallback) {
     // fresh each time (never reusing a stale DOM reference across
     // attempts). Falls back to reporting failure only if it still won't
     // hold after all attempts.
-    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
-            if (!entry) return { ok: true }; // already gone (or never there)
+    async function deleteICDRowWithRetry(code, maxAttempts = 4, opts = {}) {
+        // 5.94: One call = remove exactly ONE row for this code. The
+        // target count is captured ONCE, before the first attempt, and
+        // every retry first re-checks it — a late-committing earlier
+        // attempt (grid showed the row "bounce back", then eCW's save
+        // landed) already counts as done, so the retry must NOT click
+        // delete again. Before 5.94 each attempt re-captured its own
+        // "before" count, so on a duplicated code (e.g. E78.5 x2) a
+        // bounce-back retry deleted the kept instance too, wiping both.
+        // opts.keepAtLeast: never delete below this many rows (duplicate
+        // cleanup passes 1 so the last instance can never be removed).
+        const keepAtLeast = opts.keepAtLeast || 0;
+        const countFor = () => getICDRows().filter(r => r.code.toUpperCase() === code.toUpperCase()).length;
+        const settledCount = async () => {
+            let last = countFor(), stable = 1;
+            const start = Date.now();
+            while (Date.now() - start < 2500) {
+                await new Promise(r => setTimeout(r, 300));
+                const cur = countFor();
+                if (cur === last) { if (++stable >= 2) return cur; } else { stable = 1; last = cur; }
+            }
+            return last;
+        };
+        const originalCount = countFor();
+        if (originalCount === 0) return { ok: true };
+        const targetCount = originalCount - 1;
+        if (targetCount < keepAtLeast) return { ok: true, skipped: true };
 
-            // Count-based, same reasoning as deleteOneICDRow: when this
-            // code is duplicated, one matching row is EXPECTED to remain
-            // (the kept instance) after a correct delete, so "is a row
-            // with this code still findable" is the wrong test — it would
-            // treat every successful duplicate-cleanup delete as a
-            // bounce-back and burn all 4 retry attempts. Track the count
-            // for this code at the start of the attempt and require it to
-            // drop, not hit zero.
-            const countBeforeAttempt = getICDRows().filter(r => r.code.toUpperCase() === code.toUpperCase()).length;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (attempt > 1) {
+                // Let the grid settle, then see whether the previous
+                // attempt actually landed before clicking anything again.
+                const now = await settledCount();
+                if (now <= targetCount) return { ok: true };
+            }
+            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
+            if (!entry) return { ok: true };
 
             const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
             if (!clicked) {
-                // Confirm click/timeout failed outright — brief pause, then
-                // retry from scratch with a fresh row lookup.
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
-
-            // Fast path: deleteOneICDRow already waited for the count to
-            // drop, so a normal, working delete confirms and returns here
-            // immediately — no added delay. Only a code that ACTUALLY
-            // bounces back (count returns to countBeforeAttempt) pays an
-            // extra wait, and only on the retry after that happens (900ms,
-            // 1600ms, 2300ms), giving eCW's backend a little more time to
-            // commit before checking again.
-            const countAfter = getICDRows().filter(r => r.code.toUpperCase() === code.toUpperCase()).length;
-            if (countAfter < countBeforeAttempt) return { ok: true };
+            if (countFor() <= targetCount) {
+                // Confirm it holds (catches the transient drop during an
+                // Angular re-render) before reporting success.
+                if (await settledCount() <= targetCount) return { ok: true };
+            }
             if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
-            // Still there (or back) — loop and try again.
         }
-        return { ok: false };
+        return { ok: countFor() <= targetCount };
     }
 
     // Deletes any of the given ICD codes that are currently on the grid.
@@ -2793,7 +2816,7 @@ function __smartCoderReadVersion(fallback) {
             if (entries.length < 2) return;
             // Keep the last row, delete every earlier one.
             entries.slice(0, -1).forEach(entry => {
-                toDelete.push({ code, row: entry.row, kind: 'icd', reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
+                toDelete.push({ code, row: entry.row, kind: 'icd', dup: true, reason: 'Duplicate ICD code — removing duplicate, keeping one instance' });
             });
         });
 
@@ -6660,7 +6683,7 @@ function __smartCoderReadVersion(fallback) {
         for (const item of analysisState.toDelete) {
             let result;
             if (item.kind === 'icd') {
-                result = await deleteICDRowWithRetry(item.code);
+                result = await deleteICDRowWithRetry(item.code, 4, { keepAtLeast: item.dup ? 1 : 0 });
             } else {
                 result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
             }
@@ -6780,9 +6803,13 @@ function __smartCoderReadVersion(fallback) {
                 // so give it another shot here instead of leaving it as a
                 // dead-end "fail" entry.
                 if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
+                // 5.94: never re-attempt a duplicate cleanup on the recheck
+                // pass — if the grid hasn't caught up yet it still shows
+                // both rows, and a second delete would remove the kept one.
+                if (item.dup && actionLog.some(e => e.code === item.code && e.action === 'delete')) continue;
                 let result;
                 if (item.kind === 'icd') {
-                    result = await deleteICDRowWithRetry(item.code);
+                    result = await deleteICDRowWithRetry(item.code, 4, { keepAtLeast: item.dup ? 1 : 0 });
                 } else {
                     result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
                 }

@@ -3,7 +3,7 @@
   "name": "Getwell",
   "siteId": "nygwmcapp",
   "hostnames": ["nygwmcapp.eclinicalweb.com"],
-  "version": "5.93",
+  "version": "5.94",
   "entry": "smartcoder.js",
   "enabled": true
 }
