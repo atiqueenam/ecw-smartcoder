@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.94
+// @name         Getwell SmartCoder by ATQ v5.95
 // @namespace    http://tampermonkey.net/
-// @version      5.94
+// @version      5.95
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.95 (2026-09-29) - Auto Link no longer deletes Z02.1 unconditionally.
+//   It's now removed only when a preventive visit CPT (99381-99397 or
+//   G0402/G0438/G0439) is on the chart, since Z02.1 can't sit alongside
+//   the preventive Z00.01/Z00.121. Without a preventive code, Z02.1 stays.
+//   Nothing else changed.
 // 5.94 (2026-09-29) - Fixed duplicate ICD cleanup deleting BOTH copies
 //   (e.g. E78.5 entered twice -> both removed). deleteICDRowWithRetry
 //   re-captured its "before" count on every retry, so when eCW's grid
@@ -4809,9 +4814,22 @@ function __smartCoderReadVersion(fallback) {
             ...al_getAgeRestrictedCPTs()
         ]);
         const icdsToDelete = new Set([
-            'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
+            'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
             'Z00.129', 'Z11.3', 'Z11.4', 'Z09', 'Z71.6'
         ]);
+        // Z02.1 (pre-employment exam) can't coexist with the preventive
+        // Z00.01/Z00.121, so it's deleted ONLY when a preventive visit code
+        // (99381-99397 or Medicare AWV G0402/G0438/G0439) is on the CPT
+        // grid. With no preventive code, Z02.1 is left on the chart.
+        const AL_Z021_PREVENTIVE_CPTS = new Set([
+            '99381', '99382', '99383', '99384', '99385', '99386', '99387',
+            '99391', '99392', '99393', '99394', '99395', '99396', '99397',
+            'G0402', 'G0438', 'G0439'
+        ]);
+        const al_hasPreventiveCPT = Array.from(document.querySelectorAll('#billingTbl4 tbody tr')).some(row =>
+            AL_Z021_PREVENTIVE_CPTS.has((row.querySelector('td:nth-child(2)')?.textContent || '').trim().toUpperCase())
+        );
+        if (al_hasPreventiveCPT) icdsToDelete.add('Z02.1');
 
         function al_getCPTRows() { return Array.from(document.querySelectorAll('#billingTbl4 tbody tr')); }
         function al_getICDRows() { return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')); }
