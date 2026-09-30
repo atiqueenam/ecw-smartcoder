@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.95
+// @name         Getwell SmartCoder by ATQ v5.96
 // @namespace    http://tampermonkey.net/
-// @version      5.95
+// @version      5.96
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,17 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.96 (2026-09-30) [dev] - Direct injection for adding ICD/CPT codes.
+//   ICDs go LookupDiagnosisCodes.jsp -> scope.addToSelectedListFromGrid,
+//   CPTs go LookupCPTCodes.jsp -> scope.setBillingInsightsCpt (E&M codes
+//   also try the VisitCodes catalog), always picking the FIRST exact match.
+//   addSingleICDCodeFast / addSingleCPT / addEMTreeCode are now wrappers:
+//   inject first, fall back to the old search-and-select / E&M picker on
+//   any failure, and record every failure in an on-screen "Injection
+//   issues" panel + window.smcInjection (errors/copy/testICD/testCPT,
+//   enable/disable kill switch). No fallback when the code already landed
+//   in eCW's data (prevents duplicates). Page globals are read via
+//   window.* because the loader runs this inside the Tampermonkey sandbox.
 // 5.95 (2026-09-29) - Auto Link no longer deletes Z02.1 unconditionally.
 //   It's now removed only when a preventive visit CPT (99381-99397 or
 //   G0402/G0438/G0439) is on the chart, since Z02.1 can't sit alongside
@@ -2481,7 +2492,7 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
-    async function addSingleCPT(code) {
+    async function addSingleCPTViaSearch(code) {
         if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
 
         // A confirm dialog left open from an earlier delete blocks every
@@ -3766,7 +3777,7 @@ function __smartCoderReadVersion(fallback) {
     // Polls for the row to actually appear instead of a blind fixed sleep,
     // so it settles as soon as ECW finishes inserting (usually well under
     // the old flat delay).
-    async function addSingleICDCodeFast(code) {
+    async function addSingleICDCodeViaSearch(code) {
         if (findICDRowByCodeFast(code)) return true;
 
         // Same reasoning as addSingleCPT — clear any leftover confirm
@@ -3802,6 +3813,617 @@ function __smartCoderReadVersion(fallback) {
         }
         return results;
     }
+
+    // ====================== DIRECT INJECTION (5.96) ======================
+    // Adds ICD/CPT codes straight into eCW's Billing Angular scope instead of
+    // typing into the search box and clicking an autosuggest row:
+    //   ICD : LookupDiagnosisCodes.jsp  -> scope.addToSelectedListFromGrid(icd)
+    //   CPT : LookupCPTCodes.jsp        -> scope.setBillingInsightsCpt({action:'add', isEm, cpt})
+    //         (E&M codes fall back to the VisitCodes catalog when the general
+    //          CPTCodes+HCPCS catalog has no exact match)
+    //
+    // SAFETY / FALLBACK RULES
+    //  - Every injection failure is recorded and surfaced in the
+    //    "Injection issues" panel (and the console) so it can be tested
+    //    separately. Nothing fails silently.
+    //  - On failure the old search-and-select path runs automatically, so a
+    //    coder is never left worse off than before 5.96.
+    //  - EXCEPTION: if the code already landed in eCW's scope data but the
+    //    grid never showed it, the search fallback is NOT run — that could
+    //    add the same code twice. It is reported instead.
+    //  - All page globals go through `window` (= unsafeWindow under the
+    //    loader). Bare `angular` / `XMLWriter` etc. are NOT reliably visible
+    //    from the Tampermonkey sandbox.
+    //
+    // Console helpers (window.smcInjection):
+    //   .disable() / .enable() / .isEnabled()  -> kill switch (persists per browser)
+    //   .errors()   -> table of recorded injection issues
+    //   .copy()     -> copy the issue report as text
+    //   .clear()    -> clear recorded issues
+    //   .testICD('E11.9')            -> injection ONLY, no fallback
+    //   .testCPT('99213', true)      -> injection ONLY, no fallback (2nd arg = isEm)
+    //   .lookupICD('E11.9') / .lookupCPT('99213', true) -> lookup only, adds nothing
+    const INJECT_ENABLED_KEY = 'smc_getwell_injection_enabled';
+    const INJECT_ERRORS_KEY = 'smc_getwell_injection_errors';
+    const INJECT_MAX_STORED = 50;
+    const INJECT_HTTP_TIMEOUT_MS = 15000;
+    const INJECT_ICD_CONFIRM_MS = 4000;
+    const INJECT_CPT_CONFIRM_MS = 6000;   // associated-CPT processing is async
+    const INJECT_ICD_ENDPOINT = '/mobiledoc/jsp/catalog/xml/edi/LookupDiagnosisCodes.jsp?parentId=0';
+    const INJECT_CPT_ENDPOINT = '/mobiledoc/jsp/catalog/xml/edi/LookupCPTCodes.jsp?parentId=0&encId=';
+
+    let injectionIssues = [];
+    let injectionPanelTimer = null;
+
+    function isInjectionEnabled() {
+        try { return localStorage.getItem(INJECT_ENABLED_KEY) !== '0'; } catch { return true; }
+    }
+
+    function setInjectionEnabled(on) {
+        try { localStorage.setItem(INJECT_ENABLED_KEY, on ? '1' : '0'); } catch {}
+        console.info(`SmartCoder: direct injection ${on ? 'ENABLED' : 'DISABLED (search-and-select only)'}.`);
+        return on;
+    }
+
+    // stage values: precheck | api-missing | lookup-http | lookup-parse |
+    // no-exact-match | api-threw | not-confirmed | side-effect
+    class InjectionError extends Error {
+        constructor(stage, message, detail = {}, opts = {}) {
+            super(message);
+            this.name = 'InjectionError';
+            this.stage = stage;
+            this.detail = detail;
+            this.noFallback = !!opts.noFallback;
+        }
+    }
+
+    function toInjectionError(err) {
+        if (err instanceof InjectionError) return err;
+        return new InjectionError('unexpected', String(err?.message || err), { stack: String(err?.stack || '').slice(0, 600) });
+    }
+
+    const injNorm = code => String(code || '').trim().toUpperCase();
+    const injSleep = ms => new Promise(r => setTimeout(r, ms));
+    const injText = (el, sel) => el.querySelector(sel)?.textContent?.trim() || '';
+
+    function getBillingScopeForInjection() {
+        const ng = window.angular;
+        if (!ng || typeof ng.element !== 'function') {
+            throw new InjectionError('precheck', 'AngularJS is not reachable from the script (window.angular missing).');
+        }
+        const billingBtn = document.querySelector('#billingBtn1');
+        if (!billingBtn) {
+            throw new InjectionError('precheck', 'Billing screen is not open (#billingBtn1 not found).');
+        }
+        let scope = null;
+        try { scope = ng.element(billingBtn).scope(); } catch (e) {
+            throw new InjectionError('precheck', `angular.element(#billingBtn1).scope() threw: ${e?.message || e}`);
+        }
+        if (!scope) {
+            throw new InjectionError('precheck', 'Billing Angular scope not found (debug info may be disabled on this page).');
+        }
+        return scope;
+    }
+
+    function requireXmlHelpers() {
+        const missing = ['XMLWriter', 'startSoapPacket', 'addElement', 'endSoapPacket']
+            .filter(name => typeof window[name] !== 'function');
+        if (missing.length) {
+            throw new InjectionError('precheck', `eCW XML helper function(s) not found: ${missing.join(', ')}.`);
+        }
+    }
+
+    // Runs fn inside a digest without ever triggering
+    // "$digest already in progress".
+    function injSafeApply(scope, fn) {
+        const phase = scope.$root && scope.$root.$$phase;
+        if (phase === '$apply' || phase === '$digest') {
+            fn();
+        } else {
+            scope.$apply(fn);
+        }
+    }
+
+    function injNudgeDigest(scope) {
+        try { if (typeof scope.$applyAsync === 'function') scope.$applyAsync(); } catch {}
+    }
+
+    function injCreateWriter() {
+        return new window.XMLWriter('ISO-8859-1', '1.0');
+    }
+
+    function injAdd(xw, name, value) {
+        window.addElement(xw, name, value, 'xsi:type', 'xsd:string');
+    }
+
+    async function injPostLookup(path, xml, label) {
+        let url = path;
+        if (typeof window.makeURL === 'function') {
+            try { url = window.makeURL(url); } catch { url = path; }
+        }
+        const fetchFn = typeof window.fetch === 'function' ? window.fetch.bind(window) : fetch;
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), INJECT_HTTP_TIMEOUT_MS) : null;
+        let response, text;
+        try {
+            response = await fetchFn(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ FormData: xml }).toString(),
+                signal: controller ? controller.signal : undefined
+            });
+            text = await response.text();
+        } catch (e) {
+            const aborted = e?.name === 'AbortError';
+            throw new InjectionError('lookup-http', aborted
+                ? `${label} lookup timed out after ${INJECT_HTTP_TIMEOUT_MS / 1000}s.`
+                : `${label} lookup request failed: ${e?.message || e}`);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+        if (!response.ok) {
+            throw new InjectionError('lookup-http', `${label} lookup returned HTTP ${response.status}.`,
+                { responseSnippet: String(text || '').slice(0, 300) });
+        }
+        if (!text || !text.includes('<')) {
+            throw new InjectionError('lookup-parse', `${label} lookup returned a non-XML response.`,
+                { responseSnippet: String(text || '').slice(0, 300) });
+        }
+        const doc = new DOMParser().parseFromString(text, 'text/xml');
+        if (doc.querySelector('parsererror')) {
+            throw new InjectionError('lookup-parse', `${label} lookup returned invalid XML (session expired or server error page?).`,
+                { responseSnippet: text.slice(0, 300) });
+        }
+        return doc;
+    }
+
+    // ---------- ICD lookup (mirrors the captured LookupDiagnosisCodes.jsp request) ----------
+    function injBuildICDLookupXml(code, encounterDate) {
+        const xw = injCreateWriter();
+        window.startSoapPacket(xw);
+        xw.writeStartElement('lookup');
+        xw.writeAttributeString('xsi:type', 'xsd:string');
+        injAdd(xw, 'searchBy', 'code');
+        injAdd(xw, 'code', String(code).trim().toLowerCase());
+        injAdd(xw, 'keyName', 'Assessments');
+        injAdd(xw, 'ShowCodes', '1');
+        injAdd(xw, 'ValidDate', encounterDate || '');
+        injAdd(xw, 'counter', '1');
+        injAdd(xw, 'maxcount', '12');
+        injAdd(xw, 'StartWith', 'Starts With');
+        xw.writeEndElement();
+        window.endSoapPacket(xw);
+        return xw.flush();
+    }
+
+    async function injLookupICD(code) {
+        code = injNorm(code);
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        const doc = await injPostLookup(INJECT_ICD_ENDPOINT, injBuildICDLookupXml(code, scope.encounterDate), `ICD ${code}`);
+        return [...doc.querySelectorAll('ICDCodes > icd')].map(icd => ({
+            itemId: injText(icd, 'itemId'),
+            code: injText(icd, 'code'),
+            name: injText(icd, 'name'),
+            snowMedCode: injText(icd, 'snowMedCode'),
+            hasMultiple: injText(icd, 'hasMultiple'),
+            overdue: injText(icd, 'overdue'),
+            ecwstatus: injText(icd, 'ecwstatus'),
+            raf: injText(icd, 'raf'),
+            ValidFrom: injText(icd, 'ValidFrom'),
+            ValidTo: injText(icd, 'ValidTo'),
+            icdversion: injText(icd, 'icdversion')
+        }));
+    }
+
+    // ---------- CPT lookup (mirrors eCW's own creatCPTXml()) ----------
+    // catalog: "normal" = CPTCodes + HCPCS, "visit" = VisitCodes
+    function injBuildCPTLookupXml(code, catalog) {
+        const xw = injCreateWriter();
+        window.startSoapPacket(xw);
+        xw.writeStartElement('lookup');
+        xw.writeAttributeString('xsi:type', 'xsd:string');
+        injAdd(xw, 'searchBy', 'code');
+        injAdd(xw, 'code', String(code).trim());
+        injAdd(xw, 'counter', '1');
+        if (catalog === 'visit') {
+            injAdd(xw, 'keyName', 'VisitCodes');
+        } else {
+            injAdd(xw, 'keyName', 'CPTCodes');
+            injAdd(xw, 'keyName', 'HCPCS');
+        }
+        injAdd(xw, 'maxcount', '12');
+        injAdd(xw, 'bActive', 'Active');
+        injAdd(xw, 'ShowInvalid', '0');
+        injAdd(xw, 'Fee', '');
+        injAdd(xw, 'Amount', '0.00');
+        injAdd(xw, 'FeeSchId', '1');
+        injAdd(xw, 'ValidDate', '');       // eCW's creatCPTXml() sends a BLANK ValidDate here
+        injAdd(xw, 'inlinelookup', 'yes');
+        xw.writeEndElement();
+        window.endSoapPacket(xw);
+        return xw.flush();
+    }
+
+    async function injLookupCPTCatalog(code, catalog, encounterId) {
+        const doc = await injPostLookup(
+            INJECT_CPT_ENDPOINT + encodeURIComponent(encounterId),
+            injBuildCPTLookupXml(code, catalog),
+            `CPT ${code} (${catalog})`
+        );
+        return [...doc.querySelectorAll('procedures > procedure')].map(p => ({
+            itemId: injText(p, 'itemId'),
+            code: injText(p, 'code'),
+            name: injText(p, 'name'),
+            Mod1: injText(p, 'Mod1'),
+            Mod2: injText(p, 'Mod2'),
+            Mod3: injText(p, 'Mod3'),
+            Mod4: injText(p, 'Mod4'),
+            units: injText(p, 'units'),
+            chargecode: injText(p, 'chargecode'),
+            DocumentMinutes: injText(p, 'DocumentMinutes'),
+            TimedCode: injText(p, 'TimedCode')
+        }));
+    }
+
+    async function injLookupCPT(code, isEm = false) {
+        code = injNorm(code);
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (!scope.encounterId) {
+            throw new InjectionError('precheck', 'Billing scope has no encounterId — cannot run the CPT lookup.');
+        }
+        let results = await injLookupCPTCatalog(code, 'normal', scope.encounterId);
+        let exact = results.filter(x => injNorm(x.code) === code);
+        let catalog = 'normal';
+        if (!exact.length && isEm) {
+            const visitResults = await injLookupCPTCatalog(code, 'visit', scope.encounterId);
+            results = results.concat(visitResults);
+            exact = visitResults.filter(x => injNorm(x.code) === code);
+            catalog = 'visit';
+        }
+        return { results, exact, catalog };
+    }
+
+    // ---------- grid / scope readers ----------
+    function injScopeHasICD(scope, code) {
+        return (scope.icdData || []).some(x => x && injNorm(x.medicalcode) === code);
+    }
+
+    function injScopeHasCPT(scope, code) {
+        return (scope.cptData || []).some(x => x && injNorm(x.code) === code);
+    }
+
+    function injCPTCodeCounts() {
+        const counts = {};
+        getCPTRows().forEach(row => {
+            const c = injNorm(row.querySelector('td:nth-child(2)')?.textContent);
+            if (c) counts[c] = (counts[c] || 0) + 1;
+        });
+        return counts;
+    }
+
+    async function injWaitFor(checkFn, timeoutMs, onTick) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            try { onTick && onTick(); } catch {}
+            if (checkFn()) return true;
+            await injSleep(100);
+        }
+        return !!checkFn();
+    }
+
+    // ---------- ICD injection ----------
+    async function injectICD(rawCode) {
+        const code = injNorm(rawCode);
+        if (!code) throw new InjectionError('precheck', 'Empty ICD code.');
+        if (findICDRowByCodeFast(code)) return { ok: true, message: 'Already present' };
+
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (typeof scope.addToSelectedListFromGrid !== 'function') {
+            throw new InjectionError('api-missing', 'scope.addToSelectedListFromGrid() not found on the Billing scope.');
+        }
+
+        if (injScopeHasICD(scope, code)) {
+            // In eCW's data but not drawn yet — wait for the grid instead of adding again.
+            injNudgeDigest(scope);
+            const shown = await injWaitFor(() => !!findICDRowByCodeFast(code), 1500);
+            if (shown) return { ok: true, message: 'Already present' };
+            throw new InjectionError('not-confirmed',
+                `ICD ${code} is already in eCW's billing data but is not visible in the ICD grid.`, {}, { noFallback: true });
+        }
+
+        // Remove only broken, code-less rows left by earlier failed attempts.
+        const badRows = (scope.icdData || []).filter(x => !x || !x.medicalcode);
+        if (badRows.length) {
+            console.warn(`SmartCoder injection: removing ${badRows.length} invalid empty ICD row(s) from scope.`, badRows);
+            injSafeApply(scope, () => {
+                scope.icdData = (scope.icdData || []).filter(x => x && x.medicalcode);
+            });
+        }
+
+        const results = await injLookupICD(code);
+        const exact = results.filter(x => injNorm(x.code) === code);
+        if (!exact.length) {
+            throw new InjectionError('no-exact-match', `No exact eCW ICD match for ${code}.`,
+                { returnedCodes: results.map(x => x.code).slice(0, 12) });
+        }
+        const selected = exact[0];   // rule: always the FIRST exact result
+
+        try {
+            injSafeApply(scope, () => scope.addToSelectedListFromGrid(selected));
+        } catch (e) {
+            // It may have partially run — only allow the fallback if nothing landed.
+            throw new InjectionError('api-threw', `addToSelectedListFromGrid threw: ${e?.message || e}`,
+                { selected }, { noFallback: injScopeHasICD(scope, code) });
+        }
+
+        const confirmed = await injWaitFor(
+            () => !!findICDRowByCodeFast(code),
+            INJECT_ICD_CONFIRM_MS,
+            dismissAssociatedCPTModalIfPresent
+        );
+        if (confirmed) return { ok: true, message: null, selected };
+
+        const inScope = injScopeHasICD(scope, code);
+        if (inScope) {
+            injNudgeDigest(scope);
+            if (await injWaitFor(() => !!findICDRowByCodeFast(code), 1500)) return { ok: true, message: null, selected };
+        }
+        throw new InjectionError('not-confirmed', inScope
+            ? `ICD ${code} was added to eCW's data but never appeared in the grid.`
+            : `ICD ${code} was sent to eCW but was not added (not in scope data or grid).`,
+            { selected }, { noFallback: inScope });
+    }
+
+    // ---------- CPT injection ----------
+    async function injectCPT(rawCode, isEm = false) {
+        const code = injNorm(rawCode);
+        if (!code) throw new InjectionError('precheck', 'Empty CPT code.');
+        if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
+
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (typeof scope.setBillingInsightsCpt !== 'function') {
+            throw new InjectionError('api-missing', 'scope.setBillingInsightsCpt() not found on the Billing scope.');
+        }
+
+        if (injScopeHasCPT(scope, code)) {
+            injNudgeDigest(scope);
+            const shown = await injWaitFor(() => !!getCPTRowByCode(code), 1500);
+            if (shown) return { ok: true, message: 'Already present' };
+            throw new InjectionError('not-confirmed',
+                `CPT ${code} is already in eCW's billing data but is not visible in the CPT grid.`, {}, { noFallback: true });
+        }
+
+        const lookup = await injLookupCPT(code, isEm);
+        if (!lookup.exact.length) {
+            throw new InjectionError('no-exact-match',
+                `No exact eCW CPT match for ${code}${isEm ? ' (searched CPTCodes+HCPCS and VisitCodes)' : ' (searched CPTCodes+HCPCS)'}.`,
+                { returnedCodes: lookup.results.map(x => x.code).slice(0, 12) });
+        }
+        const selected = lookup.exact[0];   // rule: always the FIRST exact result
+
+        const before = injCPTCodeCounts();
+        try {
+            // NOT wrapped in $apply — setBillingInsightsCpt/addCode runs its
+            // own digest internally (wrapping it throws "$digest already in progress").
+            scope.setBillingInsightsCpt({ action: 'add', isEm: Boolean(isEm), cpt: selected });
+        } catch (e) {
+            throw new InjectionError('api-threw', `setBillingInsightsCpt threw: ${e?.message || e}`,
+                { selected, catalog: lookup.catalog }, { noFallback: injScopeHasCPT(scope, code) });
+        }
+
+        let confirmed = await injWaitFor(() => !!getCPTRowByCode(code), INJECT_CPT_CONFIRM_MS / 2);
+        if (!confirmed) {
+            injNudgeDigest(scope);
+            confirmed = await injWaitFor(() => !!getCPTRowByCode(code), INJECT_CPT_CONFIRM_MS / 2);
+        }
+        if (!confirmed) {
+            const inScope = injScopeHasCPT(scope, code);
+            throw new InjectionError('not-confirmed', inScope
+                ? `CPT ${code} was added to eCW's data but never appeared in the grid.`
+                : `CPT ${code} was sent to eCW but was not added (not in scope data or grid).`,
+                { selected, catalog: lookup.catalog }, { noFallback: inScope });
+        }
+
+        // Side-effect check: an E&M add must never silently replace an
+        // existing code. Report it (the add itself did succeed).
+        await injSleep(300);
+        const after = injCPTCodeCounts();
+        const lost = Object.keys(before).filter(c => c !== code && (after[c] || 0) < before[c]);
+        if (lost.length) {
+            recordInjectionIssue({
+                type: isEm ? 'E&M' : 'CPT', code, stage: 'side-effect',
+                reason: `Adding ${code} removed existing CPT row(s): ${lost.join(', ')}. Re-add them manually and check this code.`,
+                fallback: 'n/a — code was added', detail: { lost, catalog: lookup.catalog }
+            });
+        }
+        return { ok: true, message: null, selected, catalog: lookup.catalog };
+    }
+
+    // ---------- issue reporting / notification ----------
+    function loadStoredInjectionIssues() {
+        try { return JSON.parse(localStorage.getItem(INJECT_ERRORS_KEY) || '[]') || []; } catch { return []; }
+    }
+
+    function recordInjectionIssue(entry) {
+        let encounterId = '';
+        try { encounterId = String(window.angular?.element(document.querySelector('#billingBtn1'))?.scope()?.encounterId || ''); } catch {}
+        const full = { time: new Date().toISOString(), encounterId, version: SCRIPT_VERSION, ...entry };
+        injectionIssues.push(full);
+        try {
+            const stored = loadStoredInjectionIssues();
+            stored.push(full);
+            localStorage.setItem(INJECT_ERRORS_KEY, JSON.stringify(stored.slice(-INJECT_MAX_STORED)));
+        } catch {}
+        console.warn(`SmartCoder injection issue [${full.type} ${full.code}] (${full.stage}): ${full.reason} | fallback: ${full.fallback}`, full.detail || '');
+        clearTimeout(injectionPanelTimer);
+        injectionPanelTimer = setTimeout(renderInjectionIssuePanel, 300);
+    }
+
+    function injectionReportText(list) {
+        return (list || injectionIssues).map(e =>
+            `[${e.time}] v${e.version} enc ${e.encounterId || '?'} | ${e.type} ${e.code} | stage: ${e.stage} | ${e.reason} | fallback: ${e.fallback}` +
+            (e.detail && Object.keys(e.detail).length ? ` | detail: ${JSON.stringify(e.detail)}` : '')
+        ).join('\n');
+    }
+
+    function copyInjectionReport() {
+        const text = injectionReportText(injectionIssues.length ? injectionIssues : loadStoredInjectionIssues());
+        const done = () => showQuickNotice('Injection issue report copied to clipboard.');
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(() => console.log(text));
+        } else {
+            console.log(text);
+        }
+        return text;
+    }
+
+    function renderInjectionIssuePanel() {
+        if (!injectionIssues.length || !document.body) return;
+        let box = document.getElementById('smcInjectionIssues');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'smcInjectionIssues';
+            Object.assign(box.style, {
+                position: 'fixed', bottom: '20px', right: '20px', width: '380px', maxHeight: '320px',
+                overflowY: 'auto', background: '#fff', border: '1px solid #f87171', borderLeft: '5px solid #dc2626',
+                borderRadius: '10px', boxShadow: '0 6px 18px rgba(0,0,0,0.18)', zIndex: '9999999',
+                fontFamily: 'sans-serif', fontSize: '12px', color: '#1f2937', padding: '10px 12px'
+            });
+            document.body.appendChild(box);
+        }
+        const rows = injectionIssues.slice(-15).reverse().map(e => {
+            const tone = /search-and-select OK/.test(e.fallback) ? '#b45309' : '#b91c1c';
+            return `<div style="padding:5px 0;border-top:1px solid #f1f5f9;">
+                <b>${escapeHtml(e.type)} ${escapeHtml(e.code)}</b>
+                <span style="color:#6b7280;">· ${escapeHtml(e.stage)}</span><br>
+                <span>${escapeHtml(e.reason)}</span><br>
+                <span style="color:${tone};">Fallback: ${escapeHtml(e.fallback)}</span></div>`;
+        }).join('');
+        box.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+                <b style="color:#b91c1c;">⚠ Injection issues (${injectionIssues.length}) — please test these</b>
+                <span>
+                    <button type="button" data-smc-inj="copy" style="font-size:11px;cursor:pointer;">Copy</button>
+                    <button type="button" data-smc-inj="close" style="font-size:11px;cursor:pointer;">✕</button>
+                </span>
+            </div>${rows}`;
+        box.querySelector('[data-smc-inj="copy"]').onclick = copyInjectionReport;
+        box.querySelector('[data-smc-inj="close"]').onclick = () => { injectionIssues = []; box.remove(); };
+    }
+
+    // ---------- public wrappers (same contracts as the old functions) ----------
+    function injFallbackLabel(ok, message) {
+        return ok ? 'search-and-select OK' : `search-and-select FAILED${message ? ` (${message})` : ''}`;
+    }
+
+    // Returns boolean, like the old addSingleICDCodeFast.
+    async function addSingleICDCodeFast(code) {
+        code = (code || '').trim();
+        if (!code) return false;
+        if (!isInjectionEnabled()) return addSingleICDCodeViaSearch(code);
+        try {
+            const r = await injectICD(code);
+            return !!r.ok;
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'ICD', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return false;
+            }
+            let ok = false;
+            try { ok = await addSingleICDCodeViaSearch(code); } catch (e) { console.error('ICD search fallback threw', e); }
+            recordInjectionIssue({ type: 'ICD', code, stage: err.stage, reason: err.message, fallback: injFallbackLabel(ok), detail: err.detail });
+            return ok;
+        }
+    }
+
+    // Returns {ok, message}, like the old addSingleCPT.
+    async function addSingleCPT(code) {
+        code = (code || '').trim();
+        if (!code) return { ok: false, message: 'Empty code' };
+        if (!isInjectionEnabled()) return addSingleCPTViaSearch(code);
+        try {
+            const r = await injectCPT(code, false);
+            return { ok: !!r.ok, message: r.message || null };
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'CPT', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return { ok: false, message: `Injection: ${err.message}` };
+            }
+            let result = { ok: false, message: 'fallback threw' };
+            try { result = await addSingleCPTViaSearch(code); } catch (e) { console.error('CPT search fallback threw', e); }
+            recordInjectionIssue({ type: 'CPT', code, stage: err.stage, reason: err.message,
+                fallback: injFallbackLabel(result.ok, result.message), detail: err.detail });
+            return result;
+        }
+    }
+
+    // Returns {ok, message}, like the old addEMTreeCode. Injects as E&M;
+    // falls back to the "Add E&M" tree picker.
+    async function addEMTreeCode(code, categoryLabel, isNewPatient) {
+        code = (code || '').trim();
+        if (!code) return { ok: false, message: 'Empty code' };
+        if (!isInjectionEnabled()) return addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient);
+        try {
+            const r = await injectCPT(code, true);
+            return { ok: !!r.ok, message: r.message || null };
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'E&M', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return { ok: false, message: `Injection: ${err.message}` };
+            }
+            let result = { ok: false, message: 'fallback threw' };
+            try { result = await addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient); } catch (e) { console.error('E&M picker fallback threw', e); }
+            recordInjectionIssue({ type: 'E&M', code, stage: err.stage, reason: err.message,
+                fallback: injFallbackLabel(result.ok, result.message).replace('search-and-select', 'E&M picker'), detail: err.detail });
+            return result;
+        }
+    }
+
+    // ---------- console test API ----------
+    async function injTestRun(label, fn) {
+        try {
+            const r = await fn();
+            console.info(`SmartCoder injection test ${label}: OK`, r);
+            return r;
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            console.error(`SmartCoder injection test ${label}: FAILED at "${err.stage}" — ${err.message}`, err.detail);
+            return { ok: false, stage: err.stage, message: err.message, detail: err.detail };
+        }
+    }
+
+    window.smcInjection = {
+        enable: () => setInjectionEnabled(true),
+        disable: () => setInjectionEnabled(false),
+        isEnabled: isInjectionEnabled,
+        errors: () => {
+            const list = injectionIssues.length ? injectionIssues : loadStoredInjectionIssues();
+            console.table(list.map(e => ({ time: e.time, type: e.type, code: e.code, stage: e.stage, reason: e.reason, fallback: e.fallback })));
+            return list;
+        },
+        copy: copyInjectionReport,
+        clear: () => {
+            injectionIssues = [];
+            try { localStorage.removeItem(INJECT_ERRORS_KEY); } catch {}
+            document.getElementById('smcInjectionIssues')?.remove();
+            return 'cleared';
+        },
+        testICD: code => injTestRun(`ICD ${code}`, () => injectICD(code)),
+        testCPT: (code, isEm = false) => injTestRun(`CPT ${code}${isEm ? ' [E&M]' : ''}`, () => injectCPT(code, isEm)),
+        lookupICD: code => injTestRun(`lookup ICD ${code}`, () => injLookupICD(code)),
+        lookupCPT: (code, isEm = false) => injTestRun(`lookup CPT ${code}`, () => injLookupCPT(code, isEm))
+    };
 
     // ====================== PREVENTIVE / COUNSEL / SMOKING / OBESITY ACTIONS ======================
     // Adult BMI thresholds only. Pediatric Z68.51-.54 codes require BMI
@@ -4034,7 +4656,7 @@ function __smartCoderReadVersion(fallback) {
     // category to expand it if its children aren't already visible (some
     // categories stay expanded by default; clicking one that's already open
     // toggles it CLOSED instead, which hides Est/New Patient).
-    async function addEMTreeCode(code, categoryLabel, isNewPatient) {
+    async function addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient) {
         // Already there — no need to reopen the picker at all.
         if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
 
