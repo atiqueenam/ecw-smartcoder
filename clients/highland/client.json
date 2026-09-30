@@ -1,0 +1,9 @@
+{
+  "id": "highland-medical",
+  "name": "Highland Medical",
+  "siteId": "nyhmcnapp",
+  "hostnames": ["nyhmcnapp.ecwcloud.com"],
+  "version": "1.00",
+  "entry": "smartcoder.js",
+  "enabled": true
+}
