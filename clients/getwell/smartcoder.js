@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.98
+// @name         Getwell SmartCoder by ATQ v5.99
 // @namespace    http://tampermonkey.net/
-// @version      5.98
+// @version      5.99
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 5.99 (2026-09-30) [dev] - CPT batch injection. Analyze/Apply (and its
+//   recheck pass) now sends all plain CPT + vaccine-admin codes to eCW
+//   back-to-back and waits once, instead of one add/wait cycle per code.
+//   ICDs and E&M codes run first, one-by-one, as before. The batch
+//   self-verifies: codes eCW didn't keep are re-added one-by-one and
+//   reported (batch-missed); codes in eCW data but not the grid are NOT
+//   re-added (batch-not-shown); lost pre-existing rows and duplicates are
+//   reported. Kill switch: smcInjection.batch(false). Test helper:
+//   smcInjection.testBatch(['99401','G0447']).
 // 5.98 (2026-09-30) [dev] - CPT and E&M injection get the same speed-up
 //   as ICD: per-browser lookup cache (keyed by encounter year, 14-day TTL,
 //   separate for CPT vs E&M), parallel prefetch at the start of
@@ -4501,6 +4510,145 @@ function __smartCoderReadVersion(fallback) {
         return { ok: true, message: null, selected: resolved.selected, catalog: resolved.catalog, source: resolved.source };
     }
 
+    // ---------- CPT batch injection (5.99) ----------
+    // Sends every non-E&M CPT to eCW back-to-back, then waits ONCE for all
+    // rows, instead of add -> wait -> add -> wait. eCW's setBillingInsightsCpt
+    // was built for one code at a time, so the batch VERIFIES itself:
+    //  - any code that didn't show up is re-added one-by-one (injection,
+    //    then search fallback) and reported as "batch-missed";
+    //  - a code that landed in eCW's data but not the grid is NOT re-added
+    //    (duplicate risk) and is reported;
+    //  - pre-existing rows that vanished, or a code that ended up twice, are
+    //    reported so you can check them.
+    // E&M codes are never batched (visit-code logic stays sequential).
+    // Kill switch: smcInjection.batch(false)  -> back to one-by-one.
+    const INJECT_BATCH_KEY = 'smc_getwell_cpt_batch_enabled';
+    const INJECT_BATCH_CONFIRM_MS = 6000;
+
+    function isCPTBatchEnabled() {
+        try { return isInjectionEnabled() && localStorage.getItem(INJECT_BATCH_KEY) !== '0'; } catch { return isInjectionEnabled(); }
+    }
+
+    function setCPTBatchEnabled(on) {
+        try { localStorage.setItem(INJECT_BATCH_KEY, on ? '1' : '0'); } catch {}
+        console.info(`SmartCoder: CPT batch injection ${on ? 'ENABLED' : 'DISABLED (one-by-one)'}.`);
+        return on;
+    }
+
+    // codes: array of non-E&M CPT codes. Returns Map(code -> {ok, message}).
+    async function addCPTCodesBatch(rawCodes) {
+        const out = new Map();
+        const codes = [...new Set((rawCodes || []).map(injNorm).filter(Boolean))];
+        if (!codes.length) return out;
+
+        const sequential = async list => {
+            for (const c of list) out.set(c, await addSingleCPT(c));
+            return out;
+        };
+        if (!isCPTBatchEnabled()) return sequential(codes);
+
+        const pending = [];
+        codes.forEach(c => getCPTRowByCode(c) ? out.set(c, { ok: true, message: 'Already present' }) : pending.push(c));
+        if (pending.length <= 1) return sequential(pending);
+
+        let scope;
+        try {
+            scope = getBillingScopeForInjection();
+            requireXmlHelpers();
+            if (typeof scope.setBillingInsightsCpt !== 'function' || !scope.encounterId) throw new Error('not ready');
+        } catch {
+            return sequential(pending);   // addSingleCPT reports the exact precheck problem per code
+        }
+
+        const t0 = performance.now();
+        // 1) Resolve every code in parallel (cache / prefetch / server).
+        const resolved = await Promise.all(pending.map(c =>
+            injScopeHasCPT(scope, c)
+                ? Promise.resolve({ code: c, skip: true })
+                : injResolveCPT(c, false, scope).then(r => ({ code: c, r })).catch(err => ({ code: c, err }))
+        ));
+        const t1 = performance.now();
+
+        const retryOneByOne = [];
+        const sent = [];
+        resolved.forEach(x => {
+            if (x.skip || x.err) retryOneByOne.push(x.code);   // single path handles/reports these
+            else sent.push(x);
+        });
+
+        // 2) Fire them all, back-to-back, in the original order.
+        const before = injCPTCodeCounts();
+        sent.forEach(x => {
+            try {
+                scope.setBillingInsightsCpt({ action: 'add', isEm: false, cpt: x.r.selected });
+            } catch (e) {
+                x.threw = e;
+            }
+        });
+
+        // 3) Wait once for all of them.
+        // Stops early once some rows have appeared and the grid then stays
+        // unchanged for 1.2s (eCW finished; the rest are not coming), so a
+        // dropped code gets repaired quickly instead of after the full timeout.
+        const shownCount = () => sent.filter(x => !!getCPTRowByCode(x.code)).length;
+        const waitStart = Date.now();
+        let lastCount = -1, lastChange = Date.now(), nudged = false;
+        while (Date.now() - waitStart < INJECT_BATCH_CONFIRM_MS) {
+            const n = shownCount();
+            if (n === sent.length) break;
+            if (n !== lastCount) { lastCount = n; lastChange = Date.now(); }
+            else if (n > 0 && Date.now() - lastChange > 1200) {
+                if (nudged) break;
+                injNudgeDigest(scope); nudged = true; lastChange = Date.now();
+            }
+            if (!nudged && Date.now() - waitStart > INJECT_BATCH_CONFIRM_MS / 2) { injNudgeDigest(scope); nudged = true; }
+            await injSleep(50);
+        }
+        const t2 = performance.now();
+
+        // 4) Verify.
+        sent.forEach(x => {
+            if (getCPTRowByCode(x.code)) {
+                out.set(x.code, { ok: true, message: null });
+            } else if (injScopeHasCPT(scope, x.code)) {
+                out.set(x.code, { ok: false, message: 'Batch: in eCW data but not shown in grid' });
+                recordInjectionIssue({ type: 'CPT', code: x.code, stage: 'batch-not-shown',
+                    reason: `Batch add: ${x.code} is in eCW's billing data but never appeared in the grid.`,
+                    fallback: 'NOT run (would risk a duplicate). Check the grid / reopen Billing.',
+                    detail: { threw: x.threw ? String(x.threw.message || x.threw) : undefined } });
+            } else {
+                retryOneByOne.push(x.code);
+                if (x.r.source !== 'server') injCacheDrop('cpt', x.r.key);
+                recordInjectionIssue({ type: 'CPT', code: x.code, stage: 'batch-missed',
+                    reason: x.threw
+                        ? `Batch add: setBillingInsightsCpt threw (${x.threw.message || x.threw}).`
+                        : `Batch add: eCW did not keep ${x.code} when sent together with ${sent.length - 1} other code(s).`,
+                    fallback: 're-added one-by-one (see result below / grid)', detail: { batchSize: sent.length } });
+            }
+        });
+
+        const after = injCPTCodeCounts();
+        const lost = Object.keys(before).filter(c => (after[c] || 0) < before[c]);
+        if (lost.length) {
+            recordInjectionIssue({ type: 'CPT', code: sent.map(x => x.code).join(','), stage: 'side-effect',
+                reason: `Batch add removed existing CPT row(s): ${lost.join(', ')}. Re-add them manually and check.`,
+                fallback: 'n/a', detail: { lost } });
+        }
+        const dup = sent.map(x => x.code).filter(c => (after[c] || 0) > 1 && !(before[c] > 0));
+        if (dup.length) {
+            recordInjectionIssue({ type: 'CPT', code: dup.join(','), stage: 'batch-duplicate',
+                reason: `Batch add produced duplicate row(s) for ${dup.join(', ')}.`,
+                fallback: 'n/a — remove the extra row(s)', detail: { dup } });
+        }
+
+        injRecordTiming({ type: 'CPT batch', code: sent.map(x => x.code).join(','), source: `${sent.length} sent`,
+            lookupMs: Math.round(t1 - t0), addMs: 0, confirmMs: Math.round(t2 - t1), totalMs: Math.round(t2 - t0),
+            result: retryOneByOne.length ? `${retryOneByOne.length} retried` : 'ok' });
+
+        // 5) Anything that didn't make it goes through the normal single path.
+        return sequential(retryOneByOne);
+    }
+
     // ---------- issue reporting / notification ----------
     function loadStoredInjectionIssues() {
         try { return JSON.parse(localStorage.getItem(INJECT_ERRORS_KEY) || '[]') || []; } catch { return []; }
@@ -4680,6 +4828,8 @@ function __smartCoderReadVersion(fallback) {
         testCPT: (code, isEm = false) => injTestRun(`CPT ${code}${isEm ? ' [E&M]' : ''}`, () => injectCPT(code, isEm)),
         lookupICD: code => injTestRun(`lookup ICD ${code}`, () => injLookupICD(code)),
         lookupCPT: (code, isEm = false) => injTestRun(`lookup CPT ${code}`, () => injLookupCPT(code, isEm)),
+        batch: on => (on === undefined ? isCPTBatchEnabled() : setCPTBatchEnabled(!!on)),
+        testBatch: codes => injTestRun(`CPT batch ${codes}`, async () => Object.fromEntries(await addCPTCodesBatch(codes))),
         timings: () => { console.table(injectionTimings); return injectionTimings; },
         clearCache: () => { injCacheClearAll(); return 'ICD + CPT lookup caches cleared'; }
     };
@@ -7566,6 +7716,25 @@ function __smartCoderReadVersion(fallback) {
         }, 250);
     }
 
+    // 5.99: plain CPT / vaccine-admin items collected during the Apply loop
+    // are added in ONE batch here (units set afterwards), then logged exactly
+    // like the one-by-one path did.
+    async function applyDeferredCPTBatch(items, logMessage) {
+        if (!items.length) return;
+        const results = await addCPTCodesBatch(items.map(i => i.code));
+        for (const item of items) {
+            const r = results.get(injNorm(item.code)) || { ok: !!getCPTRowByCode(item.code), message: null };
+            let ok = !!r.ok;
+            let message = logMessage || r.message || undefined;
+            if (item.kind === 'vaxadmin' && ok && item.units) {
+                const unitsResult = await setCPTUnitsByCode(item.code, item.units);
+                if (!unitsResult.ok) message = 'Added, but could not set Units — set it manually';
+            }
+            actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: ok ? 'success' : 'fail', message });
+        }
+        renderSnapshotBlock();
+    }
+
     async function applyAnalysis() {
         if (!analysisState || actionRunning) return;
         actionRunning = true;
@@ -7611,7 +7780,9 @@ function __smartCoderReadVersion(fallback) {
             renderSnapshotBlock();
         }
 
+        const deferredCPT = [];
         for (const item of analysisState.toAdd) {
+            if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredCPT.push(item); continue; }
             if (item.kind === 'icd') {
                 const results = await addICDCodesFast([item.code]);
                 const ok = !!results[0]?.ok;
@@ -7636,6 +7807,7 @@ function __smartCoderReadVersion(fallback) {
             }
             renderSnapshotBlock();
         }
+        await applyDeferredCPTBatch(deferredCPT);
 
         // eCW sometimes shows a row instantly then silently removes it a
         // moment later (duplicate/modifier/insurance rule rejection). Polls
@@ -7733,8 +7905,10 @@ function __smartCoderReadVersion(fallback) {
                 renderSnapshotBlock();
             }
             prefetchAnalysisLookups(recheck.toAdd);
+            const deferredRecheckCPT = [];
             for (const item of recheck.toAdd) {
                 if (actionLog.some(e => e.code === item.code && e.action === 'add')) continue;
+                if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredRecheckCPT.push(item); continue; }
                 if (item.kind === 'icd') {
                     const results = await addICDCodesFast([item.code]);
                     actionLog.push({ code: item.code, action: 'add', kind: 'icd', status: results[0]?.ok ? 'success' : 'fail', message: 'Found on recheck pass' });
@@ -7757,6 +7931,7 @@ function __smartCoderReadVersion(fallback) {
                 }
                 renderSnapshotBlock();
             }
+            await applyDeferredCPTBatch(deferredRecheckCPT, 'Found on recheck pass');
         }
 
         actionRunning = false;
