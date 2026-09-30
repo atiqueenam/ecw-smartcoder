@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.91
+// @name         Bronx Health SmartCoder v1.92
 // @namespace    http://tampermonkey.net/
-// @version      1.91
+// @version      1.92
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.92 (2026-09-30) [dev] - Direct ICD/CPT injection, ported from Getwell 6.00.
+//   ICDs: LookupDiagnosisCodes.jsp -> scope.addToSelectedListFromGrid; CPTs:
+//   LookupCPTCodes.jsp -> scope.setBillingInsightsCpt (E&M also VisitCodes).
+//   Falls back to search-and-select / E&M picker on any failure and reports
+//   it in the "Injection issues" panel. Lookup cache + parallel prefetch,
+//   self-verifying CPT batch in Apply, exact-case codes (1170f -> 1170F
+//   replaced). Kill switches: smcInjection.disable(), smcInjection.batch(false).
 // 1.91 (2026-09-29) - Fixed duplicate ICD cleanup deleting BOTH copies
 //   (e.g. E78.5 entered twice -> both removed). The delete checks asked
 //   "is any row with this code still there?", which is always true for a
@@ -2289,7 +2296,7 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
-    async function addSingleCPT(code) {
+    async function addSingleCPTViaSearch(code) {
         if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
 
         // A confirm dialog left open from an earlier delete blocks every
@@ -3428,7 +3435,7 @@ function __smartCoderReadVersion(fallback) {
     // Polls for the row to actually appear instead of a blind fixed sleep,
     // so it settles as soon as ECW finishes inserting (usually well under
     // the old flat delay).
-    async function addSingleICDCodeFast(code) {
+    async function addSingleICDCodeViaSearch(code) {
         if (findICDRowByCodeFast(code)) return true;
 
         // Same reasoning as addSingleCPT — clear any leftover confirm
@@ -3451,6 +3458,7 @@ function __smartCoderReadVersion(fallback) {
     }
 
     async function addICDCodesFast(codes) {
+        prefetchICDLookups(codes);   // all lookups in parallel up front
         const results = [];
         for (const raw of codes) {
             const code = (raw || '').trim();
@@ -3464,6 +3472,1102 @@ function __smartCoderReadVersion(fallback) {
         }
         return results;
     }
+
+    // ====================== DIRECT INJECTION (ported from Getwell 6.00 in v1.92) ======================
+    // Adds ICD/CPT codes straight into eCW's Billing Angular scope instead of
+    // typing into the search box and clicking an autosuggest row:
+    //   ICD : LookupDiagnosisCodes.jsp  -> scope.addToSelectedListFromGrid(icd)
+    //   CPT : LookupCPTCodes.jsp        -> scope.setBillingInsightsCpt({action:'add', isEm, cpt})
+    //         (E&M codes fall back to the VisitCodes catalog when the general
+    //          CPTCodes+HCPCS catalog has no exact match)
+    //
+    // SAFETY / FALLBACK RULES
+    //  - Every injection failure is recorded and surfaced in the
+    //    "Injection issues" panel (and the console) so it can be tested
+    //    separately. Nothing fails silently.
+    //  - On failure the old search-and-select path runs automatically, so a
+    //    coder is never left worse off than before injection.
+    //  - EXCEPTION: if the code already landed in eCW's scope data but the
+    //    grid never showed it, the search fallback is NOT run — that could
+    //    add the same code twice. It is reported instead.
+    //  - All page globals go through `window` (= unsafeWindow under the
+    //    loader). Bare `angular` / `XMLWriter` etc. are NOT reliably visible
+    //    from the Tampermonkey sandbox.
+    //
+    // Console helpers (window.smcInjection):
+    //   .disable() / .enable() / .isEnabled()  -> kill switch (persists per browser)
+    //   .errors()   -> table of recorded injection issues
+    //   .copy()     -> copy the issue report as text
+    //   .clear()    -> clear recorded issues
+    //   .testICD('E11.9')            -> injection ONLY, no fallback
+    //   .testCPT('99213', true)      -> injection ONLY, no fallback (2nd arg = isEm)
+    //   .lookupICD('E11.9') / .lookupCPT('99213', true) -> lookup only, adds nothing
+    const INJECT_ENABLED_KEY = 'smc_bronx_injection_enabled';
+    const INJECT_ERRORS_KEY = 'smc_bronx_injection_errors';
+    const INJECT_MAX_STORED = 50;
+    const INJECT_HTTP_TIMEOUT_MS = 15000;
+    const INJECT_ICD_CONFIRM_MS = 4000;
+    const INJECT_CPT_CONFIRM_MS = 6000;   // associated-CPT processing is async
+    const INJECT_ICD_ENDPOINT = '/mobiledoc/jsp/catalog/xml/edi/LookupDiagnosisCodes.jsp?parentId=0';
+    const INJECT_CPT_ENDPOINT = '/mobiledoc/jsp/catalog/xml/edi/LookupCPTCodes.jsp?parentId=0&encId=';
+
+    let injectionIssues = [];
+    let injectionPanelTimer = null;
+
+    function isInjectionEnabled() {
+        try { return localStorage.getItem(INJECT_ENABLED_KEY) !== '0'; } catch { return true; }
+    }
+
+    function setInjectionEnabled(on) {
+        try { localStorage.setItem(INJECT_ENABLED_KEY, on ? '1' : '0'); } catch {}
+        console.info(`SmartCoder: direct injection ${on ? 'ENABLED' : 'DISABLED (search-and-select only)'}.`);
+        return on;
+    }
+
+    // stage values: precheck | api-missing | lookup-http | lookup-parse |
+    // no-exact-match | api-threw | not-confirmed | side-effect
+    class InjectionError extends Error {
+        constructor(stage, message, detail = {}, opts = {}) {
+            super(message);
+            this.name = 'InjectionError';
+            this.stage = stage;
+            this.detail = detail;
+            this.noFallback = !!opts.noFallback;
+        }
+    }
+
+    function toInjectionError(err) {
+        if (err instanceof InjectionError) return err;
+        return new InjectionError('unexpected', String(err?.message || err), { stack: String(err?.stack || '').slice(0, 600) });
+    }
+
+    const injNorm = code => String(code || '').trim().toUpperCase();
+    const injSleep = ms => new Promise(r => setTimeout(r, ms));
+    const injText = (el, sel) => el.querySelector(sel)?.textContent?.trim() || '';
+
+    function getBillingScopeForInjection() {
+        const ng = window.angular;
+        if (!ng || typeof ng.element !== 'function') {
+            throw new InjectionError('precheck', 'AngularJS is not reachable from the script (window.angular missing).');
+        }
+        const billingBtn = document.querySelector('#billingBtn1');
+        if (!billingBtn) {
+            throw new InjectionError('precheck', 'Billing screen is not open (#billingBtn1 not found).');
+        }
+        let scope = null;
+        try { scope = ng.element(billingBtn).scope(); } catch (e) {
+            throw new InjectionError('precheck', `angular.element(#billingBtn1).scope() threw: ${e?.message || e}`);
+        }
+        if (!scope) {
+            throw new InjectionError('precheck', 'Billing Angular scope not found (debug info may be disabled on this page).');
+        }
+        return scope;
+    }
+
+    function requireXmlHelpers() {
+        const missing = ['XMLWriter', 'startSoapPacket', 'addElement', 'endSoapPacket']
+            .filter(name => typeof window[name] !== 'function');
+        if (missing.length) {
+            throw new InjectionError('precheck', `eCW XML helper function(s) not found: ${missing.join(', ')}.`);
+        }
+    }
+
+    // Runs fn inside a digest without ever triggering
+    // "$digest already in progress".
+    function injSafeApply(scope, fn) {
+        const phase = scope.$root && scope.$root.$$phase;
+        if (phase === '$apply' || phase === '$digest') {
+            fn();
+        } else {
+            scope.$apply(fn);
+        }
+    }
+
+    function injNudgeDigest(scope) {
+        try { if (typeof scope.$applyAsync === 'function') scope.$applyAsync(); } catch {}
+    }
+
+    function injCreateWriter() {
+        return new window.XMLWriter('ISO-8859-1', '1.0');
+    }
+
+    function injAdd(xw, name, value) {
+        window.addElement(xw, name, value, 'xsi:type', 'xsd:string');
+    }
+
+    async function injPostLookup(path, xml, label) {
+        let url = path;
+        if (typeof window.makeURL === 'function') {
+            try { url = window.makeURL(url); } catch { url = path; }
+        }
+        const fetchFn = typeof window.fetch === 'function' ? window.fetch.bind(window) : fetch;
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), INJECT_HTTP_TIMEOUT_MS) : null;
+        let response, text;
+        try {
+            response = await fetchFn(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ FormData: xml }).toString(),
+                signal: controller ? controller.signal : undefined
+            });
+            text = await response.text();
+        } catch (e) {
+            const aborted = e?.name === 'AbortError';
+            throw new InjectionError('lookup-http', aborted
+                ? `${label} lookup timed out after ${INJECT_HTTP_TIMEOUT_MS / 1000}s.`
+                : `${label} lookup request failed: ${e?.message || e}`);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+        if (!response.ok) {
+            throw new InjectionError('lookup-http', `${label} lookup returned HTTP ${response.status}.`,
+                { responseSnippet: String(text || '').slice(0, 300) });
+        }
+        if (!text || !text.includes('<')) {
+            throw new InjectionError('lookup-parse', `${label} lookup returned a non-XML response.`,
+                { responseSnippet: String(text || '').slice(0, 300) });
+        }
+        const doc = new DOMParser().parseFromString(text, 'text/xml');
+        if (doc.querySelector('parsererror')) {
+            throw new InjectionError('lookup-parse', `${label} lookup returned invalid XML (session expired or server error page?).`,
+                { responseSnippet: text.slice(0, 300) });
+        }
+        return doc;
+    }
+
+    // ---------- ICD lookup (mirrors the captured LookupDiagnosisCodes.jsp request) ----------
+    function injBuildICDLookupXml(code, encounterDate) {
+        const xw = injCreateWriter();
+        window.startSoapPacket(xw);
+        xw.writeStartElement('lookup');
+        xw.writeAttributeString('xsi:type', 'xsd:string');
+        injAdd(xw, 'searchBy', 'code');
+        injAdd(xw, 'code', String(code).trim().toLowerCase());
+        injAdd(xw, 'keyName', 'Assessments');
+        injAdd(xw, 'ShowCodes', '1');
+        injAdd(xw, 'ValidDate', encounterDate || '');
+        injAdd(xw, 'counter', '1');
+        injAdd(xw, 'maxcount', '12');
+        injAdd(xw, 'StartWith', 'Starts With');
+        xw.writeEndElement();
+        window.endSoapPacket(xw);
+        return xw.flush();
+    }
+
+    async function injLookupICD(code) {
+        code = injNorm(code);
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        const doc = await injPostLookup(INJECT_ICD_ENDPOINT, injBuildICDLookupXml(code, scope.encounterDate), `ICD ${code}`);
+        return [...doc.querySelectorAll('ICDCodes > icd')].map(icd => ({
+            itemId: injText(icd, 'itemId'),
+            code: injText(icd, 'code'),
+            name: injText(icd, 'name'),
+            snowMedCode: injText(icd, 'snowMedCode'),
+            hasMultiple: injText(icd, 'hasMultiple'),
+            overdue: injText(icd, 'overdue'),
+            ecwstatus: injText(icd, 'ecwstatus'),
+            raf: injText(icd, 'raf'),
+            ValidFrom: injText(icd, 'ValidFrom'),
+            ValidTo: injText(icd, 'ValidTo'),
+            icdversion: injText(icd, 'icdversion')
+        }));
+    }
+
+    // ---------- CPT lookup (mirrors eCW's own creatCPTXml()) ----------
+    // catalog: "normal" = CPTCodes + HCPCS, "visit" = VisitCodes
+    function injBuildCPTLookupXml(code, catalog) {
+        const xw = injCreateWriter();
+        window.startSoapPacket(xw);
+        xw.writeStartElement('lookup');
+        xw.writeAttributeString('xsi:type', 'xsd:string');
+        injAdd(xw, 'searchBy', 'code');
+        injAdd(xw, 'code', String(code).trim());
+        injAdd(xw, 'counter', '1');
+        if (catalog === 'visit') {
+            injAdd(xw, 'keyName', 'VisitCodes');
+        } else {
+            injAdd(xw, 'keyName', 'CPTCodes');
+            injAdd(xw, 'keyName', 'HCPCS');
+        }
+        injAdd(xw, 'maxcount', '12');
+        injAdd(xw, 'bActive', 'Active');
+        injAdd(xw, 'ShowInvalid', '0');
+        injAdd(xw, 'Fee', '');
+        injAdd(xw, 'Amount', '0.00');
+        injAdd(xw, 'FeeSchId', '1');
+        injAdd(xw, 'ValidDate', '');       // eCW's creatCPTXml() sends a BLANK ValidDate here
+        injAdd(xw, 'inlinelookup', 'yes');
+        xw.writeEndElement();
+        window.endSoapPacket(xw);
+        return xw.flush();
+    }
+
+    async function injLookupCPTCatalog(code, catalog, encounterId) {
+        const doc = await injPostLookup(
+            INJECT_CPT_ENDPOINT + encodeURIComponent(encounterId),
+            injBuildCPTLookupXml(code, catalog),
+            `CPT ${code} (${catalog})`
+        );
+        return [...doc.querySelectorAll('procedures > procedure')].map(p => ({
+            itemId: injText(p, 'itemId'),
+            code: injText(p, 'code'),
+            name: injText(p, 'name'),
+            Mod1: injText(p, 'Mod1'),
+            Mod2: injText(p, 'Mod2'),
+            Mod3: injText(p, 'Mod3'),
+            Mod4: injText(p, 'Mod4'),
+            units: injText(p, 'units'),
+            chargecode: injText(p, 'chargecode'),
+            DocumentMinutes: injText(p, 'DocumentMinutes'),
+            TimedCode: injText(p, 'TimedCode')
+        }));
+    }
+
+    async function injLookupCPT(code, isEm = false) {
+        code = injNorm(code);
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (!scope.encounterId) {
+            throw new InjectionError('precheck', 'Billing scope has no encounterId — cannot run the CPT lookup.');
+        }
+        // E&M: query both catalogs AT THE SAME TIME (one round-trip instead
+        // of two). Same preference as before: a CPTCodes+HCPCS exact match
+        // wins; VisitCodes is used only when that has none.
+        const [normalResults, visitResults] = await Promise.all([
+            injLookupCPTCatalog(code, 'normal', scope.encounterId),
+            isEm ? injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(err => ({ err })) : Promise.resolve([])
+        ]);
+        const normalExact = normalResults.filter(x => injCodeText(x) === code);
+        if (normalExact.length || !isEm) return { results: normalResults, exact: normalExact, catalog: 'normal' };
+        if (visitResults && visitResults.err) throw visitResults.err;
+        return {
+            results: normalResults.concat(visitResults),
+            exact: visitResults.filter(x => injCodeText(x) === code),
+            catalog: 'visit'
+        };
+    }
+
+    // ---------- exact-case code handling (6.00) ----------
+    // eCW's catalog can hold the same code in two cases (e.g. "1170f" and
+    // "1170F"). Only the UPPERCASE form is used, so:
+    //  - lookups accept ONLY a result whose code text is exactly the
+    //    uppercase code (a lowercase-only result = no match, reported);
+    //  - the grid/scope "already present" checks are case-exact, so a
+    //    "1170f" row no longer hides a missing "1170F";
+    //  - a wrong-case CPT row on the chart is REPLACED: the uppercase code is
+    //    looked up first (so nothing is removed unless the replacement
+    //    exists), then the wrong-case row is deleted and the uppercase added.
+    const injCodeText = x => String((x && x.code) || '').trim();
+
+    function injPickExact(results, code) {
+        const exact = results.filter(x => injCodeText(x) === code);
+        const wrongCase = [...new Set(results.map(injCodeText).filter(c => c !== code && c.toUpperCase() === code))];
+        return { exact, wrongCase };
+    }
+
+    function injNoMatchError(kind, code, results, suffix = '') {
+        const { wrongCase } = injPickExact(results, code);
+        return new InjectionError('no-exact-match', wrongCase.length
+            ? `eCW only returned ${wrongCase.join(', ')} for ${code} — the lowercase form is not used, so it was NOT added${suffix}.`
+            : `No exact eCW ${kind} match for ${code}${suffix}.`,
+            { returnedCodes: results.map(injCodeText).slice(0, 12), wrongCase });
+    }
+
+    function injCPTRowText(row) {
+        return (row.querySelector('td:nth-child(2)')?.textContent || '').trim();
+    }
+
+    function injCPTRowExact(code) {
+        return getCPTRows().find(r => injCPTRowText(r) === code) || null;
+    }
+
+    function injCPTWrongCaseRows(code) {
+        return getCPTRows().filter(r => { const t = injCPTRowText(r); return t !== code && t.toUpperCase() === code; });
+    }
+
+    // Every CPT row whose code contains lowercase letters -> [{text, upper}]
+    function getWrongCaseCPTCodes() {
+        const seen = new Set();
+        const out = [];
+        getCPTRows().forEach(r => {
+            const text = injCPTRowText(r);
+            if (!text || !/[a-z]/.test(text) || seen.has(text)) return;
+            seen.add(text);
+            out.push({ text, upper: text.toUpperCase() });
+        });
+        return out;
+    }
+
+    // Adds "replace 1170f with 1170F" items to an Analyze result so they are
+    // visible in the panel and fixed by Apply.
+    function appendCaseFixItems(state) {
+        if (!state || !Array.isArray(state.toAdd) || !isInjectionEnabled()) return state;
+        const has = (list, c) => (list || []).some(i => injNorm(i.code) === c);
+        getWrongCaseCPTCodes().forEach(({ text, upper }) => {
+            if (has(state.toAdd, upper) || has(state.toDelete, upper)) return;
+            state.toAdd.push({ code: upper, kind: 'cpt', reason: `Replace lowercase ${text} with ${upper}`, caseFix: text });
+        });
+        return state;
+    }
+
+    function injDeleteCPTRowAsync(row, text) {
+        return new Promise(resolve => {
+            try { deleteOneCPTRow(row, text, resolve); } catch (e) { resolve({ ok: false, error: e }); }
+        });
+    }
+
+    // ---------- grid / scope readers ----------
+    function injScopeHasICD(scope, code) {
+        return (scope.icdData || []).some(x => x && String(x.medicalcode || '').trim().toUpperCase() === code);
+    }
+
+    function injScopeHasCPT(scope, code) {
+        return (scope.cptData || []).some(x => x && injCodeText(x) === code);
+    }
+
+    function injCPTCodeCounts() {
+        const counts = {};
+        getCPTRows().forEach(row => {
+            const c = injCPTRowText(row);
+            if (c) counts[c] = (counts[c] || 0) + 1;
+        });
+        return counts;
+    }
+
+    async function injWaitFor(checkFn, timeoutMs, onTick, intervalMs = 100) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            try { onTick && onTick(); } catch {}
+            if (checkFn()) return true;
+            await injSleep(intervalMs);
+        }
+        return !!checkFn();
+    }
+
+    // ---------- ICD lookup cache + parallel prefetch (5.97) ----------
+    // The server lookup was the slow part of every ICD injection (one
+    // round-trip per code, strictly one after another, and only after the
+    // delete steps had finished). Now:
+    //  - the first exact match per code is cached in this browser, keyed by
+    //    the ICD fiscal year of the encounter date (ICD-10 updates every
+    //    Oct 1), so common codes skip the server entirely;
+    //  - quick actions / Analyze fire every ICD lookup IN PARALLEL up front,
+    //    so they complete while the deletes are still running;
+    //  - concurrent requests for the same code share one in-flight request;
+    //  - a cached entry eCW refuses is dropped and re-looked-up fresh once
+    //    before the search-and-select fallback is used.
+    const INJECT_ICD_CACHE_KEY = 'smc_bronx_icd_lookup_cache_v1';
+    const INJECT_CPT_CACHE_KEY = 'smc_bronx_cpt_lookup_cache_v1';
+    const INJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+    const INJECT_CACHE_MAX = 500;
+    const injLookupCaches = {
+        icd: { storageKey: INJECT_ICD_CACHE_KEY, mem: null },
+        cpt: { storageKey: INJECT_CPT_CACHE_KEY, mem: null }
+    };
+    const injLookupInflight = new Map();   // "icd:FY2026|E11.9" / "cpt:2026|em|99213" -> Promise
+    let injectionTimings = [];
+
+    // ICD-10 updates every Oct 1 -> key ICD entries by fiscal year.
+    function injIcdFiscalYear(dateStr) {
+        const s = String(dateStr || '');
+        let y, m;
+        let mt = s.match(/^(\d{1,2})\/\d{1,2}\/(\d{4})/);          // MM/DD/YYYY
+        if (mt) { m = +mt[1]; y = +mt[2]; }
+        else if ((mt = s.match(/^(\d{4})-(\d{1,2})-\d{1,2}/))) {  // YYYY-MM-DD
+            y = +mt[1]; m = +mt[2];
+        }
+        if (!y || !m) return `raw:${s || 'none'}`;
+        return `FY${m >= 10 ? y + 1 : y}`;
+    }
+
+    // CPT/HCPCS update every Jan 1 -> key CPT entries by calendar year.
+    function injCptYear(dateStr) {
+        const s = String(dateStr || '');
+        const mt = s.match(/^\d{1,2}\/\d{1,2}\/(\d{4})/) || s.match(/^(\d{4})-\d{1,2}-\d{1,2}/);
+        return mt ? mt[1] : `raw:${s || 'none'}`;
+    }
+
+    function injCacheObj(kind) {
+        const c = injLookupCaches[kind];
+        if (c.mem) return c.mem;
+        try { c.mem = JSON.parse(localStorage.getItem(c.storageKey) || '{}') || {}; }
+        catch { c.mem = {}; }
+        return c.mem;
+    }
+
+    function injCacheSave(kind) {
+        const cache = injCacheObj(kind);
+        const keys = Object.keys(cache);
+        if (keys.length > INJECT_CACHE_MAX) {
+            keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0))
+                .slice(0, keys.length - INJECT_CACHE_MAX)
+                .forEach(k => delete cache[k]);
+        }
+        try { localStorage.setItem(injLookupCaches[kind].storageKey, JSON.stringify(cache)); } catch {}
+    }
+
+    function injCacheGet(kind, key) {
+        const cache = injCacheObj(kind);
+        const hit = cache[key];
+        if (!hit || !hit.selected) return null;
+        if (Date.now() - (hit.ts || 0) > INJECT_CACHE_TTL_MS) { delete cache[key]; return null; }
+        return hit;
+    }
+
+    function injCacheSet(kind, key, value) {
+        injCacheObj(kind)[key] = { ...value, ts: Date.now() };
+        injCacheSave(kind);
+    }
+
+    function injCacheDrop(kind, key) {
+        const cache = injCacheObj(kind);
+        if (cache[key]) { delete cache[key]; injCacheSave(kind); }
+    }
+
+    function injCacheClearAll() {
+        Object.values(injLookupCaches).forEach(c => {
+            c.mem = {};
+            try { localStorage.removeItem(c.storageKey); } catch {}
+        });
+    }
+
+    // Shared cache -> in-flight -> server resolution for both code types.
+    async function injResolveCached(kind, key, fresh, fetchFn) {
+        const flightKey = `${kind}:${key}`;
+        if (!fresh) {
+            const cached = injCacheGet(kind, key);
+            if (cached) return { ...cached, source: 'cache', key };
+            if (injLookupInflight.has(flightKey)) {
+                const shared = await injLookupInflight.get(flightKey);
+                return { ...shared, source: 'prefetch', key };
+            }
+        }
+        const promise = (async () => {
+            const value = await fetchFn();
+            injCacheSet(kind, key, value);
+            return { ...value, source: 'server', key };
+        })();
+        injLookupInflight.set(flightKey, promise);
+        try { return await promise; }
+        finally { if (injLookupInflight.get(flightKey) === promise) injLookupInflight.delete(flightKey); }
+    }
+
+    // Resolves a code to its first exact eCW match: cache -> in-flight -> server.
+    async function injResolveICD(code, scope, { fresh = false } = {}) {
+        const key = `${injIcdFiscalYear(scope.encounterDate)}|${code}`;
+        const r = await injResolveCached('icd', key, fresh, async () => {
+            const results = await injLookupICD(code);
+            const { exact } = injPickExact(results, code);
+            if (!exact.length) throw injNoMatchError('ICD', code, results);
+            return { selected: exact[0] };   // rule: FIRST exact (case-exact) result
+        });
+        if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('icd', key);
+            return injResolveICD(code, scope, { fresh: true });
+        }
+        return r;
+    }
+
+    // Fire-and-forget: start every lookup now, in parallel. Never throws;
+    // any failure is simply re-hit (and reported) by the real add later.
+    function prefetchICDLookups(codes) {
+        try {
+            if (!isInjectionEnabled()) return;
+            const scope = getBillingScopeForInjection();
+            requireXmlHelpers();
+            [...new Set((codes || []).map(injNorm).filter(Boolean))]
+                .filter(code => !findICDRowByCodeFast(code))
+                .forEach(code => { injResolveICD(code, scope).catch(() => {}); });
+        } catch { /* billing not open etc. — the add path handles and reports it */ }
+    }
+
+    function injRecordTiming(entry) {
+        injectionTimings.push(entry);
+        if (injectionTimings.length > 100) injectionTimings = injectionTimings.slice(-100);
+        console.debug(`SmartCoder ${entry.type} inject ${entry.code}: ${entry.totalMs}ms (lookup ${entry.lookupMs}ms via ${entry.source}, add ${entry.addMs}ms, grid ${entry.confirmMs}ms)`);
+    }
+
+    // ---------- ICD injection ----------
+    async function injectICD(rawCode) {
+        const code = injNorm(rawCode);
+        if (!code) throw new InjectionError('precheck', 'Empty ICD code.');
+        if (findICDRowByCodeFast(code)) return { ok: true, message: 'Already present' };
+
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (typeof scope.addToSelectedListFromGrid !== 'function') {
+            throw new InjectionError('api-missing', 'scope.addToSelectedListFromGrid() not found on the Billing scope.');
+        }
+
+        if (injScopeHasICD(scope, code)) {
+            // In eCW's data but not drawn yet — wait for the grid instead of adding again.
+            injNudgeDigest(scope);
+            const shown = await injWaitFor(() => !!findICDRowByCodeFast(code), 1500, null, 50);
+            if (shown) return { ok: true, message: 'Already present' };
+            throw new InjectionError('not-confirmed',
+                `ICD ${code} is already in eCW's billing data but is not visible in the ICD grid.`, {}, { noFallback: true });
+        }
+
+        // Remove only broken, code-less rows left by earlier failed attempts.
+        const badRows = (scope.icdData || []).filter(x => !x || !x.medicalcode);
+        if (badRows.length) {
+            console.warn(`SmartCoder injection: removing ${badRows.length} invalid empty ICD row(s) from scope.`, badRows);
+            injSafeApply(scope, () => {
+                scope.icdData = (scope.icdData || []).filter(x => x && x.medicalcode);
+            });
+        }
+
+        const t0 = performance.now();
+        let resolved = await injResolveICD(code, scope);
+        const t1 = performance.now();
+
+        // One attempt = add + wait for the grid. Returns 'ok' | 'in-scope' | 'absent'.
+        const attempt = async selected => {
+            try {
+                injSafeApply(scope, () => scope.addToSelectedListFromGrid(selected));
+            } catch (e) {
+                if (injScopeHasICD(scope, code)) {
+                    throw new InjectionError('api-threw', `addToSelectedListFromGrid threw: ${e?.message || e}`,
+                        { selected }, { noFallback: true });
+                }
+                return { state: 'threw', error: e };
+            }
+            const confirmed = await injWaitFor(
+                () => !!findICDRowByCodeFast(code),
+                INJECT_ICD_CONFIRM_MS,
+                dismissAssociatedCPTModalIfPresent,
+                50
+            );
+            if (confirmed) return { state: 'ok' };
+            if (injScopeHasICD(scope, code)) {
+                injNudgeDigest(scope);
+                if (await injWaitFor(() => !!findICDRowByCodeFast(code), 1500, null, 50)) return { state: 'ok' };
+                return { state: 'in-scope' };
+            }
+            return { state: 'absent' };
+        };
+
+        let result = await attempt(resolved.selected);
+        const t2 = performance.now();
+
+        // A cached/prefetched entry eCW didn't accept: drop it, look up fresh, retry once.
+        if ((result.state === 'absent' || result.state === 'threw') && resolved.source !== 'server') {
+            injCacheDrop('icd', resolved.key);
+            resolved = await injResolveICD(code, scope, { fresh: true });
+            result = await attempt(resolved.selected);
+        }
+
+        const t3 = performance.now();
+        injRecordTiming({
+            type: 'ICD', code, source: resolved.source,
+            lookupMs: Math.round(t1 - t0), addMs: Math.round(t2 - t1),
+            confirmMs: Math.round(t3 - t2), totalMs: Math.round(t3 - t0), result: result.state
+        });
+
+        if (result.state === 'ok') return { ok: true, message: null, selected: resolved.selected, source: resolved.source };
+        if (result.state === 'threw') {
+            throw new InjectionError('api-threw', `addToSelectedListFromGrid threw: ${result.error?.message || result.error}`,
+                { selected: resolved.selected });
+        }
+        const inScope = result.state === 'in-scope';
+        throw new InjectionError('not-confirmed', inScope
+            ? `ICD ${code} was added to eCW's data but never appeared in the grid.`
+            : `ICD ${code} was sent to eCW but was not added (not in scope data or grid).`,
+            { selected: resolved.selected, source: resolved.source }, { noFallback: inScope });
+    }
+
+    // ---------- CPT resolve + prefetch (5.98) ----------
+    async function injResolveCPT(code, isEm, scope, { fresh = false } = {}) {
+        const key = `${injCptYear(scope.encounterDate)}|${isEm ? 'em' : 'cpt'}|${code}`;
+        const r = await injResolveCached('cpt', key, fresh, async () => {
+            const lookup = await injLookupCPT(code, isEm);
+            if (!lookup.exact.length) {
+                throw injNoMatchError('CPT', code, lookup.results,
+                    isEm ? ' (searched CPTCodes+HCPCS and VisitCodes)' : ' (searched CPTCodes+HCPCS)');
+            }
+            return { selected: lookup.exact[0], catalog: lookup.catalog };   // rule: FIRST exact (case-exact) result
+        });
+        if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('cpt', key);
+            return injResolveCPT(code, isEm, scope, { fresh: true });
+        }
+        return r;
+    }
+
+    // Fire-and-forget parallel CPT lookups. items: [{code, isEm}]
+    function prefetchCPTLookups(items) {
+        try {
+            if (!isInjectionEnabled()) return;
+            const scope = getBillingScopeForInjection();
+            requireXmlHelpers();
+            if (!scope.encounterId) return;
+            const seen = new Set();
+            (items || []).forEach(it => {
+                const code = injNorm(it && it.code);
+                const isEm = !!(it && it.isEm);
+                if (!code || seen.has(`${isEm}|${code}`) || injCPTRowExact(code)) return;
+                seen.add(`${isEm}|${code}`);
+                injResolveCPT(code, isEm, scope).catch(() => {});
+            });
+        } catch { /* the add path handles and reports it */ }
+    }
+
+    // Prefetch for an Analyze/Apply toAdd list (ICD + CPT + E&M together).
+    function prefetchAnalysisLookups(items) {
+        const list = items || [];
+        prefetchICDLookups(list.filter(i => i.kind === 'icd').map(i => i.code));
+        prefetchCPTLookups(list.filter(i => i.kind !== 'icd').map(i => ({ code: i.code, isEm: i.kind === 'em' })));
+    }
+
+    // ---------- CPT injection ----------
+    async function injectCPT(rawCode, isEm = false) {
+        const code = injNorm(rawCode);
+        if (!code) throw new InjectionError('precheck', 'Empty CPT code.');
+        if (injCPTRowExact(code)) return { ok: true, message: 'Already present' };
+        const wrongCaseRows = injCPTWrongCaseRows(code);
+
+        const scope = getBillingScopeForInjection();
+        requireXmlHelpers();
+        if (typeof scope.setBillingInsightsCpt !== 'function') {
+            throw new InjectionError('api-missing', 'scope.setBillingInsightsCpt() not found on the Billing scope.');
+        }
+        if (!scope.encounterId) {
+            throw new InjectionError('precheck', 'Billing scope has no encounterId — cannot run the CPT lookup.');
+        }
+
+        if (injScopeHasCPT(scope, code)) {
+            injNudgeDigest(scope);
+            const shown = await injWaitFor(() => !!injCPTRowExact(code), 1500, null, 50);
+            if (shown) return { ok: true, message: 'Already present' };
+            throw new InjectionError('not-confirmed',
+                `CPT ${code} is already in eCW's billing data but is not visible in the CPT grid.`, {}, { noFallback: true });
+        }
+
+        const t0 = performance.now();
+        let resolved = await injResolveCPT(code, isEm, scope);   // throws before anything is deleted
+        const t1 = performance.now();
+
+        // Replace wrong-case row(s) (e.g. 1170f) now that 1170F is confirmed to exist.
+        const replacedFrom = [];
+        for (const row of wrongCaseRows) {
+            const text = injCPTRowText(row);
+            if (!text || !document.body.contains(row)) continue;
+            const del = await injDeleteCPTRowAsync(row, text);
+            if (!del || !del.ok) {
+                throw new InjectionError('case-fix',
+                    `Could not delete wrong-case row ${text}${del && del.blocked ? ' (eCW blocks deleting it here)' : ''} — ${code} was NOT added. Replace it manually.`,
+                    { wrongCase: text }, { noFallback: true });
+            }
+            replacedFrom.push(text);
+        }
+        const replaceNote = replacedFrom.length ? ` (replaced ${replacedFrom.join(', ')})` : '';
+        let before = injCPTCodeCounts();
+
+        // One attempt = add + wait for the grid. -> {state: 'ok'|'in-scope'|'absent'|'threw'}
+        const attempt = async selected => {
+            before = injCPTCodeCounts();
+            try {
+                // NOT wrapped in $apply — setBillingInsightsCpt/addCode runs its
+                // own digest internally (wrapping it throws "$digest already in progress").
+                scope.setBillingInsightsCpt({ action: 'add', isEm: Boolean(isEm), cpt: selected });
+            } catch (e) {
+                if (injScopeHasCPT(scope, code)) {
+                    throw new InjectionError('api-threw', `setBillingInsightsCpt threw: ${e?.message || e}`,
+                        { selected }, { noFallback: true });
+                }
+                return { state: 'threw', error: e };
+            }
+            let confirmed = await injWaitFor(() => !!injCPTRowExact(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
+            if (!confirmed) {
+                injNudgeDigest(scope);
+                confirmed = await injWaitFor(() => !!injCPTRowExact(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
+            }
+            if (confirmed) return { state: 'ok' };
+            return { state: injScopeHasCPT(scope, code) ? 'in-scope' : 'absent' };
+        };
+
+        let result = await attempt(resolved.selected);
+        const t2 = performance.now();
+
+        // A cached/prefetched entry eCW didn't accept: drop it, look up fresh, retry once.
+        if ((result.state === 'absent' || result.state === 'threw') && resolved.source !== 'server') {
+            injCacheDrop('cpt', resolved.key);
+            resolved = await injResolveCPT(code, isEm, scope, { fresh: true });
+            result = await attempt(resolved.selected);
+        }
+
+        const t3 = performance.now();
+        injRecordTiming({
+            type: isEm ? 'E&M' : 'CPT', code, source: resolved.source,
+            lookupMs: Math.round(t1 - t0), addMs: Math.round(t2 - t1),
+            confirmMs: Math.round(t3 - t2), totalMs: Math.round(t3 - t0), result: result.state
+        });
+
+        const lostWarning = replacedFrom.length ? ` WARNING: ${replacedFrom.join(', ')} was already removed — add ${code} manually.` : '';
+        if (result.state === 'threw') {
+            throw new InjectionError('api-threw', `setBillingInsightsCpt threw: ${result.error?.message || result.error}.${lostWarning}`,
+                { selected: resolved.selected, catalog: resolved.catalog, replacedFrom });
+        }
+        if (result.state !== 'ok') {
+            const inScope = result.state === 'in-scope';
+            throw new InjectionError('not-confirmed', (inScope
+                ? `CPT ${code} was added to eCW's data but never appeared in the grid.`
+                : `CPT ${code} was sent to eCW but was not added (not in scope data or grid).`) + lostWarning,
+                { selected: resolved.selected, catalog: resolved.catalog, source: resolved.source, replacedFrom }, { noFallback: inScope });
+        }
+        if (replacedFrom.length) {
+            showQuickNotice(`Replaced ${replacedFrom.join(', ')} with ${code}.`);
+            console.info(`SmartCoder: replaced wrong-case CPT ${replacedFrom.join(', ')} with ${code}.`);
+        }
+
+        // Side-effect check: an add must never silently replace an existing
+        // code. E&M adds get a short settle (eCW may swap visit codes async).
+        if (isEm) await injSleep(150);
+        const after = injCPTCodeCounts();
+        const lost = Object.keys(before).filter(c => c !== code && (after[c] || 0) < before[c]);
+        if (lost.length) {
+            recordInjectionIssue({
+                type: isEm ? 'E&M' : 'CPT', code, stage: 'side-effect',
+                reason: `Adding ${code} removed existing CPT row(s): ${lost.join(', ')}. Re-add them manually and check this code.`,
+                fallback: 'n/a — code was added', detail: { lost, catalog: resolved.catalog }
+            });
+        }
+        return { ok: true, message: replacedFrom.length ? `Replaced ${replacedFrom.join(', ')} with ${code}` : null,
+            selected: resolved.selected, catalog: resolved.catalog, source: resolved.source, replacedFrom };
+    }
+
+    // ---------- CPT batch injection (5.99) ----------
+    // Sends every non-E&M CPT to eCW back-to-back, then waits ONCE for all
+    // rows, instead of add -> wait -> add -> wait. eCW's setBillingInsightsCpt
+    // was built for one code at a time, so the batch VERIFIES itself:
+    //  - any code that didn't show up is re-added one-by-one (injection,
+    //    then search fallback) and reported as "batch-missed";
+    //  - a code that landed in eCW's data but not the grid is NOT re-added
+    //    (duplicate risk) and is reported;
+    //  - pre-existing rows that vanished, or a code that ended up twice, are
+    //    reported so you can check them.
+    // E&M codes are never batched (visit-code logic stays sequential).
+    // Kill switch: smcInjection.batch(false)  -> back to one-by-one.
+    const INJECT_BATCH_KEY = 'smc_bronx_cpt_batch_enabled';
+    const INJECT_BATCH_CONFIRM_MS = 6000;
+
+    function isCPTBatchEnabled() {
+        try { return isInjectionEnabled() && localStorage.getItem(INJECT_BATCH_KEY) !== '0'; } catch { return isInjectionEnabled(); }
+    }
+
+    function setCPTBatchEnabled(on) {
+        try { localStorage.setItem(INJECT_BATCH_KEY, on ? '1' : '0'); } catch {}
+        console.info(`SmartCoder: CPT batch injection ${on ? 'ENABLED' : 'DISABLED (one-by-one)'}.`);
+        return on;
+    }
+
+    // codes: array of non-E&M CPT codes. Returns Map(code -> {ok, message}).
+    async function addCPTCodesBatch(rawCodes) {
+        const out = new Map();
+        const codes = [...new Set((rawCodes || []).map(injNorm).filter(Boolean))];
+        if (!codes.length) return out;
+
+        const sequential = async list => {
+            for (const c of list) out.set(c, await addSingleCPT(c));
+            return out;
+        };
+        if (!isCPTBatchEnabled()) return sequential(codes);
+
+        const pending = [];
+        const caseFix = [];   // wrong-case row on the chart -> single path replaces it
+        codes.forEach(c => {
+            if (injCPTRowExact(c)) out.set(c, { ok: true, message: 'Already present' });
+            else if (injCPTWrongCaseRows(c).length) caseFix.push(c);
+            else pending.push(c);
+        });
+        if (pending.length <= 1) return sequential([...caseFix, ...pending]);
+
+        let scope;
+        try {
+            scope = getBillingScopeForInjection();
+            requireXmlHelpers();
+            if (typeof scope.setBillingInsightsCpt !== 'function' || !scope.encounterId) throw new Error('not ready');
+        } catch {
+            return sequential([...caseFix, ...pending]);   // addSingleCPT reports the exact precheck problem per code
+        }
+
+        const t0 = performance.now();
+        // 1) Resolve every code in parallel (cache / prefetch / server).
+        const resolved = await Promise.all(pending.map(c =>
+            injScopeHasCPT(scope, c)
+                ? Promise.resolve({ code: c, skip: true })
+                : injResolveCPT(c, false, scope).then(r => ({ code: c, r })).catch(err => ({ code: c, err }))
+        ));
+        const t1 = performance.now();
+
+        const retryOneByOne = [];
+        const sent = [];
+        resolved.forEach(x => {
+            if (x.skip || x.err) retryOneByOne.push(x.code);   // single path handles/reports these
+            else sent.push(x);
+        });
+
+        // 2) Fire them all, back-to-back, in the original order.
+        const before = injCPTCodeCounts();
+        sent.forEach(x => {
+            try {
+                scope.setBillingInsightsCpt({ action: 'add', isEm: false, cpt: x.r.selected });
+            } catch (e) {
+                x.threw = e;
+            }
+        });
+
+        // 3) Wait once for all of them.
+        // Stops early once some rows have appeared and the grid then stays
+        // unchanged for 1.2s (eCW finished; the rest are not coming), so a
+        // dropped code gets repaired quickly instead of after the full timeout.
+        const shownCount = () => sent.filter(x => !!injCPTRowExact(x.code)).length;
+        const waitStart = Date.now();
+        let lastCount = -1, lastChange = Date.now(), nudged = false;
+        while (Date.now() - waitStart < INJECT_BATCH_CONFIRM_MS) {
+            const n = shownCount();
+            if (n === sent.length) break;
+            if (n !== lastCount) { lastCount = n; lastChange = Date.now(); }
+            else if (n > 0 && Date.now() - lastChange > 1200) {
+                if (nudged) break;
+                injNudgeDigest(scope); nudged = true; lastChange = Date.now();
+            }
+            if (!nudged && Date.now() - waitStart > INJECT_BATCH_CONFIRM_MS / 2) { injNudgeDigest(scope); nudged = true; }
+            await injSleep(50);
+        }
+        const t2 = performance.now();
+
+        // 4) Verify.
+        sent.forEach(x => {
+            if (injCPTRowExact(x.code)) {
+                out.set(x.code, { ok: true, message: null });
+            } else if (injScopeHasCPT(scope, x.code)) {
+                out.set(x.code, { ok: false, message: 'Batch: in eCW data but not shown in grid' });
+                recordInjectionIssue({ type: 'CPT', code: x.code, stage: 'batch-not-shown',
+                    reason: `Batch add: ${x.code} is in eCW's billing data but never appeared in the grid.`,
+                    fallback: 'NOT run (would risk a duplicate). Check the grid / reopen Billing.',
+                    detail: { threw: x.threw ? String(x.threw.message || x.threw) : undefined } });
+            } else {
+                retryOneByOne.push(x.code);
+                if (x.r.source !== 'server') injCacheDrop('cpt', x.r.key);
+                recordInjectionIssue({ type: 'CPT', code: x.code, stage: 'batch-missed',
+                    reason: x.threw
+                        ? `Batch add: setBillingInsightsCpt threw (${x.threw.message || x.threw}).`
+                        : `Batch add: eCW did not keep ${x.code} when sent together with ${sent.length - 1} other code(s).`,
+                    fallback: 're-added one-by-one (see result below / grid)', detail: { batchSize: sent.length } });
+            }
+        });
+
+        const after = injCPTCodeCounts();
+        const lost = Object.keys(before).filter(c => (after[c] || 0) < before[c]);
+        if (lost.length) {
+            recordInjectionIssue({ type: 'CPT', code: sent.map(x => x.code).join(','), stage: 'side-effect',
+                reason: `Batch add removed existing CPT row(s): ${lost.join(', ')}. Re-add them manually and check.`,
+                fallback: 'n/a', detail: { lost } });
+        }
+        const dup = sent.map(x => x.code).filter(c => (after[c] || 0) > 1 && !(before[c] > 0));
+        if (dup.length) {
+            recordInjectionIssue({ type: 'CPT', code: dup.join(','), stage: 'batch-duplicate',
+                reason: `Batch add produced duplicate row(s) for ${dup.join(', ')}.`,
+                fallback: 'n/a — remove the extra row(s)', detail: { dup } });
+        }
+
+        injRecordTiming({ type: 'CPT batch', code: sent.map(x => x.code).join(','), source: `${sent.length} sent`,
+            lookupMs: Math.round(t1 - t0), addMs: 0, confirmMs: Math.round(t2 - t1), totalMs: Math.round(t2 - t0),
+            result: retryOneByOne.length ? `${retryOneByOne.length} retried` : 'ok' });
+
+        // 5) Anything that didn't make it goes through the normal single path.
+        return sequential([...caseFix, ...retryOneByOne]);
+    }
+
+    // ---------- issue reporting / notification ----------
+    function loadStoredInjectionIssues() {
+        try { return JSON.parse(localStorage.getItem(INJECT_ERRORS_KEY) || '[]') || []; } catch { return []; }
+    }
+
+    function recordInjectionIssue(entry) {
+        let encounterId = '';
+        try { encounterId = String(window.angular?.element(document.querySelector('#billingBtn1'))?.scope()?.encounterId || ''); } catch {}
+        const full = { time: new Date().toISOString(), encounterId, version: SCRIPT_VERSION, ...entry };
+        injectionIssues.push(full);
+        try {
+            const stored = loadStoredInjectionIssues();
+            stored.push(full);
+            localStorage.setItem(INJECT_ERRORS_KEY, JSON.stringify(stored.slice(-INJECT_MAX_STORED)));
+        } catch {}
+        console.warn(`SmartCoder injection issue [${full.type} ${full.code}] (${full.stage}): ${full.reason} | fallback: ${full.fallback}`, full.detail || '');
+        clearTimeout(injectionPanelTimer);
+        injectionPanelTimer = setTimeout(renderInjectionIssuePanel, 300);
+    }
+
+    function injectionReportText(list) {
+        return (list || injectionIssues).map(e =>
+            `[${e.time}] v${e.version} enc ${e.encounterId || '?'} | ${e.type} ${e.code} | stage: ${e.stage} | ${e.reason} | fallback: ${e.fallback}` +
+            (e.detail && Object.keys(e.detail).length ? ` | detail: ${JSON.stringify(e.detail)}` : '')
+        ).join('\n');
+    }
+
+    function copyInjectionReport() {
+        const text = injectionReportText(injectionIssues.length ? injectionIssues : loadStoredInjectionIssues());
+        const done = () => showQuickNotice('Injection issue report copied to clipboard.');
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(() => console.log(text));
+        } else {
+            console.log(text);
+        }
+        return text;
+    }
+
+    function renderInjectionIssuePanel() {
+        if (!injectionIssues.length || !document.body) return;
+        let box = document.getElementById('smcInjectionIssues');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'smcInjectionIssues';
+            Object.assign(box.style, {
+                position: 'fixed', bottom: '20px', right: '20px', width: '380px', maxHeight: '320px',
+                overflowY: 'auto', background: '#fff', border: '1px solid #f87171', borderLeft: '5px solid #dc2626',
+                borderRadius: '10px', boxShadow: '0 6px 18px rgba(0,0,0,0.18)', zIndex: '9999999',
+                fontFamily: 'sans-serif', fontSize: '12px', color: '#1f2937', padding: '10px 12px'
+            });
+            document.body.appendChild(box);
+        }
+        const rows = injectionIssues.slice(-15).reverse().map(e => {
+            const tone = /search-and-select OK/.test(e.fallback) ? '#b45309' : '#b91c1c';
+            return `<div style="padding:5px 0;border-top:1px solid #f1f5f9;">
+                <b>${escapeHtml(e.type)} ${escapeHtml(e.code)}</b>
+                <span style="color:#6b7280;">· ${escapeHtml(e.stage)}</span><br>
+                <span>${escapeHtml(e.reason)}</span><br>
+                <span style="color:${tone};">Fallback: ${escapeHtml(e.fallback)}</span></div>`;
+        }).join('');
+        box.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+                <b style="color:#b91c1c;">⚠ Injection issues (${injectionIssues.length}) — please test these</b>
+                <span>
+                    <button type="button" data-smc-inj="copy" style="font-size:11px;cursor:pointer;">Copy</button>
+                    <button type="button" data-smc-inj="close" style="font-size:11px;cursor:pointer;">✕</button>
+                </span>
+            </div>${rows}`;
+        box.querySelector('[data-smc-inj="copy"]').onclick = copyInjectionReport;
+        box.querySelector('[data-smc-inj="close"]').onclick = () => { injectionIssues = []; box.remove(); };
+    }
+
+    // ---------- public wrappers (same contracts as the old functions) ----------
+    function injFallbackLabel(ok, message) {
+        return ok ? 'search-and-select OK' : `search-and-select FAILED${message ? ` (${message})` : ''}`;
+    }
+
+    // Returns boolean, like the old addSingleICDCodeFast.
+    async function addSingleICDCodeFast(code) {
+        code = (code || '').trim();
+        if (!code) return false;
+        if (!isInjectionEnabled()) return addSingleICDCodeViaSearch(code);
+        try {
+            const r = await injectICD(code);
+            return !!r.ok;
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'ICD', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return false;
+            }
+            let ok = false;
+            try { ok = await addSingleICDCodeViaSearch(code); } catch (e) { console.error('ICD search fallback threw', e); }
+            recordInjectionIssue({ type: 'ICD', code, stage: err.stage, reason: err.message, fallback: injFallbackLabel(ok), detail: err.detail });
+            return ok;
+        }
+    }
+
+    // Returns {ok, message}, like the old addSingleCPT.
+    async function addSingleCPT(code) {
+        code = (code || '').trim();
+        if (!code) return { ok: false, message: 'Empty code' };
+        if (!isInjectionEnabled()) return addSingleCPTViaSearch(code);
+        try {
+            const r = await injectCPT(code, false);
+            return { ok: !!r.ok, message: r.message || null };
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'CPT', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return { ok: false, message: `Injection: ${err.message}` };
+            }
+            let result = { ok: false, message: 'fallback threw' };
+            try { result = await addSingleCPTViaSearch(code); } catch (e) { console.error('CPT search fallback threw', e); }
+            recordInjectionIssue({ type: 'CPT', code, stage: err.stage, reason: err.message,
+                fallback: injFallbackLabel(result.ok, result.message), detail: err.detail });
+            return result;
+        }
+    }
+
+    // Returns {ok, message}, like the old addEMTreeCode. Injects as E&M;
+    // falls back to the "Add E&M" tree picker.
+    async function addEMTreeCode(code, categoryLabel, isNewPatient) {
+        code = (code || '').trim();
+        if (!code) return { ok: false, message: 'Empty code' };
+        if (!isInjectionEnabled()) return addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient);
+        try {
+            const r = await injectCPT(code, true);
+            return { ok: !!r.ok, message: r.message || null };
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            if (err.noFallback) {
+                recordInjectionIssue({ type: 'E&M', code, stage: err.stage, reason: err.message,
+                    fallback: 'NOT run (code already in eCW data — would risk a duplicate). Check the grid / reopen Billing.', detail: err.detail });
+                return { ok: false, message: `Injection: ${err.message}` };
+            }
+            let result = { ok: false, message: 'fallback threw' };
+            try { result = await addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient); } catch (e) { console.error('E&M picker fallback threw', e); }
+            recordInjectionIssue({ type: 'E&M', code, stage: err.stage, reason: err.message,
+                fallback: injFallbackLabel(result.ok, result.message).replace('search-and-select', 'E&M picker'), detail: err.detail });
+            return result;
+        }
+    }
+
+    // ---------- console test API ----------
+    async function injTestRun(label, fn) {
+        try {
+            const r = await fn();
+            console.info(`SmartCoder injection test ${label}: OK`, r);
+            return r;
+        } catch (raw) {
+            const err = toInjectionError(raw);
+            console.error(`SmartCoder injection test ${label}: FAILED at "${err.stage}" — ${err.message}`, err.detail);
+            return { ok: false, stage: err.stage, message: err.message, detail: err.detail };
+        }
+    }
+
+    window.smcInjection = {
+        enable: () => setInjectionEnabled(true),
+        disable: () => setInjectionEnabled(false),
+        isEnabled: isInjectionEnabled,
+        errors: () => {
+            const list = injectionIssues.length ? injectionIssues : loadStoredInjectionIssues();
+            console.table(list.map(e => ({ time: e.time, type: e.type, code: e.code, stage: e.stage, reason: e.reason, fallback: e.fallback })));
+            return list;
+        },
+        copy: copyInjectionReport,
+        clear: () => {
+            injectionIssues = [];
+            try { localStorage.removeItem(INJECT_ERRORS_KEY); } catch {}
+            document.getElementById('smcInjectionIssues')?.remove();
+            return 'cleared';
+        },
+        testICD: code => injTestRun(`ICD ${code}`, () => injectICD(code)),
+        testCPT: (code, isEm = false) => injTestRun(`CPT ${code}${isEm ? ' [E&M]' : ''}`, () => injectCPT(code, isEm)),
+        lookupICD: code => injTestRun(`lookup ICD ${code}`, () => injLookupICD(code)),
+        lookupCPT: (code, isEm = false) => injTestRun(`lookup CPT ${code}`, () => injLookupCPT(code, isEm)),
+        wrongCaseCPTs: () => { const l = getWrongCaseCPTCodes(); console.table(l); return l; },
+        batch: on => (on === undefined ? isCPTBatchEnabled() : setCPTBatchEnabled(!!on)),
+        testBatch: codes => injTestRun(`CPT batch ${codes}`, async () => Object.fromEntries(await addCPTCodesBatch(codes))),
+        timings: () => { console.table(injectionTimings); return injectionTimings; },
+        clearCache: () => { injCacheClearAll(); return 'ICD + CPT lookup caches cleared'; }
+    };
 
     // ====================== PREVENTIVE / COUNSEL / SMOKING / OBESITY ACTIONS ======================
     // Adult BMI thresholds only (Z68.1-Z68.45, raw BMI number). Pediatric
@@ -3716,7 +4820,7 @@ function __smartCoderReadVersion(fallback) {
     // category to expand it if its children aren't already visible (some
     // categories stay expanded by default; clicking one that's already open
     // toggles it CLOSED instead, which hides Est/New Patient).
-    async function addEMTreeCode(code, categoryLabel, isNewPatient) {
+    async function addEMTreeCodeViaPicker(code, categoryLabel, isNewPatient) {
         // Already there — no need to reopen the picker at all.
         if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
 
@@ -6102,6 +7206,12 @@ function __smartCoderReadVersion(fallback) {
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
+            prefetchICDLookups(codes);
+            if (isVNS || isStraightMedicare) {
+                prefetchCPTLookups([{ code: established ? 'G0439' : 'G0438', isEm: false }]);
+            } else if (emCode) {
+                prefetchCPTLookups([{ code: emCode, isEm: true }]);
+            }
             await clearOtherQuickActionBundles('pv');
             await deleteICDCodesByCode([z71Opposite, z00Opposite]);
             await addICDCodesFast(codes);
@@ -6193,6 +7303,8 @@ function __smartCoderReadVersion(fallback) {
             const codes = ["Z71.3", z71Code];
             // Delete first, then add. Clears PV/SM/OB's bundles (keeps
             // Z71.3/82/89 since P/C needs those itself).
+            prefetchICDLookups(codes);
+            prefetchCPTLookups([{ code: '99401', isEm: false }]);
             await clearOtherQuickActionBundles('pc');
             await deleteICDCodesByCode([z71Opposite]);
             await addICDCodesFast(codes);
@@ -6218,6 +7330,8 @@ function __smartCoderReadVersion(fallback) {
                 showQuickNotice("Smoking: patient is not a confirmed smoker — skipped.");
                 return;
             }
+            prefetchICDLookups(["F17.210"]);
+            prefetchCPTLookups([{ code: '99406', isEm: false }]);
             await clearOtherQuickActionBundles('sm');
             await addICDCodesFast(["F17.210"]);
             await addSingleCPT("99406");
@@ -6254,6 +7368,8 @@ function __smartCoderReadVersion(fallback) {
             const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
 
+            prefetchICDLookups(codes);
+            prefetchCPTLookups([{ code: 'G0447', isEm: false }]);
             await clearOtherQuickActionBundles('ob');
             await addICDCodesFast(codes);
             await addSingleCPT("G0447");
@@ -6268,7 +7384,7 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
         setTimeout(() => {
             try {
-                analysisState = computeAnalysis();
+                analysisState = appendCaseFixItems(computeAnalysis());
             } catch (err) {
                 analysisState = { toAdd: [], toDelete: [] };
             }
@@ -6277,11 +7393,31 @@ function __smartCoderReadVersion(fallback) {
         }, 250);
     }
 
+    // 5.99: plain CPT / vaccine-admin items collected during the Apply loop
+    // are added in ONE batch here (units set afterwards), then logged exactly
+    // like the one-by-one path did.
+    async function applyDeferredCPTBatch(items, logMessage) {
+        if (!items.length) return;
+        const results = await addCPTCodesBatch(items.map(i => i.code));
+        for (const item of items) {
+            const r = results.get(injNorm(item.code)) || { ok: !!getCPTRowByCode(item.code), message: null };
+            let ok = !!r.ok;
+            let message = logMessage || r.message || undefined;
+            if (item.kind === 'vaxadmin' && ok && item.units) {
+                const unitsResult = await setCPTUnitsByCode(item.code, item.units);
+                if (!unitsResult.ok) message = 'Added, but could not set Units — set it manually';
+            }
+            actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: ok ? 'success' : 'fail', message });
+        }
+        renderSnapshotBlock();
+    }
+
     async function applyAnalysis() {
         if (!analysisState || actionRunning) return;
         actionRunning = true;
         actionLog = [];
         renderSnapshotBlock();
+        prefetchAnalysisLookups(analysisState.toAdd);
 
         // 1.91: per-code row counts before any deletes, so the stability
         // recheck below knows how many rows a duplicate should leave.
@@ -6315,7 +7451,9 @@ function __smartCoderReadVersion(fallback) {
             renderSnapshotBlock();
         }
 
+        const deferredCPT = [];
         for (const item of analysisState.toAdd) {
+            if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredCPT.push(item); continue; }
             if (item.kind === 'icd') {
                 const results = await addICDCodesFast([item.code]);
                 const ok = !!results[0]?.ok;
@@ -6340,6 +7478,7 @@ function __smartCoderReadVersion(fallback) {
             }
             renderSnapshotBlock();
         }
+        await applyDeferredCPTBatch(deferredCPT);
 
         // eCW sometimes shows a row instantly then silently removes it a
         // moment later (duplicate/modifier/insurance rule rejection). Polls
@@ -6404,7 +7543,7 @@ function __smartCoderReadVersion(fallback) {
         // fresh recompute says a code we just deleted is actually still
         // needed, it gets re-added here instead of silently staying gone.
         let recheck = null;
-        try { recheck = computeAnalysis(); } catch (err) { recheck = null; }
+        try { recheck = appendCaseFixItems(computeAnalysis()); } catch (err) { recheck = null; }
 
         if (recheck) {
             for (const item of recheck.toDelete) {
@@ -6426,8 +7565,11 @@ function __smartCoderReadVersion(fallback) {
                 });
                 renderSnapshotBlock();
             }
+            prefetchAnalysisLookups(recheck.toAdd);
+            const deferredRecheckCPT = [];
             for (const item of recheck.toAdd) {
                 if (actionLog.some(e => e.code === item.code && e.action === 'add')) continue;
+                if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredRecheckCPT.push(item); continue; }
                 if (item.kind === 'icd') {
                     const results = await addICDCodesFast([item.code]);
                     actionLog.push({ code: item.code, action: 'add', kind: 'icd', status: results[0]?.ok ? 'success' : 'fail', message: 'Found on recheck pass' });
@@ -6450,6 +7592,7 @@ function __smartCoderReadVersion(fallback) {
                 }
                 renderSnapshotBlock();
             }
+            await applyDeferredCPTBatch(deferredRecheckCPT, 'Found on recheck pass');
         }
 
         actionRunning = false;
