@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v5.99
+// @name         Getwell SmartCoder by ATQ v6.00
 // @namespace    http://tampermonkey.net/
-// @version      5.99
+// @version      6.00
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,16 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.00 (2026-09-30) [dev] - Exact-case codes. eCW's catalog can return the
+//   same code in two cases (e.g. "1170f" and "1170F"); injection matched
+//   case-insensitively and could pick the lowercase one. Lookups now accept
+//   ONLY the exact uppercase code (lowercase-only = not added, reported),
+//   cached wrong-case entries are discarded, and grid/scope presence checks
+//   are case-exact. Any wrong-case CPT row on the chart (e.g. 1170f) shows
+//   in Analyze as "Replace lowercase 1170f with 1170F" and Apply replaces
+//   it (uppercase looked up first, so nothing is deleted unless the
+//   replacement exists). Quick actions adding such a code replace it too.
+//   Console: smcInjection.wrongCaseCPTs().
 // 5.99 (2026-09-30) [dev] - CPT batch injection. Analyze/Apply (and its
 //   recheck pass) now sends all plain CPT + vaccine-admin codes to eCW
 //   back-to-back and waits once, instead of one add/wait cycle per code.
@@ -4108,29 +4118,98 @@ function __smartCoderReadVersion(fallback) {
             injLookupCPTCatalog(code, 'normal', scope.encounterId),
             isEm ? injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(err => ({ err })) : Promise.resolve([])
         ]);
-        const normalExact = normalResults.filter(x => injNorm(x.code) === code);
+        const normalExact = normalResults.filter(x => injCodeText(x) === code);
         if (normalExact.length || !isEm) return { results: normalResults, exact: normalExact, catalog: 'normal' };
         if (visitResults && visitResults.err) throw visitResults.err;
         return {
             results: normalResults.concat(visitResults),
-            exact: visitResults.filter(x => injNorm(x.code) === code),
+            exact: visitResults.filter(x => injCodeText(x) === code),
             catalog: 'visit'
         };
     }
 
+    // ---------- exact-case code handling (6.00) ----------
+    // eCW's catalog can hold the same code in two cases (e.g. "1170f" and
+    // "1170F"). Getwell only uses the UPPERCASE form, so:
+    //  - lookups accept ONLY a result whose code text is exactly the
+    //    uppercase code (a lowercase-only result = no match, reported);
+    //  - the grid/scope "already present" checks are case-exact, so a
+    //    "1170f" row no longer hides a missing "1170F";
+    //  - a wrong-case CPT row on the chart is REPLACED: the uppercase code is
+    //    looked up first (so nothing is removed unless the replacement
+    //    exists), then the wrong-case row is deleted and the uppercase added.
+    const injCodeText = x => String((x && x.code) || '').trim();
+
+    function injPickExact(results, code) {
+        const exact = results.filter(x => injCodeText(x) === code);
+        const wrongCase = [...new Set(results.map(injCodeText).filter(c => c !== code && c.toUpperCase() === code))];
+        return { exact, wrongCase };
+    }
+
+    function injNoMatchError(kind, code, results, suffix = '') {
+        const { wrongCase } = injPickExact(results, code);
+        return new InjectionError('no-exact-match', wrongCase.length
+            ? `eCW only returned ${wrongCase.join(', ')} for ${code} — the lowercase form is not used, so it was NOT added${suffix}.`
+            : `No exact eCW ${kind} match for ${code}${suffix}.`,
+            { returnedCodes: results.map(injCodeText).slice(0, 12), wrongCase });
+    }
+
+    function injCPTRowText(row) {
+        return (row.querySelector('td:nth-child(2)')?.textContent || '').trim();
+    }
+
+    function injCPTRowExact(code) {
+        return getCPTRows().find(r => injCPTRowText(r) === code) || null;
+    }
+
+    function injCPTWrongCaseRows(code) {
+        return getCPTRows().filter(r => { const t = injCPTRowText(r); return t !== code && t.toUpperCase() === code; });
+    }
+
+    // Every CPT row whose code contains lowercase letters -> [{text, upper}]
+    function getWrongCaseCPTCodes() {
+        const seen = new Set();
+        const out = [];
+        getCPTRows().forEach(r => {
+            const text = injCPTRowText(r);
+            if (!text || !/[a-z]/.test(text) || seen.has(text)) return;
+            seen.add(text);
+            out.push({ text, upper: text.toUpperCase() });
+        });
+        return out;
+    }
+
+    // Adds "replace 1170f with 1170F" items to an Analyze result so they are
+    // visible in the panel and fixed by Apply.
+    function appendCaseFixItems(state) {
+        if (!state || !Array.isArray(state.toAdd) || !isInjectionEnabled()) return state;
+        const has = (list, c) => (list || []).some(i => injNorm(i.code) === c);
+        getWrongCaseCPTCodes().forEach(({ text, upper }) => {
+            if (has(state.toAdd, upper) || has(state.toDelete, upper)) return;
+            state.toAdd.push({ code: upper, kind: 'cpt', reason: `Replace lowercase ${text} with ${upper}`, caseFix: text });
+        });
+        return state;
+    }
+
+    function injDeleteCPTRowAsync(row, text) {
+        return new Promise(resolve => {
+            try { deleteOneCPTRow(row, text, resolve); } catch (e) { resolve({ ok: false, error: e }); }
+        });
+    }
+
     // ---------- grid / scope readers ----------
     function injScopeHasICD(scope, code) {
-        return (scope.icdData || []).some(x => x && injNorm(x.medicalcode) === code);
+        return (scope.icdData || []).some(x => x && String(x.medicalcode || '').trim().toUpperCase() === code);
     }
 
     function injScopeHasCPT(scope, code) {
-        return (scope.cptData || []).some(x => x && injNorm(x.code) === code);
+        return (scope.cptData || []).some(x => x && injCodeText(x) === code);
     }
 
     function injCPTCodeCounts() {
         const counts = {};
         getCPTRows().forEach(row => {
-            const c = injNorm(row.querySelector('td:nth-child(2)')?.textContent);
+            const c = injCPTRowText(row);
             if (c) counts[c] = (counts[c] || 0) + 1;
         });
         return counts;
@@ -4257,15 +4336,17 @@ function __smartCoderReadVersion(fallback) {
     // Resolves a code to its first exact eCW match: cache -> in-flight -> server.
     async function injResolveICD(code, scope, { fresh = false } = {}) {
         const key = `${injIcdFiscalYear(scope.encounterDate)}|${code}`;
-        return injResolveCached('icd', key, fresh, async () => {
+        const r = await injResolveCached('icd', key, fresh, async () => {
             const results = await injLookupICD(code);
-            const exact = results.filter(x => injNorm(x.code) === code);
-            if (!exact.length) {
-                throw new InjectionError('no-exact-match', `No exact eCW ICD match for ${code}.`,
-                    { returnedCodes: results.map(x => x.code).slice(0, 12) });
-            }
-            return { selected: exact[0] };   // rule: always the FIRST exact result
+            const { exact } = injPickExact(results, code);
+            if (!exact.length) throw injNoMatchError('ICD', code, results);
+            return { selected: exact[0] };   // rule: FIRST exact (case-exact) result
         });
+        if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('icd', key);
+            return injResolveICD(code, scope, { fresh: true });
+        }
+        return r;
     }
 
     // Fire-and-forget: start every lookup now, in parallel. Never throws;
@@ -4379,15 +4460,19 @@ function __smartCoderReadVersion(fallback) {
     // ---------- CPT resolve + prefetch (5.98) ----------
     async function injResolveCPT(code, isEm, scope, { fresh = false } = {}) {
         const key = `${injCptYear(scope.encounterDate)}|${isEm ? 'em' : 'cpt'}|${code}`;
-        return injResolveCached('cpt', key, fresh, async () => {
+        const r = await injResolveCached('cpt', key, fresh, async () => {
             const lookup = await injLookupCPT(code, isEm);
             if (!lookup.exact.length) {
-                throw new InjectionError('no-exact-match',
-                    `No exact eCW CPT match for ${code}${isEm ? ' (searched CPTCodes+HCPCS and VisitCodes)' : ' (searched CPTCodes+HCPCS)'}.`,
-                    { returnedCodes: lookup.results.map(x => x.code).slice(0, 12) });
+                throw injNoMatchError('CPT', code, lookup.results,
+                    isEm ? ' (searched CPTCodes+HCPCS and VisitCodes)' : ' (searched CPTCodes+HCPCS)');
             }
-            return { selected: lookup.exact[0], catalog: lookup.catalog };   // rule: FIRST exact result
+            return { selected: lookup.exact[0], catalog: lookup.catalog };   // rule: FIRST exact (case-exact) result
         });
+        if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('cpt', key);
+            return injResolveCPT(code, isEm, scope, { fresh: true });
+        }
+        return r;
     }
 
     // Fire-and-forget parallel CPT lookups. items: [{code, isEm}]
@@ -4401,7 +4486,7 @@ function __smartCoderReadVersion(fallback) {
             (items || []).forEach(it => {
                 const code = injNorm(it && it.code);
                 const isEm = !!(it && it.isEm);
-                if (!code || seen.has(`${isEm}|${code}`) || getCPTRowByCode(code)) return;
+                if (!code || seen.has(`${isEm}|${code}`) || injCPTRowExact(code)) return;
                 seen.add(`${isEm}|${code}`);
                 injResolveCPT(code, isEm, scope).catch(() => {});
             });
@@ -4419,7 +4504,8 @@ function __smartCoderReadVersion(fallback) {
     async function injectCPT(rawCode, isEm = false) {
         const code = injNorm(rawCode);
         if (!code) throw new InjectionError('precheck', 'Empty CPT code.');
-        if (getCPTRowByCode(code)) return { ok: true, message: 'Already present' };
+        if (injCPTRowExact(code)) return { ok: true, message: 'Already present' };
+        const wrongCaseRows = injCPTWrongCaseRows(code);
 
         const scope = getBillingScopeForInjection();
         requireXmlHelpers();
@@ -4432,15 +4518,30 @@ function __smartCoderReadVersion(fallback) {
 
         if (injScopeHasCPT(scope, code)) {
             injNudgeDigest(scope);
-            const shown = await injWaitFor(() => !!getCPTRowByCode(code), 1500, null, 50);
+            const shown = await injWaitFor(() => !!injCPTRowExact(code), 1500, null, 50);
             if (shown) return { ok: true, message: 'Already present' };
             throw new InjectionError('not-confirmed',
                 `CPT ${code} is already in eCW's billing data but is not visible in the CPT grid.`, {}, { noFallback: true });
         }
 
         const t0 = performance.now();
-        let resolved = await injResolveCPT(code, isEm, scope);
+        let resolved = await injResolveCPT(code, isEm, scope);   // throws before anything is deleted
         const t1 = performance.now();
+
+        // Replace wrong-case row(s) (e.g. 1170f) now that 1170F is confirmed to exist.
+        const replacedFrom = [];
+        for (const row of wrongCaseRows) {
+            const text = injCPTRowText(row);
+            if (!text || !document.body.contains(row)) continue;
+            const del = await injDeleteCPTRowAsync(row, text);
+            if (!del || !del.ok) {
+                throw new InjectionError('case-fix',
+                    `Could not delete wrong-case row ${text}${del && del.blocked ? ' (eCW blocks deleting it here)' : ''} — ${code} was NOT added. Replace it manually.`,
+                    { wrongCase: text }, { noFallback: true });
+            }
+            replacedFrom.push(text);
+        }
+        const replaceNote = replacedFrom.length ? ` (replaced ${replacedFrom.join(', ')})` : '';
         let before = injCPTCodeCounts();
 
         // One attempt = add + wait for the grid. -> {state: 'ok'|'in-scope'|'absent'|'threw'}
@@ -4457,10 +4558,10 @@ function __smartCoderReadVersion(fallback) {
                 }
                 return { state: 'threw', error: e };
             }
-            let confirmed = await injWaitFor(() => !!getCPTRowByCode(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
+            let confirmed = await injWaitFor(() => !!injCPTRowExact(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
             if (!confirmed) {
                 injNudgeDigest(scope);
-                confirmed = await injWaitFor(() => !!getCPTRowByCode(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
+                confirmed = await injWaitFor(() => !!injCPTRowExact(code), INJECT_CPT_CONFIRM_MS / 2, null, 50);
             }
             if (confirmed) return { state: 'ok' };
             return { state: injScopeHasCPT(scope, code) ? 'in-scope' : 'absent' };
@@ -4483,16 +4584,21 @@ function __smartCoderReadVersion(fallback) {
             confirmMs: Math.round(t3 - t2), totalMs: Math.round(t3 - t0), result: result.state
         });
 
+        const lostWarning = replacedFrom.length ? ` WARNING: ${replacedFrom.join(', ')} was already removed — add ${code} manually.` : '';
         if (result.state === 'threw') {
-            throw new InjectionError('api-threw', `setBillingInsightsCpt threw: ${result.error?.message || result.error}`,
-                { selected: resolved.selected, catalog: resolved.catalog });
+            throw new InjectionError('api-threw', `setBillingInsightsCpt threw: ${result.error?.message || result.error}.${lostWarning}`,
+                { selected: resolved.selected, catalog: resolved.catalog, replacedFrom });
         }
         if (result.state !== 'ok') {
             const inScope = result.state === 'in-scope';
-            throw new InjectionError('not-confirmed', inScope
+            throw new InjectionError('not-confirmed', (inScope
                 ? `CPT ${code} was added to eCW's data but never appeared in the grid.`
-                : `CPT ${code} was sent to eCW but was not added (not in scope data or grid).`,
-                { selected: resolved.selected, catalog: resolved.catalog, source: resolved.source }, { noFallback: inScope });
+                : `CPT ${code} was sent to eCW but was not added (not in scope data or grid).`) + lostWarning,
+                { selected: resolved.selected, catalog: resolved.catalog, source: resolved.source, replacedFrom }, { noFallback: inScope });
+        }
+        if (replacedFrom.length) {
+            showQuickNotice(`Replaced ${replacedFrom.join(', ')} with ${code}.`);
+            console.info(`SmartCoder: replaced wrong-case CPT ${replacedFrom.join(', ')} with ${code}.`);
         }
 
         // Side-effect check: an add must never silently replace an existing
@@ -4507,7 +4613,8 @@ function __smartCoderReadVersion(fallback) {
                 fallback: 'n/a — code was added', detail: { lost, catalog: resolved.catalog }
             });
         }
-        return { ok: true, message: null, selected: resolved.selected, catalog: resolved.catalog, source: resolved.source };
+        return { ok: true, message: replacedFrom.length ? `Replaced ${replacedFrom.join(', ')} with ${code}` : null,
+            selected: resolved.selected, catalog: resolved.catalog, source: resolved.source, replacedFrom };
     }
 
     // ---------- CPT batch injection (5.99) ----------
@@ -4548,8 +4655,13 @@ function __smartCoderReadVersion(fallback) {
         if (!isCPTBatchEnabled()) return sequential(codes);
 
         const pending = [];
-        codes.forEach(c => getCPTRowByCode(c) ? out.set(c, { ok: true, message: 'Already present' }) : pending.push(c));
-        if (pending.length <= 1) return sequential(pending);
+        const caseFix = [];   // wrong-case row on the chart -> single path replaces it
+        codes.forEach(c => {
+            if (injCPTRowExact(c)) out.set(c, { ok: true, message: 'Already present' });
+            else if (injCPTWrongCaseRows(c).length) caseFix.push(c);
+            else pending.push(c);
+        });
+        if (pending.length <= 1) return sequential([...caseFix, ...pending]);
 
         let scope;
         try {
@@ -4557,7 +4669,7 @@ function __smartCoderReadVersion(fallback) {
             requireXmlHelpers();
             if (typeof scope.setBillingInsightsCpt !== 'function' || !scope.encounterId) throw new Error('not ready');
         } catch {
-            return sequential(pending);   // addSingleCPT reports the exact precheck problem per code
+            return sequential([...caseFix, ...pending]);   // addSingleCPT reports the exact precheck problem per code
         }
 
         const t0 = performance.now();
@@ -4590,7 +4702,7 @@ function __smartCoderReadVersion(fallback) {
         // Stops early once some rows have appeared and the grid then stays
         // unchanged for 1.2s (eCW finished; the rest are not coming), so a
         // dropped code gets repaired quickly instead of after the full timeout.
-        const shownCount = () => sent.filter(x => !!getCPTRowByCode(x.code)).length;
+        const shownCount = () => sent.filter(x => !!injCPTRowExact(x.code)).length;
         const waitStart = Date.now();
         let lastCount = -1, lastChange = Date.now(), nudged = false;
         while (Date.now() - waitStart < INJECT_BATCH_CONFIRM_MS) {
@@ -4608,7 +4720,7 @@ function __smartCoderReadVersion(fallback) {
 
         // 4) Verify.
         sent.forEach(x => {
-            if (getCPTRowByCode(x.code)) {
+            if (injCPTRowExact(x.code)) {
                 out.set(x.code, { ok: true, message: null });
             } else if (injScopeHasCPT(scope, x.code)) {
                 out.set(x.code, { ok: false, message: 'Batch: in eCW data but not shown in grid' });
@@ -4646,7 +4758,7 @@ function __smartCoderReadVersion(fallback) {
             result: retryOneByOne.length ? `${retryOneByOne.length} retried` : 'ok' });
 
         // 5) Anything that didn't make it goes through the normal single path.
-        return sequential(retryOneByOne);
+        return sequential([...caseFix, ...retryOneByOne]);
     }
 
     // ---------- issue reporting / notification ----------
@@ -4828,6 +4940,7 @@ function __smartCoderReadVersion(fallback) {
         testCPT: (code, isEm = false) => injTestRun(`CPT ${code}${isEm ? ' [E&M]' : ''}`, () => injectCPT(code, isEm)),
         lookupICD: code => injTestRun(`lookup ICD ${code}`, () => injLookupICD(code)),
         lookupCPT: (code, isEm = false) => injTestRun(`lookup CPT ${code}`, () => injLookupCPT(code, isEm)),
+        wrongCaseCPTs: () => { const l = getWrongCaseCPTCodes(); console.table(l); return l; },
         batch: on => (on === undefined ? isCPTBatchEnabled() : setCPTBatchEnabled(!!on)),
         testBatch: codes => injTestRun(`CPT batch ${codes}`, async () => Object.fromEntries(await addCPTCodesBatch(codes))),
         timings: () => { console.table(injectionTimings); return injectionTimings; },
@@ -7706,7 +7819,7 @@ function __smartCoderReadVersion(fallback) {
             // the cache as-is; if it's not there yet, this Analyze run
             // simply proceeds without it (additive-only, never required).
             try {
-                analysisState = computeAnalysis();
+                analysisState = appendCaseFixItems(computeAnalysis());
             } catch (err) {
                 console.error('[Getwell SmartCoder] computeAnalysis failed:', err);
                 analysisState = { toAdd: [], toDelete: [], error: (err && err.message) || String(err) };
@@ -7877,7 +7990,7 @@ function __smartCoderReadVersion(fallback) {
         // fresh recompute says a code we just deleted is actually still
         // needed, it gets re-added here instead of silently staying gone.
         let recheck = null;
-        try { recheck = computeAnalysis(); } catch (err) { recheck = null; }
+        try { recheck = appendCaseFixItems(computeAnalysis()); } catch (err) { recheck = null; }
 
         if (recheck) {
             for (const item of recheck.toDelete) {
