@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.01
+// @name         Highland Medical SmartCoder v1.02
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.02 (2026-10-02) - G0444 (depression) / G0442 (alcohol) annual
+//   screening now ONLY with a preventive visit (99381-99397, G0438/G0439)
+//   on the chart. No preventive visit -> never added, and any G0444/G0442
+//   already on the chart is deleted; Z13.31/Z13.9 then follow the existing
+//   bundle cleanup (kept only if another screening CPT supports them).
+//   Replaces 1.00's "without a preventive-visit requirement" rule.
 // 1.01 (2026-10-02) - FY2027 ICD-10-CM: Z68.1 is no longer valid (deleted
 //   10/1/2026). Patients 18+: BMI 18.4 or less -> Z68.18, BMI 18.5-19.9 ->
 //   Z68.19. Any Z68.1 already on the ICD grid is flagged as a wrong BMI
@@ -2059,10 +2065,13 @@ function __smartCoderReadVersion(fallback) {
         // MANAGED_CODES so any already present are never deleted either.
 
         // ---- Annual screening G-codes: G0444 (depression), G0442 (alcohol) ----
-        // Only when a preventive visit is present on this chart.
+        // Highland: ONLY when a preventive visit code (99381-99397,
+        // G0438/G0439) is on this chart and its PV bundle isn't faded
+        // (hasPreventiveVisit). No preventive visit -> never added, and
+        // any G0444/G0442 already on the chart is deleted further below.
         // Still skipped for Medicaid/Medicare/UHC and gated to once/year.
         // Rule 19 age gates apply here too.
-        if (annualGCodesEligible(insurance)) {
+        if (hasPreventiveVisit && annualGCodesEligible(insurance)) {
             const dosYear = getCurrentDosYear();
             if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
                 desired.set('G0444', 'Annual depression screening (once/year)');
@@ -2114,8 +2123,13 @@ function __smartCoderReadVersion(fallback) {
         // itself. ICD and CPT move together, never one without the other.
         const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
         const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
-        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
-        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
+        // Without a preventive visit, G0444/G0442 are deleted below, so they
+        // must not count as the CPT that keeps Z13.31/Z13.9 on the chart.
+        const ANNUAL_GCODES_NEED_PREVENTIVE = ['G0444', 'G0442'];
+        const screeningCptCounts = c => desired.has(c) ||
+            (currentCodes.has(c) && (hasPreventiveVisit || !ANNUAL_GCODES_NEED_PREVENTIVE.includes(c)));
+        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(screeningCptCounts);
+        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(screeningCptCounts);
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
         if (age >= 12 && hasDep !== null && hasDepressionScreeningCpt && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
@@ -2508,6 +2522,19 @@ function __smartCoderReadVersion(fallback) {
                 if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
                     const row = getCPTRowByCode(code);
                     if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
+                }
+            });
+        }
+
+        // ---- G0444/G0442: no preventive visit on this chart -> delete ----
+        // Highland bills the annual depression/alcohol screening G-codes
+        // only together with a preventive visit. Excluded from
+        // MANAGED_CODES, so this is the path that removes them.
+        if (!hasPreventiveVisit) {
+            ['G0444', 'G0442'].forEach(code => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} only billed with a preventive visit — no preventive visit on this chart` });
                 }
             });
         }
