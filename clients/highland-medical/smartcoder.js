@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.03
+// @name         Highland Medical SmartCoder v1.04
 // @namespace    http://tampermonkey.net/
-// @version      1.03
+// @version      1.04
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.04 (2026-10-02) - Fixed 99213 being added with description "00" and
+//   the preferred itemIds (1.03) not being picked. The lookup read each
+//   catalog field with querySelector, which also matches tags nested inside
+//   the entry (e.g. a modifier block's <name>00</name> and <itemId>), so
+//   the nested values were used. Fields are now read from the entry's own
+//   direct children first (old match only if there is none). Lookup caches
+//   moved to v2 so entries parsed the old way are looked up fresh once.
 // 1.03 (2026-10-02) - Preferred eCW catalog entries. These codes exist more
 //   than once in eCW's catalog; injection now picks the listed itemId:
 //   99213 -> 449 (Office Visit, Est Pt., Level 3), Z13.9 -> 470673,
@@ -2764,7 +2771,15 @@ function __smartCoderReadVersion(fallback) {
 
     const injNorm = code => String(code || '').trim().toUpperCase();
     const injSleep = ms => new Promise(r => setTimeout(r, ms));
-    const injText = (el, sel) => el.querySelector(sel)?.textContent?.trim() || '';
+    // Reads the entry's OWN field (direct child) first. querySelector alone
+    // also matches tags nested deeper in the entry (e.g. a modifier block's
+    // <name>00</name> / <itemId>), which gave 99213 the description "00"
+    // and the wrong itemId. Falls back to the old descendant match only
+    // when the entry has no direct child with that tag.
+    const injText = (el, tag) => {
+        const own = el && el.children ? [...el.children].find(c => c.tagName === tag) : null;
+        return (own || el.querySelector(tag))?.textContent?.trim() || '';
+    };
 
     function getBillingScopeForInjection() {
         const ng = window.angular;
@@ -3122,8 +3137,14 @@ function __smartCoderReadVersion(fallback) {
     //  - concurrent requests for the same code share one in-flight request;
     //  - a cached entry eCW refuses is dropped and re-looked-up fresh once
     //    before the search-and-select fallback is used.
-    const INJECT_ICD_CACHE_KEY = 'smc_highland-medical_icd_lookup_cache_v1';
-    const INJECT_CPT_CACHE_KEY = 'smc_highland-medical_cpt_lookup_cache_v1';
+    // v2 (1.04): entries cached by the old field reader may hold a nested
+    // itemId/name, so they're discarded once and looked up fresh.
+    const INJECT_ICD_CACHE_KEY = 'smc_highland-medical_icd_lookup_cache_v2';
+    const INJECT_CPT_CACHE_KEY = 'smc_highland-medical_cpt_lookup_cache_v2';
+    try {
+        localStorage.removeItem('smc_highland-medical_icd_lookup_cache_v1');
+        localStorage.removeItem('smc_highland-medical_cpt_lookup_cache_v1');
+    } catch {}
     const INJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
     const INJECT_CACHE_MAX = 500;
     const injLookupCaches = {
