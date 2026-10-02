@@ -3,7 +3,7 @@
   "name": "Highland Medical",
   "siteId": "nyhmcnapp",
   "hostnames": ["nyhmcnapp.ecwcloud.com"],
-  "version": "1.02",
+  "version": "1.03",
   "entry": "smartcoder.js",
   "enabled": true
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.02
+// @name         Highland Medical SmartCoder v1.03
 // @namespace    http://tampermonkey.net/
-// @version      1.02
+// @version      1.03
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.03 (2026-10-02) - Preferred eCW catalog entries. These codes exist more
+//   than once in eCW's catalog; injection now picks the listed itemId:
+//   99213 -> 449 (Office Visit, Est Pt., Level 3), Z13.9 -> 470673,
+//   G9622 -> 472173, Z71.89 -> 484207. If eCW doesn't return that itemId,
+//   the old rule (first exact match) is used and a console warning is
+//   shown. Older cached lookups for these 4 codes are refreshed once.
+//   Nothing else changed.
 // 1.02 (2026-10-02) - G0444 (depression) / G0442 (alcohol) annual
 //   screening now ONLY with a preventive visit (99381-99397, G0438/G0439)
 //   on the chart. No preventive visit -> never added, and any G0444/G0442
@@ -2955,6 +2962,15 @@ function __smartCoderReadVersion(fallback) {
             isEm ? injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(err => ({ err })) : Promise.resolve([])
         ]);
         const normalExact = normalResults.filter(x => injCodeText(x) === code);
+        // Preferred itemId (e.g. 99213 -> 449) found only in VisitCodes:
+        // use that catalog even when CPTCodes+HCPCS also has an exact match.
+        const prefId = injPreferredItemId(code);
+        if (isEm && prefId && !injHasItemId(normalExact, prefId) && Array.isArray(visitResults)) {
+            const visitExact = visitResults.filter(x => injCodeText(x) === code);
+            if (injHasItemId(visitExact, prefId)) {
+                return { results: normalResults.concat(visitResults), exact: visitExact, catalog: 'visit' };
+            }
+        }
         if (normalExact.length || !isEm) return { results: normalResults, exact: normalExact, catalog: 'normal' };
         if (visitResults && visitResults.err) throw visitResults.err;
         return {
@@ -2962,6 +2978,39 @@ function __smartCoderReadVersion(fallback) {
             exact: visitResults.filter(x => injCodeText(x) === code),
             catalog: 'visit'
         };
+    }
+
+    // ---------- preferred eCW catalog entries (Highland 1.03) ----------
+    // Some codes exist more than once in eCW's catalog with the same code
+    // text. For these, the entry with this itemId is used instead of the
+    // first exact match. If eCW doesn't return that itemId, the old rule
+    // (first exact match) is used, so a missing entry never blocks an add.
+    const INJECT_PREFERRED_ITEM_IDS = {
+        '99213':  '449',    // "Office Visit, Est Pt., Level 3" (E&M)
+        'Z13.9':  '470673', // "Encounter for screening, unspecified" (not 597524 SDoH)
+        'G9622':  '472173', // "PT NOT ID UNHLTHY ALC USR SCR ALC U" (not 485142 "Alcohol use Positive")
+        'Z71.89': '484207'  // "Other specified counseling" (the 2nd of two such entries)
+    };
+
+    function injPreferredItemId(code) {
+        return Object.prototype.hasOwnProperty.call(INJECT_PREFERRED_ITEM_IDS, code)
+            ? INJECT_PREFERRED_ITEM_IDS[code] : null;
+    }
+
+    function injHasItemId(list, itemId) {
+        return (list || []).some(x => x && String(x.itemId || '').trim() === itemId);
+    }
+
+    // Moves the preferred entry to the front of an exact-match list.
+    function injOrderPreferred(code, exact) {
+        const pref = injPreferredItemId(code);
+        if (!pref || !Array.isArray(exact) || !exact.length) return exact;
+        const idx = exact.findIndex(x => x && String(x.itemId || '').trim() === pref);
+        if (idx < 0) {
+            console.warn(`SmartCoder: preferred eCW itemId ${pref} for ${code} not returned — using first exact match (itemId ${exact[0] && exact[0].itemId}).`);
+            return exact;
+        }
+        return [exact[idx], ...exact.slice(0, idx), ...exact.slice(idx + 1)];
     }
 
     // ---------- exact-case code handling (6.00) ----------
@@ -3176,9 +3225,14 @@ function __smartCoderReadVersion(fallback) {
             const results = await injLookupICD(code);
             const { exact } = injPickExact(results, code);
             if (!exact.length) throw injNoMatchError('ICD', code, results);
-            return { selected: exact[0] };   // rule: FIRST exact (case-exact) result
+            // rule: preferred itemId if listed, else FIRST exact (case-exact) result
+            return { selected: injOrderPreferred(code, exact)[0], prefV: 1 };
         });
         if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('icd', key);
+            return injResolveICD(code, scope, { fresh: true });
+        }
+        if (!fresh && injPreferredItemId(code) && !r.prefV) {   // cached before preferred itemIds existed
             injCacheDrop('icd', key);
             return injResolveICD(code, scope, { fresh: true });
         }
@@ -3302,9 +3356,14 @@ function __smartCoderReadVersion(fallback) {
                 throw injNoMatchError('CPT', code, lookup.results,
                     isEm ? ' (searched CPTCodes+HCPCS and VisitCodes)' : ' (searched CPTCodes+HCPCS)');
             }
-            return { selected: lookup.exact[0], catalog: lookup.catalog };   // rule: FIRST exact (case-exact) result
+            // rule: preferred itemId if listed, else FIRST exact (case-exact) result
+            return { selected: injOrderPreferred(code, lookup.exact)[0], catalog: lookup.catalog, prefV: 1 };
         });
         if (injCodeText(r.selected) !== code) {          // wrong-case entry cached by an older build
+            injCacheDrop('cpt', key);
+            return injResolveCPT(code, isEm, scope, { fresh: true });
+        }
+        if (!fresh && injPreferredItemId(code) && !r.prefV) {   // cached before preferred itemIds existed
             injCacheDrop('cpt', key);
             return injResolveCPT(code, isEm, scope, { fresh: true });
         }
