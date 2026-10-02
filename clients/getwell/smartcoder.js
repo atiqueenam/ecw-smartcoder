@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.00
+// @name         Getwell SmartCoder by ATQ v6.01
 // @namespace    http://tampermonkey.net/
-// @version      6.00
+// @version      6.01
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,11 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.01 (2026-10-02) - FY2027 ICD-10-CM: Z68.1 is no longer valid (deleted
+//   10/1/2026). Patients 18+: BMI 18.4 or less -> Z68.18, BMI 18.5-19.9 ->
+//   Z68.19. Any Z68.1 already on the ICD grid is flagged as a wrong BMI
+//   code and replaced by the correct one. Removed the old "BMI < 19.5 ->
+//   no code" skip so low BMIs now get coded. Same rule in all clients.
 // 6.00 (2026-09-30) [dev] - Exact-case codes. eCW's catalog can return the
 //   same code in two cases (e.g. "1170f" and "1170F"); injection matched
 //   case-insensitively and could pick the lowercase one. Lookups now accept
@@ -4963,7 +4968,8 @@ function __smartCoderReadVersion(fallback) {
         // Z68.1 ("BMI 19 or less, adult") — Analyze showed "Nothing to
         // add"/"Nothing to remove" for those charts no matter what was on
         // the ICD grid. Removed so Z68.1 is reachable for every BMI < 20.
-        if (bmi < 20) return "Z68.1";
+        if (bmi < 18.5) return "Z68.18"; // BMI 18.4 or less, adult (FY2027, replaces Z68.1)
+        if (bmi < 20) return "Z68.19";   // BMI 18.5-19.9, adult (FY2027, replaces Z68.1)
         if (bmi < 30) return `Z68.${Math.floor(bmi)}`;   // Z68.20 .. Z68.29
         if (bmi < 40) return `Z68.${Math.floor(bmi)}`;   // Z68.30 .. Z68.39
         if (bmi < 45) return "Z68.41";

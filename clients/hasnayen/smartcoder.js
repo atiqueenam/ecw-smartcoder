@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.40
+// @name         Hasnayen Medical SmartCoder v1.41
 // @namespace    http://tampermonkey.net/
-// @version      1.40
+// @version      1.41
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,11 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.41 (2026-10-02) - FY2027 ICD-10-CM: Z68.1 is no longer valid (deleted
+//   10/1/2026). Patients 18+: BMI 18.4 or less -> Z68.18, BMI 18.5-19.9 ->
+//   Z68.19. Any Z68.1 already on the ICD grid is flagged as a wrong BMI
+//   code and replaced by the correct one. Removed the old "BMI < 19.5 ->
+//   no code" skip so low BMIs now get coded. Same rule in all clients.
 // 1.40 (2026-09-30) [dev] - Direct ICD/CPT injection, ported from Getwell 6.00.
 //   ICDs: LookupDiagnosisCodes.jsp -> scope.addToSelectedListFromGrid; CPTs:
 //   LookupCPTCodes.jsp -> scope.setBillingInsightsCpt (E&M also VisitCodes).
@@ -4716,15 +4721,15 @@ function __smartCoderReadVersion(fallback) {
     };
 
     // ====================== PREVENTIVE / COUNSEL / SMOKING / OBESITY ACTIONS ======================
-    // Adult BMI thresholds only (Z68.1-Z68.45, raw BMI number). Pediatric
+    // Adult BMI thresholds only (Z68.18/Z68.19-Z68.45, raw BMI number). Pediatric
     // BMI coding needs age/sex percentile charts (Z68.51-Z68.54) that this
     // script doesn't have data for — returns null under 18 rather than
     // misapplying adult thresholds to a child.
     function mapBMIToZ68(bmi, age) {
         if (age != null && age < 18) return null;
         if (bmi == null || isNaN(bmi)) return null;
-        if (bmi < 19.5) return null; // underweight codes intentionally not auto-added
-        if (bmi < 20) return "Z68.1";
+        if (bmi < 18.5) return "Z68.18"; // BMI 18.4 or less, adult (FY2027, replaces Z68.1)
+        if (bmi < 20) return "Z68.19";   // BMI 18.5-19.9, adult (FY2027, replaces Z68.1)
         if (bmi < 30) return `Z68.${Math.floor(bmi)}`;   // Z68.20 .. Z68.29
         if (bmi < 40) return `Z68.${Math.floor(bmi)}`;   // Z68.30 .. Z68.39
         if (bmi < 45) return "Z68.41";
