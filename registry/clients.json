@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-02T03:35:28.826Z",
+  "generatedAt": "2026-10-02T03:41:08.803Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.92",
+      "version": "1.93",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "652946c81a7b59e7578df0ba74bb5bb9f4e12feaa3920d8eb4d8382a21660013"
+      "sha256": "5f506500eb1610cb7b0ca07f0567c22a02bf99a61556383f4a7ad55d9d20a6cf"
     },
     {
       "id": "getwell",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "6.00",
+      "version": "6.01",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "72cde70f4d8de1d3a40b60dfa085bc854df1d83b31c547ca4a77b16722479dc6"
+      "sha256": "63b84aafa936c1b4b8b9549fa351dc15d9a753147fbf0f4fe49c973997982640"
     },
     {
       "id": "hasan-sheikh",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "1.96",
+      "version": "1.97",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "5d0e06182dc4a7460d4e7247bf28b33378e99bffe904cb8a63e102918f0eb066"
+      "sha256": "2d48f400a59037dce4cc4113d93c1f441c001184947062bfdd923febf77ae698"
     },
     {
       "id": "hasnayen",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.40",
+      "version": "1.41",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "7ed4586cf0912aa84acc482c0cb44214ce6337ad889516d12a67fdbc31cbc313"
+      "sha256": "ddf05fa522f1725aef55d1fd35fe40a556db9d8b9fb4210d5df16f13d10bbf59"
     },
     {
       "id": "highland-medical",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.00",
+      "version": "1.01",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "4d349ead7306cd9f987de52b5334ffea0b5680ef230aecce867a7e6a79d78c6c"
+      "sha256": "5c297d2b047b53d93b16af8cd9db059ecc85aede0e4f98087b7e8ded51ffb9a1"
     }
   ]
 }
