@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.04
 // @namespace    http://tampermonkey.net/
-// @version      1.04
+// @version      1.05
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.05 (2026-10-03) - Updated version to 1.05 smoking detection added.
 // 1.04 (2026-10-02) - Fixed 99213 being added with description "00" and
 //   the preferred itemIds (1.03) not being picked. The lookup read each
 //   catalog field with querySelector, which also matches tags nested inside
@@ -1150,9 +1151,9 @@ function __smartCoderReadVersion(fallback) {
     // tobacco language (smokeless, chewing tobacco, cigar) without that word
     // needs a prior F17.210 in history to confirm. Returns true = NOT a
     // confirmed smoker (green), false = confirmed (red).
-    // "Smoker" not preceded by a negation word (not/denies/no/former/past)
+    // "Smoker" not preceded by a negation word (not/denies/no/never/former/past)
     // or "non-"/"non " — used for both checks below.
-    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|former|past)\\s)(?<!non[\\s-])";
+    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|never|former|past)\\s)(?<!non[\\s-])";
 
     function isConfirmedNonSmoker(socText) {
         // "current ... smoker" wins over other text in the section (eCW
