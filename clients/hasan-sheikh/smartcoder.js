@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.97
+// @name         Hasan Sheikh SmartCoder v1.98
 // @namespace    http://tampermonkey.net/
-// @version      1.97
+// @version      1.98
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.98 (2026-10-05) - Preventive + chronic-only dx -> no office visit. When
+//   a Preventive visit (993xx/G0438/G0439) applies and the ICD list has no
+//   acute dx (only CHRONIC_DISEASE_ICD_CODES entries and/or Z/F17/E53-56/
+//   D51/E66), any office-visit E/M (99211-99215/99203) on the chart is
+//   deleted and none is suggested. Any acute dx keeps the normal OV logic.
+//   TCM and NYCE PPO rules unchanged. Hasan Sheikh only.
 // 1.97 (2026-10-02) - FY2027 ICD-10-CM: Z68.1 is no longer valid (deleted
 //   10/1/2026). Patients 18+: BMI 18.4 or less -> Z68.18, BMI 18.5-19.9 ->
 //   Z68.19. Any Z68.1 already on the ICD grid is flagged as a wrong BMI
@@ -2563,6 +2569,18 @@ function __smartCoderReadVersion(fallback) {
         // 99214 and TCM together with no change. See the shared
         // 99401/99406-vs-99214 rule right after this block for those.)
         let computedOvCodeForBilling = null;
+        // Hasan Sheikh only: an "acute" dx = any ICD on the chart that is
+        // neither in CHRONIC_DISEASE_ICD_CODES nor one of the non-problem
+        // codes the 99214 rule already ignores (F17, E53-E56, D51, E66, Z).
+        // With a Preventive visit and NO acute dx, no office-visit E/M.
+        function hasAcuteDxForPreventiveOV() {
+            return getICDRows().some(e => {
+                const c = (e.code || '').toUpperCase();
+                if (!c) return false;
+                if (/^F17/.test(c) || /^E5[3-6]/.test(c) || /^D51/.test(c) || /^E66/.test(c) || /^Z/.test(c)) return false;
+                return !CHRONIC_DISEASE_ICD_CODES.has(c);
+            });
+        }
         const hasTCMOnChartForOV = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
         const visitType = getVisitType();
         const visitCategory = classifyVisitType(visitType);
@@ -2570,6 +2588,19 @@ function __smartCoderReadVersion(fallback) {
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'TCM code (99495/99496) is on the chart — no office-visit E/M code is billed alongside a TCM code for this provider' });
+                }
+            });
+            for (let i = toAdd.length - 1; i >= 0; i--) {
+                if (OFFICE_VISIT_EM_CODES.includes(toAdd[i].code)) toAdd.splice(i, 1);
+            }
+        } else if (hasPreventiveVisit && !hasAcuteDxForPreventiveOV()) {
+            // Preventive applied + no acute dx (only chronic-disease ICDs
+            // and/or non-problem codes like Z/F17/E53-56/D51/E66): the
+            // preventive visit covers it — remove any office-visit E/M
+            // already on the chart and don't suggest a new one.
+            currentRows.forEach(r => {
+                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Preventive applied with only chronic diagnoses (no acute dx) — office-visit E/M code not billed' });
                 }
             });
             for (let i = toAdd.length - 1; i >= 0; i--) {
