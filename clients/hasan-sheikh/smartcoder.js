@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.99
+// @name         Hasan Sheikh SmartCoder v2.02
 // @namespace    http://tampermonkey.net/
-// @version      1.99
+// @version      2.02
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,22 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.02 (2026-10-05) - Z71.6 is never kept: Analyze now proposes deleting it
+//   (Auto Link already did). Claim Link: 98012 stays on the claim but its
+//   "Bill to Ins" checkbox is unchecked (runs last in Claim Link).
+// 2.01 (2026-10-05) - Preventive + Office Visit: a chronic condition already
+//   billed within the last 30 days no longer justifies an office visit with
+//   Preventive. Extends the 1.98 rule: besides exact CHRONIC_DISEASE_ICD_CODES,
+//   any chart ICD in the same chronic ICD category (e.g. any E11.xx diabetes
+//   code) whose category was in a prior encounter's assessments 1-30 days
+//   before this DOS is not "acute". If only such codes remain with
+//   Preventive, the office visit is deleted / not added. History not loaded
+//   -> no change (OV kept). Dates from the encounter dropdown by id.
+// 2.00 (2026-10-05) - G0447 modifier rule (Auto Link + Claim Link), ported
+//   from Getwell 5.90: G0447 gets 59, and any 25 the HackeRudro sorting
+//   extension put on the office visit / preventive code only because of
+//   G0447 is removed (a 25 justified by preventive or another code stays;
+//   99211 stays 25; only exact "25" values are cleared).
 // 1.99 (2026-10-05) - Pediatric Obesity Counseling fixes. (1) False
 //   televisit: our own panel text ("...or televisit present" 99051 reason,
 //   "...not applicable for a televisit") was read back from the page and
@@ -2546,6 +2562,15 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
+        // ---- Z71.6 (tobacco counseling dx): never kept on the chart ----
+        // Hasan Sheikh: Auto Link already deletes Z71.6; Analyze now
+        // proposes the same removal so it shows under "To Remove".
+        getICDRows().forEach(e => {
+            if (e.code.toUpperCase() === 'Z71.6' && !toDelete.some(d => d.row === e.row)) {
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Z71.6 is not kept on the chart for this provider' });
+            }
+        });
+
         // ---- Office Visit E&M code ----
         // Only NP (new, always 99203) and ESTP (established, sub-rules
         // below) exist for this provider. Suggested code goes to the TOP
@@ -2587,7 +2612,13 @@ function __smartCoderReadVersion(fallback) {
                 const c = (e.code || '').toUpperCase();
                 if (!c) return false;
                 if (/^F17/.test(c) || /^E5[3-6]/.test(c) || /^D51/.test(c) || /^E66/.test(c) || /^Z/.test(c)) return false;
-                return !CHRONIC_DISEASE_ICD_CODES.has(c);
+                if (CHRONIC_DISEASE_ICD_CODES.has(c)) return false;
+                // 2.01: a chronic-condition code not on the exact list (e.g.
+                // E11.649) whose same condition (ICD category, e.g. E11) was
+                // already billed in a prior encounter within the last 30
+                // days is not a new problem either.
+                if (chronicConditionBilledInLast30Days(c)) return false;
+                return true;
             });
         }
         const hasTCMOnChartForOV = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
@@ -2603,13 +2634,14 @@ function __smartCoderReadVersion(fallback) {
                 if (OFFICE_VISIT_EM_CODES.includes(toAdd[i].code)) toAdd.splice(i, 1);
             }
         } else if (hasPreventiveVisit && !hasAcuteDxForPreventiveOV()) {
-            // Preventive applied + no acute dx (only chronic-disease ICDs
-            // and/or non-problem codes like Z/F17/E53-56/D51/E66): the
+            // Preventive applied + no acute dx (only chronic-disease ICDs,
+            // chronic conditions billed in the last 30 days, and/or
+            // non-problem codes like Z/F17/E53-56/D51/E66): the
             // preventive visit covers it — remove any office-visit E/M
             // already on the chart and don't suggest a new one.
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Preventive applied with only chronic diagnoses (no acute dx) — office-visit E/M code not billed' });
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Preventive applied with only chronic diagnoses (no acute dx, or chronic condition already billed in the last 30 days) — office-visit E/M code not billed' });
                 }
             });
             for (let i = toAdd.length - 1; i >= 0; i--) {
@@ -4319,6 +4351,55 @@ function __smartCoderReadVersion(fallback) {
         "R00.1", "R01.1", "R41.81", "R54", "R87.810", "R94.4", "R94.5", "R94.6", "T82.212D", "E78.00"
     ]);
 
+    // ── Preventive + Office Visit (2.01): chronic condition billed in the
+    // last 30 days ──
+    // A chart ICD is a "chronic condition" when it is in
+    // CHRONIC_DISEASE_ICD_CODES or shares its ICD category (first 3
+    // characters, e.g. E11 = diabetes) with a code on that list. Returns
+    // true when that same category appears in the assessments of a PRIOR
+    // encounter dated 1-30 days before the current DOS. DOS comes from
+    // eCW's encounter dropdown by encounter id (falls back to the parsed
+    // note date) and the current encounter is skipped by id. If history
+    // isn't loaded yet, returns false, so the office visit is kept rather
+    // than wrongly removed.
+    const CHRONIC_ICD_CATEGORIES = new Set(
+        Array.from(CHRONIC_DISEASE_ICD_CODES).map(c => c.toUpperCase().slice(0, 3))
+    );
+    function icdCategory(code) {
+        return String(code || '').toUpperCase().trim().slice(0, 3);
+    }
+    function chronicConditionBilledInLast30Days(code) {
+        const cat = icdCategory(code);
+        if (cat.length < 3 || !CHRONIC_ICD_CATEGORIES.has(cat)) return false;
+        const api = window.__ecwPatientHistory;
+        if (!api || !api.getData || (api.isLoading && api.isLoading())) return false;
+        const data = api.getData();
+        if (!data || !data.length) return false;
+        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : 0;
+        if (!currentTs) return false;
+        const dosById = {};
+        let currentEncId = "";
+        document.querySelectorAll('#encDropDownList li[id^="encList_"]').forEach(li => {
+            const id = li.id.replace("encList_", "").trim();
+            const dos = (li.querySelector(".enc-lbl-span")?.textContent || "").match(/\d{2}\/\d{2}\/\d{4}/)?.[0];
+            if (id && dos) dosById[id] = dos;
+            if (id && li.classList.contains("hlight-enc")) currentEncId = id;
+        });
+        return data.some(enc => {
+            if (!enc || enc.error) return false;
+            const encId = String(enc.encounter_id || "");
+            if (currentEncId && encId === currentEncId) return false;
+            const dos = dosById[encId] || enc.encounter_date;
+            if (!dos || dos === currentDosStr) return false;
+            const ts = parseUSDateSnap(dos);
+            if (!ts) return false;
+            const diffDays = (currentTs - ts) / 86400000;
+            if (diffDays <= 0 || diffDays > 30) return false; // prior encounters only
+            return (enc.assessments || []).some(a => icdCategory(a.code) === cat);
+        });
+    }
+
     // Reads the visit type from the appointment caption, e.g.
     // 'Appt: (07/24/2026 10:30 am, Same Day) ' -> "Same Day".
     function getVisitType() {
@@ -5294,6 +5375,99 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
+    // G0447 modifier rule (ported from Getwell 5.90). The separate "ECW
+    // Sorting by HackeRudro" extension puts 25 on the office-visit E&M (and
+    // on the preventive code, when one is present) whenever G0447 is on the
+    // chart, because it lists G0447 among its "other" services. SmartCoder
+    // corrects it here: G0447 itself gets 59, and G0447 no longer justifies
+    // a 25 on any other code. A 25 is only removed when HackeRudro's own
+    // rules, re-evaluated with G0447 left out, would not have given it; a
+    // 25 earned from any other code stays. 99211 is exempt (always 25).
+    // Only a value of exactly "25" is ever cleared, so 95/93/SL/etc. are
+    // never touched. Must run AFTER the HackeRudro button.
+    const G0447_MOD_PREVENTIVE = [
+        "99381","99382","99383","99384","99385","99386","99387",
+        "99391","99392","99393","99394","99395","99396","99397",
+        "99401","99402","99403","99404","G0402","G0438","G0439"
+    ];
+    const G0447_MOD_NO_MOD_PREVENTIVE = ["G0402","G0438","G0439"];
+    // HackeRudro's "others" list with G0447 removed.
+    const G0447_MOD_OTHERS_EX_G0447 = [
+        "99495","99496","99406","99407","99408","Q0091",
+        "90471","90472","90460","90461","93000","96372","20610","99497",
+        "G0008","G0009","99484","99483","99409","99173","99172",
+        "97804","97803","97802","96374","96373","94762","94761","94760",
+        "94012","94011","93018","93017","93016","93015","93010","93005",
+        "92270","92265","92260","92250","92242","92240","92235","92230",
+        "92229","92228","92227",
+        "91322","91321","91320","91319","91318","91310","91304"
+    ];
+
+    // Given the CPT codes on the chart (G0447 present), returns which codes
+    // must NOT carry 25 — i.e. codes whose 25 came only from G0447.
+    function g0447_codesToStrip25(presentCPTs) {
+        const has = list => list.some(c => presentCPTs.includes(c));
+        const hasOffice = has(OFFICE_VISIT_EM_CODES);
+        const hasPreventive = has(G0447_MOD_PREVENTIVE);
+        const hasOtherEx = has(G0447_MOD_OTHERS_EX_G0447);
+        const strip = new Set();
+        // Office visit keeps 25 via Rule A (preventive, no other) or
+        // Rule B (any other code except G0447).
+        const officeKeeps = hasOffice && (hasPreventive || hasOtherEx);
+        if (!officeKeeps) {
+            OFFICE_VISIT_EM_CODES.forEach(c => { if (c !== "99211") strip.add(c); });
+        }
+        // Preventive keeps 25 only via Rule B with a non-G0447 other code.
+        const preventiveKeeps = hasOffice && hasOtherEx;
+        if (!preventiveKeeps) {
+            G0447_MOD_PREVENTIVE.forEach(c => {
+                if (!G0447_MOD_NO_MOD_PREVENTIVE.includes(c)) strip.add(c);
+            });
+        }
+        return strip;
+    }
+
+    // Auto Link side (billing tab, #billingTbl4).
+    function al_applyG0447ModifierRule() {
+        const tbody = document.querySelector("#billingTbl4 tbody");
+        if (!tbody) return;
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        const codeOf = row => (row.querySelector("td:nth-child(2)")?.textContent.trim() || "").toUpperCase();
+        const presentCPTs = rows.map(codeOf).filter(Boolean);
+        if (!presentCPTs.includes("G0447")) return;
+        const strip = g0447_codesToStrip25(presentCPTs);
+        rows.forEach(row => {
+            const cptCode = codeOf(row);
+            if (!cptCode) return;
+            const isG0447 = cptCode === "G0447";
+            if (!isG0447 && !strip.has(cptCode)) return;
+            try {
+                const scope = angular.element(row).scope();
+                if (scope && scope.cpt) {
+                    // Decide inside the callback so earlier queued
+                    // $applyAsync writes (e.g. televisit 95) are respected.
+                    scope.$applyAsync(() => {
+                        if (!scope.cpt) return;
+                        if (isG0447) scope.cpt.mod1 = "59";
+                        else if (String(scope.cpt.mod1 || "").trim() === "25") scope.cpt.mod1 = "";
+                    });
+                    return;
+                }
+            } catch (e) { /* fall through to manual input path */ }
+            const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                             row.querySelector('input[name="mod1"]') ||
+                             row.querySelector('input[id*="mod1"]');
+            if (!modInput) return;
+            if (!isG0447 && modInput.value.trim() !== "25") return;
+            modInput.focus();
+            modInput.value = isG0447 ? "59" : "";
+            modInput.dispatchEvent(new Event("input", { bubbles: true }));
+            modInput.dispatchEvent(new Event("change", { bubbles: true }));
+            modInput.blur();
+        });
+        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    }
+
     // 99211 always gets modifier 25 (unconditional, no matter what else
     // is on the chart). Nothing else is touched by this rule —
     // G0402/G0438/G0439 and the rest of the office-visit family are
@@ -5390,6 +5564,7 @@ function __smartCoderReadVersion(fallback) {
                 al_applySLModifierForPedsVaccines();
                 al_applyTelevisitModifier();
                 al_apply59ModifierFor96372();
+                al_applyG0447ModifierRule();
                 al_apply25ModifierFor99211();
                 al_alertDuplicateICDStart(icdRows);
                 al_alertDuplicateCPT(cptRows);
@@ -5596,6 +5771,24 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
+    // G0447 modifier rule, Claim Link side — same logic as
+    // al_applyG0447ModifierRule (see comment there).
+    function cl_applyG0447ModifierRule(cptRows) {
+        const presentCPTs = cptRows.map(cl_getCPTCode).filter(Boolean);
+        if (!presentCPTs.includes('G0447')) return;
+        const strip = g0447_codesToStrip25(presentCPTs);
+        cptRows.forEach(row => {
+            const code = cl_getCPTCode(row);
+            const modInput = cl_getCPTMod1Input(row);
+            if (!code || !modInput) return;
+            if (code === 'G0447') {
+                cl_setInputValue(modInput, '59');
+            } else if (strip.has(code) && modInput.value.trim() === '25') {
+                cl_setInputValue(modInput, '');
+            }
+        });
+    }
+
     // 99211 always gets modifier 25 (unconditional, no matter what else
     // is on the chart). Nothing else is touched by this rule —
     // G0402/G0438/G0439 and the rest of the office-visit family are
@@ -5631,6 +5824,19 @@ function __smartCoderReadVersion(fallback) {
     }
 
     // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
+    // ─── 98012 never billed: stays on the claim, unchecked ─────────────
+    // Hasan Sheikh: on Claim Link, 98012 stays in the CPT list (televisit
+    // modifier/POS rules still see it) but its "Bill to Ins" checkbox is
+    // unchecked. Same real .click() mechanics as the 1159F/1160F rule.
+    // Runs last in cl_mainFlow so the earlier rules see the claim as-is.
+    function cl_uncheck98012BillToIns(cptRows) {
+        cptRows.forEach(row => {
+            if ((cl_getCPTCode(row) || '').toUpperCase() !== '98012') return;
+            const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+            if (chk && chk.checked && !chk.disabled) chk.click();
+        });
+    }
+
     function cl_isCPTRowSelected(row) {
         const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
         return !!chk && chk.checked;
@@ -6383,6 +6589,7 @@ function __smartCoderReadVersion(fallback) {
             cl_checkMedicarePreventiveCPT(cptRows);
             cl_checkMedicaidCPTCount(cptRows);
             cl_apply59ModifierFor96372(cptRows);
+            cl_applyG0447ModifierRule(cptRows);
             cl_apply25ModifierFor99211(cptRows);
             cl_applyTelevisitModifier(cptRows);
             cl_applyHealthfirstTelehealthPOS(cptRows);
@@ -6390,6 +6597,7 @@ function __smartCoderReadVersion(fallback) {
             cl_applyMedicaidTelehealthPOS(cptRows);
             cl_applyOtherInsuranceTelehealthPOS(cptRows);
             cl_fillBlankTOS(cptRows);
+            cl_uncheck98012BillToIns(cptRows);
         } finally {
             extensionBusy = false;
         }
