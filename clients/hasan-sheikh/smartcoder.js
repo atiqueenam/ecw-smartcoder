@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v1.98
+// @name         Hasan Sheikh SmartCoder v1.99
 // @namespace    http://tampermonkey.net/
-// @version      1.98
+// @version      1.99
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.99 (2026-10-05) - Pediatric Obesity Counseling fixes. (1) False
+//   televisit: our own panel text ("...or televisit present" 99051 reason,
+//   "...not applicable for a televisit") was read back from the page and
+//   faded OB / deleted G0447 after Analyze. Own phrases now ignored by the
+//   televisit check (98012 / note text unchanged). (2) OB quick action for
+//   under 18 now adds the BMI-percentile Z68.5x code (was none). (3) Analyze
+//   adds the correct Z68.xx when G0447 is applied (was Preventive-only), and
+//   pediatric Z68 works from BMI % even when raw BMI isn't parsed.
 // 1.98 (2026-10-05) - Preventive + chronic-only dx -> no office visit. When
 //   a Preventive visit (993xx/G0438/G0439) applies and the ICD list has no
 //   acute dx (only CHRONIC_DISEASE_ICD_CODES entries and/or Z/F17/E53-56/
@@ -1985,7 +1993,7 @@ function __smartCoderReadVersion(fallback) {
         // mentioned in the HPI). Computed early because it also gates
         // whether any Preventive/Preventive-Counseling bundle (CPT +
         // linked ICDs) is allowed to remain on the chart below.
-        const isTelevisitNote = /televisit/i.test(flags.hpiText) || rawCPTCodeSet.has('98012');
+        const isTelevisitNote = mentionsTelevisit(flags.hpiText) || rawCPTCodeSet.has('98012');
 
         // Single source of truth for whether each of the 4 quick-action
         // buttons (PV/PC/SM/OB) is currently allowed to fire — same
@@ -2072,7 +2080,7 @@ function __smartCoderReadVersion(fallback) {
         // toggle just changes what the next Analyze run will propose. ----
         const isUHCFamilyForWeekend = isUHCInsurance(insurance);
         if (isWeekendEnabled()) {
-            const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || /televisit/i.test(flags.hpiText);
+            const isTelevisitForWeekend = rawCPTCodeSet.has('98012') || mentionsTelevisit(flags.hpiText);
             const has9CodeExceptExempt = rawCPTCodesNow.some(c =>
                 /^9/.test(c) && c !== '99000' && c !== '99051' && !OFFICE_VISIT_EM_CODES.includes(c));
             const weekendBlocked = has9CodeExceptExempt ||
@@ -2103,7 +2111,7 @@ function __smartCoderReadVersion(fallback) {
         // of preventive status, same as the adult flow. Only the CPT
         // G-code add is gated on hasPreventiveVisit.
         let correctZ68Ped = null;
-        if (bmi && age != null && age < 18) {
+        if ((bmi || bmiPercentile) && age != null && age < 18) {
             correctZ68Ped = pediatricZ68FromPercentile(parseFloat(bmiPercentile));
             if (!correctZ68Ped) {
                 const pedZ68Row = getICDRows().find(r => PEDIATRIC_BMI_Z_TO_GCODE[r.code.toUpperCase()]);
@@ -2452,7 +2460,8 @@ function __smartCoderReadVersion(fallback) {
             // Rule 1: no Z68.xx present at all → don't add it, unless a
             // preventive visit is being applied this encounter. A WRONG
             // Z68.xx already present always gets corrected either way.
-            if (!hasCorrectZ68 && (currentZ68Entries.length > 0 || hasPreventiveVisit)) {
+            // Also added when Obesity Counseling (G0447) is applied.
+            if (!hasCorrectZ68 && (currentZ68Entries.length > 0 || hasPreventiveVisit || hasObesityCPTForBMI)) {
                 toAdd.push({ code: correctZ68, reason: `BMI ${age >= 18 ? bmiNum : (bmiPercentile ? bmiPercentile + '%' : correctZ68)} — correct Z68.xx code`, kind: 'icd' });
             }
             currentZ68Entries.forEach(e => {
@@ -6459,12 +6468,24 @@ function __smartCoderReadVersion(fallback) {
     // Same 98012/"televisit" detection computeAnalysis uses (see
     // isTelevisitNote there) — re-derived here so the quick-action buttons
     // can be gated at render time, before any action actually runs.
+    // The encounter text is read from document.body.innerText, which also
+    // contains SmartCoder's OWN panel. Several of our own messages contain
+    // the word "televisit" (e.g. the 99051 Weekend reason "...no blocking
+    // code or televisit present", or "...not applicable for a televisit"),
+    // so after Analyze rendered one of them the next read saw "televisit"
+    // and wrongly treated a normal visit as a televisit (fading OB and
+    // deleting G0447/Z68). Strip our own phrases before testing.
+    const SMC_OWN_TELEVISIT_PHRASES = /no blocking code or televisit present|not applicable for a televisit|Televisit \(98012 present\)/gi;
+    function mentionsTelevisit(text) {
+        return /televisit/i.test(String(text || '').replace(SMC_OWN_TELEVISIT_PHRASES, ' '));
+    }
+
     function isTelevisitNow(text) {
         const hasCode = getCPTRows().some(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent || '').trim().toUpperCase();
             return code === '98012';
         });
-        return hasCode || /televisit/i.test(text || '');
+        return hasCode || mentionsTelevisit(text);
     }
 
     // ── Quick-action button gating (PV / P/C / SM / OB) ─────────────────
@@ -6858,7 +6879,15 @@ function __smartCoderReadVersion(fallback) {
             }
 
             const codes = [obesityCode];
-            const z68 = mapBMIToZ68(bmi, age);
+            // Under 18: BMI-for-age percentile Z68.51-Z68.54 (same bands
+            // Analyze uses). Gate above already guarantees >= 95th -> Z68.54.
+            let z68;
+            if (age != null && age < 18) {
+                const pedPct = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i));
+                z68 = isNaN(pedPct) ? null : (pedPct < 5 ? 'Z68.51' : pedPct < 85 ? 'Z68.52' : pedPct < 95 ? 'Z68.53' : 'Z68.54');
+            } else {
+                z68 = mapBMIToZ68(bmi, age);
+            }
             if (z68) codes.push(z68);
 
             prefetchICDLookups(codes);
