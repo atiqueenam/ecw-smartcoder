@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-02T04:35:49.364Z",
+  "generatedAt": "2026-10-05T05:52:55.675Z",
   "clients": [
     {
       "id": "bronx",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.04",
+      "version": "1.05",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "5be8f45885f755c68e41d8289426536b290df9ac363f7e1e4ae62b476e73a89a"
+      "sha256": "f2ca504fbde5dd0923631578b554817197a4f439143327dd07c1e2dbebceab2d"
     }
   ]
 }
