@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.93
+// @name         Bronx Health SmartCoder v1.94
 // @namespace    http://tampermonkey.net/
-// @version      1.93
+// @version      1.94
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.94 (2026-10-05) - G0136 6-month rule fixed. Was re-adding G0136 when it
+//   was billed within 6 months, and sometimes deleting it when applicable.
+//   Cause: the check used the date parsed from each printed note (could be
+//   wrong) and didn't exclude the current encounter by id, and treated
+//   "history not loaded yet" as "never billed". Now uses eCW's encounter
+//   dropdown DOS by encounter id, skips the current encounter, counts
+//   only prior encounters within 180 days, and while history is loading
+//   keeps an existing G0136 and doesn't add a new one. Delete reason now
+//   says "already billed within the last 6 months". Bronx only.
 // 1.93 (2026-10-02) - FY2027 ICD-10-CM: Z68.1 is no longer valid (deleted
 //   10/1/2026). Patients 18+: BMI 18.4 or less -> Z68.18, BMI 18.5-19.9 ->
 //   Z68.19. Any Z68.1 already on the ICD grid is flagged as a wrong BMI
@@ -1449,6 +1458,53 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
+    // G0136 6-month (180-day) check. Returns true (billed in a prior
+    // encounter within 180 days), false (not billed), or null (history not
+    // loaded yet / current DOS unknown — can't tell).
+    //
+    // Why not codeUsedInLastDays: that relies on encounter_date parsed from
+    // each printed note, which can pick up the wrong date. Two failures:
+    //  - the CURRENT encounter (already carrying G0136) got a different
+    //    date, wasn't excluded, and counted as a "prior use" -> G0136 was
+    //    deleted even though it was applicable;
+    //  - a real prior encounter got a wrong/old date, fell outside 180 days
+    //    -> G0136 was added again. Also, history not loaded yet = "never
+    //    used" -> added again.
+    // Here the DOS comes from eCW's own encounter dropdown (by encounter
+    // id), the current encounter is excluded by id, and "unknown" is kept
+    // separate from "not used". Same different-payer carve-out as before.
+    function g0136UsedInLast180Days() {
+        const api = window.__ecwPatientHistory;
+        if (!api || !api.getData || (api.isLoading && api.isLoading())) return null;
+        const data = api.getData();
+        if (!data) return null;
+        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : null;
+        if (!currentTs) return null;
+        const dosById = {};
+        let currentEncId = "";
+        document.querySelectorAll('#encDropDownList li[id^="encList_"]').forEach(li => {
+            const id = li.id.replace("encList_", "").trim();
+            const dos = (li.querySelector(".enc-lbl-span")?.textContent || "").match(/\d{2}\/\d{2}\/\d{4}/)?.[0];
+            if (id && dos) dosById[id] = dos;
+            if (id && li.classList.contains("hlight-enc")) currentEncId = id;
+        });
+        return data.some(enc => {
+            if (!enc || enc.error) return false;
+            const encId = String(enc.encounter_id || "");
+            if (currentEncId && encId === currentEncId) return false;
+            const dos = dosById[encId] || enc.encounter_date;
+            if (!dos || dos === currentDosStr) return false;
+            const ts = parseUSDateSnap(dos);
+            if (!ts) return false;
+            const diffDays = (currentTs - ts) / 86400000;
+            if (diffDays <= 0 || diffDays > 180) return false; // prior encounters only
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
+            return [...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
+                .some(c => (c.code || "").toUpperCase() === "G0136");
+        });
+    }
+
     // Vitals documented: at least one real reading (BP, weight, height,
     // pulse, temp, resp rate, O2 sat) anywhere in the note. Used for the
     // 99212 ("no vitals documented") rule.
@@ -2617,8 +2673,18 @@ function __smartCoderReadVersion(fallback) {
 
         // G0136 (social needs screening) can only be used once every 6
         // months — skip it if already billed within the last 180 days.
-        if (hasSocialNeeds && !codeUsedInLastDays('G0136', 180)) {
-            desired.set('G0136', 'Social needs screening');
+        // Uses g0136UsedInLast180Days() (see its comment). While history
+        // is still loading (null), an existing G0136 is kept and a new one
+        // is not added — re-run Analyze once history finishes.
+        if (hasSocialNeeds) {
+            const g0136Used = g0136UsedInLast180Days();
+            if (g0136Used === false) {
+                desired.set('G0136', 'Social needs screening');
+            } else if (g0136Used === null) {
+                if (rawCPTCodeSet.has('G0136')) desired.set('G0136', 'Social needs screening (history still loading — kept)');
+            } else {
+                exclusionReasons.set('G0136', 'G0136 already billed within the last 6 months');
+            }
         }
 
         // A1c control-CPT logic removed.
