@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-06T08:36:54.094Z",
+  "generatedAt": "2026-10-06T11:06:23.818Z",
   "clients": [
     {
       "id": "bronx",
@@ -12,6 +12,17 @@
       "version": "1.95",
       "file": "clients/bronx/smartcoder.js",
       "sha256": "933306563061d7f134578e07486cda93edff9403e11da3985c34c0b727a9cc04"
+    },
+    {
+      "id": "elnunu",
+      "name": "El Nunu Medical",
+      "siteId": "ardegl70caebshiqyqapp",
+      "hostnames": [
+        "ardegl70caebshiqyqapp.ecwcloud.com"
+      ],
+      "version": "1.00",
+      "file": "clients/elnunu/smartcoder.js",
+      "sha256": "6681407d28e667344b2ddf2c993fd9b329f756205c459ca9a80a3d6d8e585dab"
     },
     {
       "id": "getwell",
@@ -56,6 +67,17 @@
       "version": "1.06",
       "file": "clients/highland-medical/smartcoder.js",
       "sha256": "85214aaa041ec0d45962542a392cc6cbbd96a131a9a25377b75c1fed13d6a053"
+    },
+    {
+      "id": "xcellcare",
+      "name": "XcellCare",
+      "siteId": "hcvyfpscdfvjkmhe6dapp",
+      "hostnames": [
+        "hcvyfpscdfvjkmhe6dapp.ecwcloud.com"
+      ],
+      "version": "1.00",
+      "file": "clients/xcellcare/smartcoder.js",
+      "sha256": "9fc9e433aee135c030f97e1b596f3408cf3fe038b8382b73ae9906a07b0e4260"
     }
   ]
 }
