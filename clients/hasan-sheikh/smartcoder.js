@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.07
+// @name         Hasan Sheikh SmartCoder v2.08
 // @namespace    http://tampermonkey.net/
-// @version      2.07
+// @version      2.08
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.08 (2026-10-06) - Batch delete for Start Action. All CPT deletes are
+//   sent to eCW's server at the same time (pnBillingService.deleteCpt,
+//   the call removeCpt makes) and the rows removed by identity; ICDs are
+//   removed in one pass with removeData(...,true), highest index first;
+//   one Angular refresh at the end. Items the batch can't handle safely
+//   (lexical dx, no delete permission, not mapped, server refused, ICD
+//   bounced back) go through the 2.07 one-by-one delete. Blocked CPTs
+//   are still reported as blocked. smcFastDelete.disable() turns off both.
 // 2.07 (2026-10-06) - Fast delete. Billing ICD/CPT deletes (Start Action,
 //   quick actions, Auto Link cleanup) now call eCW's own functions instead
 //   of clicking the trash icon and waiting for the confirm balloon: ICD
@@ -1809,6 +1817,127 @@ function __smartCoderReadVersion(fallback) {
                 }
             }, 50);
         });
+    }
+
+    // ── Batch delete (2.08) ─────────────────────────────────────────
+    // Start Action deletes everything in one pass instead of one by one
+    // (verified in the console on a live chart: 4 CPTs in ~470 ms, ICDs
+    // removed immediately):
+    //  1. CPTs: every server delete is sent AT THE SAME TIME through
+    //     pnBillingService.deleteCpt (the call eCW's removeCpt makes),
+    //     then the deleted rows are removed from the grid by identity.
+    //  2. ICDs: removeData(index,'icd',null,true) for each, highest index
+    //     first so the remaining indexes never shift. If eCW ever removes
+    //     one asynchronously, the batch waits for it before the next.
+    //  3. One Angular refresh at the end, then a short bounce-back check.
+    // Returns Map(item -> {ok, blocked?, batch:true}) for the items it
+    // handled; anything it couldn't handle safely is left out, and the
+    // caller deletes those with the normal one-by-one delete. Returns
+    // null (whole old path) when switched off or eCW's functions are
+    // missing. Never sends a second delete for an item it already sent.
+    async function batchDeleteBillingCodes(items) {
+        if (!isFastDeleteEnabled() || !Array.isArray(items) || !items.length) return null;
+        let scope;
+        try { scope = getBillingScopeForInjection(); } catch (e) { return null; }
+        if (typeof scope.removeData !== 'function' || !Array.isArray(scope.icdData) || !Array.isArray(scope.cptData)) return null;
+        let billingService = null;
+        try { billingService = window.angular.element(document.querySelector('#billingBtn1')).injector().get('pnBillingService'); } catch (e) { billingService = null; }
+        const canBatchCpt = !!billingService && typeof billingService.deleteCpt === 'function' && !!scope.encounterId;
+
+        const results = new Map();
+        const norm = v => String(v || '').trim().toUpperCase();
+        const rowIndexOf = row => {
+            try { const rs = row && document.body.contains(row) ? window.angular.element(row).scope() : null; return rs && typeof rs.$index === 'number' ? rs.$index : -1; }
+            catch (e) { return -1; }
+        };
+
+        // ---- pick the exact eCW object for each item ----
+        const cptPicks = [], icdPicks = [], usedObjs = new Set();
+        const icdLexical = obj => {
+            try { return !!(scope.isIMOLexicalDisplay && typeof scope.isLexicalDiagnosis === 'function' && scope.isLexicalDiagnosis(obj)); }
+            catch (e) { return true; }
+        };
+        for (const item of items) {
+            const isIcd = item.kind === 'icd';
+            const list = isIcd ? scope.icdData : scope.cptData;
+            const codeOf = o => isIcd ? norm(o && o.medicalcode) : String((o && o.code) || '').trim();
+            const want = isIcd ? norm(item.code) : String(item.code || '').trim();
+            let obj = null;
+            const idx = rowIndexOf(item.row);
+            if (idx >= 0 && list[idx] && codeOf(list[idx]) === want && !usedObjs.has(list[idx])) obj = list[idx];
+            if (!obj) obj = list.find(o => o && codeOf(o) === want && !usedObjs.has(o)) || null;
+            if (!obj) continue; // not found -> old path decides (usually "already gone")
+            if (isIcd) {
+                if ((scope.elements && scope.elements.cmdDeleteAsmt === false) || icdLexical(obj)) continue;
+                usedObjs.add(obj);
+                icdPicks.push({ item, obj });
+            } else {
+                // Same "mapped/tracked elsewhere" block as the click path.
+                const domRow = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'))[list.indexOf(obj)];
+                const delBtn = domRow && domRow.querySelector('button, i.blue-delete, .blue-delete');
+                if (delBtn && (delBtn.classList.contains('disabledDeleteButton') || delBtn.classList.contains('per'))) {
+                    results.set(item, { ok: false, blocked: true, batch: true });
+                    continue;
+                }
+                if (!canBatchCpt) continue;
+                usedObjs.add(obj);
+                cptPicks.push({ item, obj });
+            }
+        }
+        if (!cptPicks.length && !icdPicks.length) return results;
+
+        // ---- 1. CPTs: parallel server deletes ----
+        if (cptPicks.length) {
+            const settled = await Promise.allSettled(cptPicks.map(p => {
+                const billingId = p.obj.billingid !== undefined ? parseInt(p.obj.billingid, 10) : 0;
+                return Promise.resolve(billingService.deleteCpt(scope.encounterId, p.obj.id, billingId));
+            }));
+            const deleted = [];
+            settled.forEach((r, k) => {
+                const p = cptPicks[k];
+                if (r.status === 'fulfilled') { deleted.push(p.obj); results.set(p.item, { ok: true, batch: true }); }
+                else {
+                    console.warn(`SmartCoder batch delete: server refused CPT ${p.obj.code}`, r.reason);
+                    results.set(p.item, { ok: false, batch: true });
+                }
+            });
+            if (deleted.length) {
+                // In place (same array object eCW holds), by identity.
+                for (let i = scope.cptData.length - 1; i >= 0; i--) {
+                    if (deleted.includes(scope.cptData[i])) scope.cptData.splice(i, 1);
+                }
+            }
+        }
+
+        // ---- 2. ICDs: highest index first ----
+        icdPicks.sort((a, b) => scope.icdData.indexOf(b.obj) - scope.icdData.indexOf(a.obj));
+        for (const p of icdPicks) {
+            const index = scope.icdData.indexOf(p.obj);
+            if (index < 0) { results.set(p.item, { ok: true, batch: true }); continue; }
+            try { scope.removeData(index, 'icd', null, true); }
+            catch (e) {
+                console.warn(`SmartCoder batch delete: ICD ${p.obj.medicalcode} threw`, e);
+                if (scope.icdData.includes(p.obj)) continue; // untouched -> one-by-one fallback
+            }
+            if (scope.icdData.includes(p.obj)) {
+                // eCW removed it asynchronously — wait before touching the
+                // next index so nothing shifts under us.
+                const start = Date.now();
+                while (scope.icdData.includes(p.obj) && Date.now() - start < 3000) await new Promise(r => setTimeout(r, 25));
+            }
+            results.set(p.item, { ok: !scope.icdData.includes(p.obj), batch: true });
+        }
+
+        // ---- 3. one refresh + bounce-back check ----
+        try { if (!scope.$root.$$phase) scope.$apply(); else scope.$applyAsync(); } catch (e) { try { scope.$applyAsync(); } catch (_) {} }
+        await new Promise(r => setTimeout(r, 300));
+        for (const p of icdPicks) {
+            if (scope.icdData.includes(p.obj)) {
+                // Came back (or never left): let the one-by-one delete retry it.
+                results.delete(p.item);
+            }
+        }
+        return results;
     }
 
     // Deletion mechanism ported directly from the verified, working
@@ -7345,12 +7474,20 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
         prefetchAnalysisLookups(analysisState.toAdd);
 
+        // 2.08: delete everything in one batch first; only the items the
+        // batch couldn't handle go through the one-by-one delete below.
+        let batchDeleteResults = null;
+        try { batchDeleteResults = await batchDeleteBillingCodes(analysisState.toDelete); }
+        catch (e) { console.warn('SmartCoder batch delete failed — using one-by-one delete', e); batchDeleteResults = null; }
+
         for (const item of analysisState.toDelete) {
-            let result;
-            if (item.kind === 'icd') {
-                result = await deleteICDRowWithRetry(item.code);
-            } else {
-                result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
+            let result = batchDeleteResults ? batchDeleteResults.get(item) : null;
+            if (!result) {
+                if (item.kind === 'icd') {
+                    result = await deleteICDRowWithRetry(item.code);
+                } else {
+                    result = await new Promise(resolve => deleteOneCPTRow(item.row, item.code, resolve));
+                }
             }
             actionLog.push({
                 code: item.code,
@@ -7361,8 +7498,9 @@ function __smartCoderReadVersion(fallback) {
                     ? "eCW won't allow deleting this from here (it's mapped/tracked elsewhere, e.g. Patient Tracking) — remove it manually if it shouldn't be there."
                     : undefined
             });
-            renderSnapshotBlock();
+            if (!(result && result.batch)) renderSnapshotBlock();
         }
+        renderSnapshotBlock();
 
         const deferredCPT = [];
         for (const item of analysisState.toAdd) {
