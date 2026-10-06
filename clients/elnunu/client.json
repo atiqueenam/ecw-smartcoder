@@ -1,0 +1,11 @@
+{
+  "id": "elnunu",
+  "name": "El Nunu Medical",
+  "siteId": "ardegl70caebshiqyqapp",
+  "hostnames": [
+    "ardegl70caebshiqyqapp.ecwcloud.com"
+  ],
+  "version": "1.00",
+  "entry": "smartcoder.js",
+  "enabled": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "xcellcare",
+  "name": "XcellCare",
+  "siteId": "hcvyfpscdfvjkmhe6dapp",
+  "hostnames": [
+    "hcvyfpscdfvjkmhe6dapp.ecwcloud.com"
+  ],
+  "version": "1.00",
+  "entry": "smartcoder.js",
+  "enabled": true
+}
