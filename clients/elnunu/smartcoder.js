@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         El Nunu Medical SmartCoder v1.00
+// @name         El Nunu Medical SmartCoder v1.01
 // @namespace    http://tampermonkey.net/
-// @version      1.00
+// @version      1.01
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.01 (2026-10-06) - BP (3074F/3075F/3078F/3079F, Medicare G8752/G8754)
+//   and BMI (3008F, G8417/G8418/G8420) codes are only billed with a
+//   preventive visit on the chart, same as Highland Medical; without one
+//   they are not added and are removed if present. Alcohol screening ICD
+//   is Z13.9 (Z13.89 is replaced by Z13.9).
 // 1.00 (2026-10-06) - New client, built from Base Medical 1.06 with the
 //   DocPro Basic Coding Guidelines (SOP) applied:
 //   - Office visit: provider's code kept as-is (no up/downgrade); only a
@@ -25,10 +30,10 @@
 //     99401 once per 2 months (preventive in last month blocks it);
 //     99401/99406 blocked by 99214/99215 on the chart. 99406 all ages,
 //     99406/99407 monthly. G0447 blocked for UHC/Oxford/UMR too.
-//   - BP: no preventive requirement; Medicare/Medicare Advantage G8752 +
+//   - BP: Medicare/Medicare Advantage G8752 +
 //     G8754, others 3074F/3075F + 3078F/3079F; normal pair 4x/year.
-//   - BMI: 3008F + G-code on any visit with BMI (no preventive
-//     requirement), 4x/year each; adult G8418 <=18.5, G8420 <25, G8417 25+.
+//   - BMI: 3008F + G-code, 4x/year each; adult G8418 <=18.5, G8420 <25,
+//     G8417 25+.
 //   - Modifiers: 59 on G0442/G0444/Q0091/G0447 (+96372); 25 on OV /
 //     preventive / 99401-99404 / 99497 with SOP trigger codes; 99211 + any
 //     other CPT -> 25; televisit 95 (Healthfirst/UHC) or 93 when the note
@@ -38,8 +43,7 @@
 //     component table (adds 90612/90613/90636 etc.); SL on all vaccine
 //     products for 18 and under.
 //   - EKG links I10, R00.x, R03.0, R06.02, R07.9/R07.89, E11, E78, I25 and
-//     other heart ICDs. 1159F/1160F kept from 65. Alcohol screening ICD
-//     Z13.89. 4013F and 3725F no longer deleted; Z09 removed; Z00.129 kept.
+//     other heart ICDs. 1159F/1160F kept from 65. 4013F and 3725F no longer deleted; Z09 removed; Z00.129 kept.
 //     UHC: Q0091/99497/99000/96127/99173/99051 removed. G0108 removed
 //     without a diabetes ICD.
 //   - Not yet automated (manual per SOP): ICD/CPT sorting (sections 11-12),
@@ -1971,8 +1975,8 @@ function __smartCoderReadVersion(fallback) {
                 if (pedZ68Row) correctZ68Ped = pedZ68Row.code.toUpperCase();
             }
         }
-        // SOP §3: BMI documented -> 3008F + BMI G-code on any visit (no
-        // preventive-visit requirement). Adult G-code: BMI <=18.5 G8418,
+        // BMI documented + PREVENTIVE visit on the chart (1.01, same as
+        // Highland) -> 3008F + BMI G-code. Adult G-code: BMI <=18.5 G8418,
         // <25 G8420, >=25 G8417. Yearly limits: 3008F 4x/year, the
         // G8417/G8418/G8420 family 4x/year (prior encounters this year).
         const bmiLimitYear = getCurrentDosYear();
@@ -1987,15 +1991,16 @@ function __smartCoderReadVersion(fallback) {
                 bmiGCodeWanted = PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped];
             }
         }
-        if (bmiGCodeWanted) {
-            if (bmi3008Count < 4) desired.set('3008F', 'BMI documented');
+        if (bmiGCodeWanted && hasPreventiveVisit) {
+            if (bmi3008Count < 4) desired.set('3008F', 'BMI documented (preventive visit)');
             if (bmiGFamilyCount < 4) {
                 desired.set(bmiGCodeWanted, age >= 18
                     ? `BMI ${bmi}`
                     : `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped}`);
             }
         }
-        // Codes left out of `desired` (no BMI, or yearly limit reached) are
+        // Codes left out of `desired` (no BMI, no preventive visit, or
+        // yearly limit reached) are
         // flagged for removal by the MANAGED_CODES diff below.
 
         // Deletion reasons override for specific MANAGED_CODES that need
@@ -2023,8 +2028,8 @@ function __smartCoderReadVersion(fallback) {
         // systolic <=129 3074F / <=139 3075F, diastolic <=79 3078F / <=89
         // 3079F. Medicare and Medicare Advantage (any payer name containing
         // "Medicare"): systolic G8752 + diastolic G8754. The normal-BP pair
-        // can be billed 4 times per calendar year. No preventive-visit
-        // requirement.
+        // can be billed 4 times per calendar year. Only with a preventive
+        // visit on the chart (1.01, same as Highland).
         const BP_ADDABLE_CODES = ['3074F', '3075F', '3078F', '3079F', 'G8752', 'G8754'];
         const BP_PAIR_CODES_FOR_YEAR_CHECK = ['3074F', '3075F', '3078F', '3079F', 'G8752', 'G8754'];
         if (!bp) {
@@ -2037,7 +2042,8 @@ function __smartCoderReadVersion(fallback) {
             const bpDosYear = getCurrentDosYear();
 
             let bpReason = null;
-            if (!hasI10) bpReason = 'No I10 (hypertension) on the ICD list';
+            if (!hasPreventiveVisit) bpReason = 'No preventive visit on the chart — BP codes only billed with a preventive visit';
+            else if (!hasI10) bpReason = 'No I10 (hypertension) on the ICD list';
             else if (!sysOk && !diaOk) bpReason = `Systolic ${sys} and diastolic ${dia} both at/over threshold (140/90)`;
             else if (!sysOk) bpReason = `Systolic ${sys} at/over 140`;
             else if (!diaOk) bpReason = `Diastolic ${dia} at/over 90`;
@@ -2207,9 +2213,9 @@ function __smartCoderReadVersion(fallback) {
         if (age >= 12 && hasDep !== null && hasDepressionScreeningCpt && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
         }
-        // SOP §10.2: alcohol screening ICD is Z13.89.
-        if (age >= 18 && hasAlc !== null && hasAlcoholScreeningCpt && !currentICDCodesForScreening.includes('Z13.89')) {
-            toAdd.push({ code: 'Z13.89', reason: 'Alcohol screening documented', kind: 'icd' });
+        // Alcohol screening ICD is Z13.9 for this practice (1.01).
+        if (age >= 18 && hasAlc !== null && hasAlcoholScreeningCpt && !currentICDCodesForScreening.includes('Z13.9')) {
+            toAdd.push({ code: 'Z13.9', reason: 'Alcohol screening documented', kind: 'icd' });
         }
 
         const toDelete = [...gatedBundleCPTDeletes];
@@ -2273,17 +2279,17 @@ function __smartCoderReadVersion(fallback) {
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
             }
-            if (code === 'Z13.9' && !toDelete.some(d => d.code === entry.code)) {
-                // SOP §10.2 standardizes alcohol screening on Z13.89: Z13.9
-                // is replaced by Z13.89 when alcohol screening applies (the
-                // add rule above adds Z13.89), otherwise deleted.
+            if (code === 'Z13.89' && !toDelete.some(d => d.code === entry.code)) {
+                // This practice standardizes alcohol screening on Z13.9:
+                // Z13.89 is replaced by Z13.9 when alcohol screening applies
+                // (the add rule above adds Z13.9), otherwise deleted.
                 toDelete.push({
                     code: entry.code, row: entry.row, kind: 'icd',
                     reason: hasAlcoholScreeningCpt
-                        ? 'Z13.9 replaced with Z13.89 — the SOP alcohol screening ICD'
+                        ? 'Z13.89 replaced with Z13.9 — this practice uses Z13.9 for alcohol screening'
                         : 'Alcohol screening ICD present but no alcohol screening CPT on chart'
                 });
-            } else if (code === 'Z13.89' && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
+            } else if (code === 'Z13.9' && !hasAlcoholScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Alcohol screening ICD present but no alcohol screening CPT on chart' });
             }
         });
