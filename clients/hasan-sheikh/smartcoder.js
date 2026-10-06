@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.05
+// @name         Hasan Sheikh SmartCoder v2.07
 // @namespace    http://tampermonkey.net/
-// @version      2.05
+// @version      2.07
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,22 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.07 (2026-10-06) - Fast delete. Billing ICD/CPT deletes (Start Action,
+//   quick actions, Auto Link cleanup) now call eCW's own functions instead
+//   of clicking the trash icon and waiting for the confirm balloon: ICD
+//   scope.removeData(index,'icd',null,true), CPT scope.removeCpt(index)
+//   (server delete). Each row is mapped to its exact grid index and
+//   checked against its code first; success = that code's row count
+//   drops. Falls back to the old click-and-confirm delete whenever the
+//   fast path can't be used (scope/function missing, row mismatch,
+//   disabled delete button, IMO lexical dx). Kill switch in the console:
+//   smcFastDelete.disable() / .enable().
+// 2.06 (2026-10-06) - Smoking false positive fixed. "Former smoker" +
+//   "Tobacco User Moderate cigarette smoker" + "Tobacco Non-User
+//   Intolerant ex-smoker" was read as a current smoker: "ex-smoker" (and
+//   "never smoker") weren't treated as negations, so the bare word
+//   "smoker" inside them counted as active smoking. Both are now
+//   negatives.
 // 2.05 (2026-10-06) - Claim Link: LSM01, PD001, CP001, AST01 and 98012
 //   are never billed to insurance. If present on the claim, their "Bill
 //   to Ins" checkbox is unchecked (code stays on the claim). Same rule
@@ -1407,9 +1423,10 @@ function __smartCoderReadVersion(fallback) {
     // tobacco language (smokeless, chewing tobacco, cigar) without that word
     // needs a prior F17.210 in history to confirm. Returns true = NOT a
     // confirmed smoker (green), false = confirmed (red).
-    // "Smoker" not preceded by a negation word (not/denies/no/former/past)
-    // or "non-"/"non " — used for both checks below.
-    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|former|past)\\s)(?<!non[\\s-])";
+    // "Smoker" not preceded by a negation word (not/denies/no/never/
+    // former/past) or "non-"/"non "/"ex-"/"ex " — used for both checks
+    // below. 2.06: "ex-smoker" and "never smoker" are negatives too.
+    const NEG_BEFORE_SMOKER = "(?<!(?:not|denies|no|never|former|past)\\s)(?<!non[\\s-])(?<!\\bex[\\s-])";
 
     function isConfirmedNonSmoker(socText) {
         // "current ... smoker" wins over other text in the section (eCW
@@ -1422,7 +1439,7 @@ function __smartCoderReadVersion(fallback) {
         // is exactly the negation this guard exists to catch.
         if (new RegExp(`\\bcurrent\\b[\\s\\S]{0,25}?${NEG_BEFORE_SMOKER}\\bsmoker\\b`, "i").test(socText)) return false;
 
-        const explicitNegative = /non[\s-]?smoker|former\s+smoker|other\s+tobacco.*No/i.test(socText);
+        const explicitNegative = /non[\s-]?smoker|former\s+smoker|never\s+smoker|\bex[\s-]?smoker|other\s+tobacco.*No/i.test(socText);
 
         // When an explicit "Former smoker" / "non-smoker" answer already
         // exists, a later "<product type> smoker" phrase (e.g. "Pipe
@@ -1708,6 +1725,92 @@ function __smartCoderReadVersion(fallback) {
         }, 100);
     }
 
+    // ── Fast delete (2.07) ──────────────────────────────────────────
+    // Deletes a Billing ICD/CPT row through eCW's own Angular functions
+    // instead of clicking the trash icon and waiting for the confirm
+    // balloon (verified in the console on a live chart):
+    //   ICD: scope.removeData(index, 'icd', null, true)  — 4th arg is
+    //        eCW's own deleteWithoutConfirming flag; same delete path the
+    //        confirm "Delete" button runs.
+    //   CPT: scope.removeCpt(index) — what eCW runs after the "Remove"
+    //        confirm; deletes on the server, then removes the row.
+    // Returns null when the fast path can't be used safely (switched off,
+    // Billing scope/function missing, row doesn't map to the expected
+    // code, delete button disabled, IMO lexical diagnosis); the caller then
+    // uses the old click path unchanged. Otherwise returns a Promise<bool>
+    // (true once that row's code count in the grid drops). It never falls
+    // back to clicking after a fast call was made, so a code can't be
+    // deleted twice.
+    // Console: smcFastDelete.disable() / .enable() / .isEnabled()
+    const FAST_DELETE_KEY = 'smc_hasan-sheikh_fast_delete_enabled';
+    function isFastDeleteEnabled() {
+        try { return localStorage.getItem(FAST_DELETE_KEY) !== '0'; } catch (e) { return true; }
+    }
+    window.smcFastDelete = {
+        enable: () => { try { localStorage.setItem(FAST_DELETE_KEY, '1'); } catch (e) {} return 'fast delete ON'; },
+        disable: () => { try { localStorage.setItem(FAST_DELETE_KEY, '0'); } catch (e) {} return 'fast delete OFF (old click-and-confirm delete)'; },
+        isEnabled: isFastDeleteEnabled
+    };
+
+    function fastDeleteBillingRow(kind, row, delBtn) {
+        if (!isFastDeleteEnabled() || !row) return null;
+        const isIcd = kind === 'icd';
+        const rowText = (row.querySelector(isIcd ? 'td:nth-child(3)' : 'td:nth-child(2)')?.textContent || '').trim();
+        if (!rowText) return null;
+        if (delBtn && (delBtn.classList.contains('disabledDeleteButton') || delBtn.classList.contains('per'))) return null;
+
+        let scope, rowScope;
+        try { scope = getBillingScopeForInjection(); } catch (e) { return null; }
+        if (typeof (isIcd ? scope.removeData : scope.removeCpt) !== 'function') return null;
+        if (isIcd && scope.elements && scope.elements.cmdDeleteAsmt === false) return null;
+        try { rowScope = window.angular.element(row).scope(); } catch (e) { return null; }
+        const index = rowScope && typeof rowScope.$index === 'number' ? rowScope.$index : -1;
+        const list = isIcd ? scope.icdData : scope.cptData;
+        const item = Array.isArray(list) && index >= 0 ? list[index] : null;
+        if (!item) return null;
+        const itemCode = String((isIcd ? item.medicalcode : item.code) || '').trim().toUpperCase();
+        if (itemCode !== rowText.toUpperCase()) return null;
+        if (isIcd) {
+            try {
+                if (scope.isIMOLexicalDisplay && typeof scope.isLexicalDiagnosis === 'function' && scope.isLexicalDiagnosis(item)) return null;
+            } catch (e) { return null; }
+        }
+
+        const gridSel = isIcd ? '#billingTbl2 tbody tr' : '#billingTbl4 tbody tr';
+        const cellSel = isIcd ? 'td:nth-child(3)' : 'td:nth-child(2)';
+        const countNow = () => Array.from(document.querySelectorAll(gridSel))
+            .filter(r => (r.querySelector(cellSel)?.textContent || '').trim() === rowText).length;
+        const before = countNow();
+
+        try {
+            if (isIcd) scope.removeData(index, 'icd', null, true);
+            else scope.removeCpt(index);
+        } catch (e) {
+            console.warn(`SmartCoder fast delete: ${kind.toUpperCase()} ${rowText} threw — using the normal delete`, e);
+            if (countNow() >= before) return null;
+        }
+        try {
+            if (!scope.$root.$$phase) scope.$apply(); else scope.$applyAsync();
+        } catch (e) { try { scope.$applyAsync(); } catch (_) {} }
+
+        const timeoutMs = isIcd ? 4000 : 8000; // CPT waits for eCW's server delete
+        return new Promise(resolve => {
+            const start = Date.now();
+            const timer = setInterval(() => {
+                if (countNow() < before) {
+                    clearInterval(timer);
+                    setTimeout(() => resolve(true), 150); // let the grid settle
+                    return;
+                }
+                if (Date.now() - start > timeoutMs) {
+                    clearInterval(timer);
+                    console.warn(`SmartCoder fast delete: ${kind.toUpperCase()} ${rowText} still on the grid after ${timeoutMs} ms`);
+                    resolve(false);
+                }
+            }, 50);
+        });
+    }
+
     // Deletion mechanism ported directly from the verified, working
     // Auto_link_for_GetWell script — same selectors, same confirm-dialog
     // handling, same "wait until gone" polling, for both the CPT grid and
@@ -1739,6 +1842,10 @@ function __smartCoderReadVersion(fallback) {
             callback({ ok: false, blocked: true });
             return;
         }
+
+        // 2.07: fast delete through eCW's removeCpt (no confirm click).
+        const fastCpt = fastDeleteBillingRow('cpt', row, delBtn);
+        if (fastCpt) { fastCpt.then(ok => callback({ ok, fast: true })); return; }
 
         // If a confirm dialog from a PREVIOUS delete is still sitting open
         // (its poll window ran out before eCW finished rendering it), its
@@ -1797,6 +1904,10 @@ function __smartCoderReadVersion(fallback) {
         const code = row.querySelector('td:nth-child(3)')?.textContent.trim();
         const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
         if (!delBtn) { callback(false); return; }
+
+        // 2.07: fast delete through eCW's removeData(index,'icd',_,true).
+        const fastIcd = fastDeleteBillingRow('icd', row, delBtn);
+        if (fastIcd) { fastIcd.then(ok => callback(ok)); return; }
 
         // If a confirm dialog from a PREVIOUS delete is still sitting open
         // (its poll window ran out before eCW finished rendering it), its
@@ -5206,6 +5317,9 @@ function __smartCoderReadVersion(fallback) {
             const code = row.querySelector('td:nth-child(2)')?.textContent.trim();
             const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
             if (!delBtn) { callback(); return; }
+            // 2.07: fast delete (falls back to the click below if unavailable).
+            const fastCpt = fastDeleteBillingRow('cpt', row, delBtn);
+            if (fastCpt) { fastCpt.then(() => callback()); return; }
             delBtn.click();
             const start = Date.now();
             const confirmTimer = setInterval(() => {
@@ -5230,6 +5344,9 @@ function __smartCoderReadVersion(fallback) {
             const code = row.querySelector('td:nth-child(3)')?.textContent.trim();
             const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
             if (!delBtn) { callback(); return; }
+            // 2.07: fast delete (falls back to the click below if unavailable).
+            const fastIcd = fastDeleteBillingRow('icd', row, delBtn);
+            if (fastIcd) { fastIcd.then(() => callback()); return; }
             delBtn.click();
             const start = Date.now();
             const confirmTimer = setInterval(() => {
