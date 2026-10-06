@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.94
+// @name         Bronx Health SmartCoder v1.95
 // @namespace    http://tampermonkey.net/
-// @version      1.94
+// @version      1.95
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.95 (2026-10-06) - Claim Link: LSM01, PD001, CP001, AST01 and 98012
+//   are never billed to insurance. If present on the claim, their "Bill
+//   to Ins" checkbox is unchecked (code stays on the claim). Same rule
+//   across all clients.
 // 1.94 (2026-10-05) - G0136 6-month rule fixed. Was re-adding G0136 when it
 //   was billed within 6 months, and sometimes deleting it when applicable.
 //   Cause: the check used the date parsed from each printed note (could be
@@ -6221,6 +6225,19 @@ function __smartCoderReadVersion(fallback) {
         return row.querySelector('input[data-fieldname="ClaimCPTTOS"]');
     }
 
+    // Never billed to insurance (all clients): on Claim Link, the "Bill to
+    // Ins" checkbox of these CPT rows is unchecked. The row stays on the
+    // claim. Real .click() so Angular's updateBillToIns($index) runs.
+    const cl_NEVER_BILL_TO_INS_CODES = new Set(['LSM01', 'PD001', 'CP001', 'AST01', '98012']);
+    function cl_uncheckNeverBillToInsCodes(cptRows) {
+        cptRows.forEach(row => {
+            const code = (cl_getCPTCode(row) || '').trim().toUpperCase();
+            if (!cl_NEVER_BILL_TO_INS_CODES.has(code)) return;
+            const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+            if (chk && chk.checked && !chk.disabled) chk.click();
+        });
+    }
+
     // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
     function cl_isCPTRowSelected(row) {
         const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
@@ -7037,6 +7054,7 @@ function __smartCoderReadVersion(fallback) {
             cl_fillBlankTOS(cptRows);
             cl_applyModifier59(cptRows);
             cl_applyQWModifier(cptRows);
+            cl_uncheckNeverBillToInsCodes(cptRows);
         } finally {
             extensionBusy = false;
         }

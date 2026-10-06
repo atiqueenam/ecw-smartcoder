@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.04
+// @name         Hasan Sheikh SmartCoder v2.05
 // @namespace    http://tampermonkey.net/
-// @version      2.04
+// @version      2.05
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.05 (2026-10-06) - Claim Link: LSM01, PD001, CP001, AST01 and 98012
+//   are never billed to insurance. If present on the claim, their "Bill
+//   to Ins" checkbox is unchecked (code stays on the claim). Same rule
+//   across all clients.
 // 2.04 (2026-10-06) - Claim Link: Billing Note vs primary insurance check.
 //   If the claim's Billing Notes name a payer (MetroPlus, Healthfirst,
 //   Fidelis, Medicaid, ...) and none of them is the PRIMARY insurance in
@@ -5840,20 +5844,22 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
-    // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
-    // ─── 98012 never billed: stays on the claim, unchecked ─────────────
-    // Hasan Sheikh: on Claim Link, 98012 stays in the CPT list (televisit
-    // modifier/POS rules still see it) but its "Bill to Ins" checkbox is
-    // unchecked. Same real .click() mechanics as the 1159F/1160F rule.
-    // Runs last in cl_mainFlow so the earlier rules see the claim as-is.
-    function cl_uncheck98012BillToIns(cptRows) {
+    // Never billed to insurance (all clients): on Claim Link, the "Bill to
+    // Ins" checkbox of these CPT rows is unchecked. The row stays on the
+    // claim. Real .click() so Angular's updateBillToIns($index) runs.
+    // Replaces the 2.02 98012-only rule; still runs last in cl_mainFlow so
+    // the televisit modifier/POS rules see 98012 first.
+    const cl_NEVER_BILL_TO_INS_CODES = new Set(['LSM01', 'PD001', 'CP001', 'AST01', '98012']);
+    function cl_uncheckNeverBillToInsCodes(cptRows) {
         cptRows.forEach(row => {
-            if ((cl_getCPTCode(row) || '').toUpperCase() !== '98012') return;
+            const code = (cl_getCPTCode(row) || '').trim().toUpperCase();
+            if (!cl_NEVER_BILL_TO_INS_CODES.has(code)) return;
             const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
             if (chk && chk.checked && !chk.disabled) chk.click();
         });
     }
 
+    // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
     function cl_isCPTRowSelected(row) {
         const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
         return !!chk && chk.checked;
@@ -6669,7 +6675,7 @@ function __smartCoderReadVersion(fallback) {
             cl_applyMedicaidTelehealthPOS(cptRows);
             cl_applyOtherInsuranceTelehealthPOS(cptRows);
             cl_fillBlankTOS(cptRows);
-            cl_uncheck98012BillToIns(cptRows);
+            cl_uncheckNeverBillToInsCodes(cptRows);
             cl_checkBillingNoteInsuranceMismatch();
         } finally {
             extensionBusy = false;
