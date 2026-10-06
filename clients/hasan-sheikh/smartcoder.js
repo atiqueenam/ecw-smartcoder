@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.03
+// @name         Hasan Sheikh SmartCoder v2.04
 // @namespace    http://tampermonkey.net/
-// @version      2.03
+// @version      2.04
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.04 (2026-10-06) - Claim Link: Billing Note vs primary insurance check.
+//   If the claim's Billing Notes name a payer (MetroPlus, Healthfirst,
+//   Fidelis, Medicaid, ...) and none of them is the PRIMARY insurance in
+//   the claim's Insurances table, a sticky red alert is shown (stays until
+//   closed). Alert only, no claim changes. cl_showNotification gained an
+//   optional { sticky } flag.
 // 2.03 (2026-10-06) - Preventive + Office Visit fix: a chronic dx on the
 //   current visit that was NOT billed in the last 30 days now keeps the
 //   office visit with Preventive. 1.98/2.01 treated every exact
@@ -5632,7 +5638,7 @@ function __smartCoderReadVersion(fallback) {
         }, 250);
     }
 
-    function cl_showNotification(messages, colorType = 'red') {
+    function cl_showNotification(messages, colorType = 'red', opts = {}) {
         if (typeof messages === 'string') messages = [messages];
         if (!messages.length) return;
         const key = messages.join('||');
@@ -5704,7 +5710,8 @@ function __smartCoderReadVersion(fallback) {
         document.body.appendChild(container);
         cl_activeNotifications.push(container);
         cl_repositionNotifications();
-        setTimeout(() => cl_dismissNotification(container), 5000);
+        // opts.sticky (2.04): stays until the user closes it with x.
+        if (!opts.sticky) setTimeout(() => cl_dismissNotification(container), 5000);
     }
 
     // ─── Claim-tab specific selectors ─────────────────────────────────
@@ -5867,6 +5874,61 @@ function __smartCoderReadVersion(fallback) {
         if (!primaryRow) return null;
         const nameTd = primaryRow.querySelector('td:nth-child(2)');
         return nameTd ? (nameTd.getAttribute('title') || nameTd.textContent).trim() : null;
+    }
+
+    // ── Billing Note vs Primary Insurance (2.04) ──────────────────────
+    // If the claim's Billing Notes name a payer (e.g. "MetroPlus") but the
+    // PRIMARY insurance on the claim is a different payer (e.g.
+    // Healthfirst), show a sticky red alert so the claim can be fixed
+    // before submission. Alert only — nothing on the claim is changed.
+    // A note naming several payers is fine as long as one of them is the
+    // primary (e.g. "changed from MetroPlus to Healthfirst").
+    const cl_PAYER_PATTERNS = [
+        { name: 'MetroPlus',      re: /metro\s*-?\s*plus/i },
+        { name: 'Healthfirst',    re: /health\s*-?\s*first/i },
+        { name: 'Fidelis',        re: /fidelis/i },
+        { name: 'EmblemHealth',   re: /emblem|\bhip\b|\bghi\b/i },
+        { name: 'UnitedHealthcare', re: /\buhc\b|united\s*health|\bunited\b/i },
+        { name: 'Aetna',          re: /aetna/i },
+        { name: 'Cigna',          re: /cigna/i },
+        { name: 'Empire/Anthem',  re: /empire|anthem|\bbcbs\b|blue\s*cross/i },
+        { name: 'WellCare',       re: /well\s*care/i },
+        { name: 'Oscar',          re: /\boscar\b/i },
+        { name: 'Humana',         re: /humana/i },
+        { name: 'Affinity',       re: /affinity/i },
+        { name: 'Amida Care',     re: /amida/i },
+        { name: 'VNS',            re: /\bvns|visiting\s+nurse/i },
+        { name: 'Elderplan',      re: /elder\s*plan/i },
+        { name: 'Molina',         re: /molina/i },
+        { name: '1199',           re: /\b1199\b/ },
+        { name: 'NYCE',           re: /\bnyce\b/i },
+        { name: 'Medicaid',       re: /medicaid/i },
+        { name: 'Medicare',       re: /medicare/i }
+    ];
+
+    function cl_findPayers(text) {
+        const t = String(text || '');
+        return cl_PAYER_PATTERNS.filter(p => p.re.test(t)).map(p => p.name);
+    }
+
+    function cl_getBillingNoteText() {
+        const el = document.querySelector('textarea[data-fieldname="ClaimBillingNotes"]')
+            || document.querySelector('textarea[id^="claimBillingNote"]');
+        return el ? (el.value || el.textContent || '').trim() : '';
+    }
+
+    function cl_checkBillingNoteInsuranceMismatch() {
+        const note = cl_getBillingNoteText();
+        if (!note) return;
+        const notePayers = cl_findPayers(note);
+        if (!notePayers.length) return;
+        const primary = cl_getPrimaryInsuranceName();
+        if (!primary) return;
+        const primaryPayers = cl_findPayers(primary);
+        if (notePayers.some(n => primaryPayers.includes(n))) return;
+        cl_showNotification([
+            `Billing Note mentions ${notePayers.join(', ')}, but the primary insurance on this claim is ${primary}. Check the insurance before submitting.`
+        ], 'red', { sticky: true });
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -6608,6 +6670,7 @@ function __smartCoderReadVersion(fallback) {
             cl_applyOtherInsuranceTelehealthPOS(cptRows);
             cl_fillBlankTOS(cptRows);
             cl_uncheck98012BillToIns(cptRows);
+            cl_checkBillingNoteInsuranceMismatch();
         } finally {
             extensionBusy = false;
         }
