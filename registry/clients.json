@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-06T08:24:46.042Z",
+  "generatedAt": "2026-10-06T08:36:54.094Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.94",
+      "version": "1.95",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "4af2b487894b79787c8d5540396fed4ff8b445d44d8b23638526e0f89805201f"
+      "sha256": "933306563061d7f134578e07486cda93edff9403e11da3985c34c0b727a9cc04"
     },
     {
       "id": "getwell",
@@ -20,9 +20,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "6.01",
+      "version": "6.02",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "63b84aafa936c1b4b8b9549fa351dc15d9a753147fbf0f4fe49c973997982640"
+      "sha256": "369ba2ee3580da81d67993e4c8b39eb84469c8a04338e387fc6e561440863330"
     },
     {
       "id": "hasan-sheikh",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "2.04",
+      "version": "2.05",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "463b180b476abbcd95a1035bc9a88b8c955c23daa861b7e01a15c2435b15949e"
+      "sha256": "a7b6d2398bac10d1496336b404763e399b7124ded046460f1bdd4e961635d425"
     },
     {
       "id": "hasnayen",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.41",
+      "version": "1.42",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "ddf05fa522f1725aef55d1fd35fe40a556db9d8b9fb4210d5df16f13d10bbf59"
+      "sha256": "35cd0ef04ba8594ad64af108b072caf592e92edeed9e882f83f44b1fc07d9239"
     },
     {
       "id": "highland-medical",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.05",
+      "version": "1.06",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "f2ca504fbde5dd0923631578b554817197a4f439143327dd07c1e2dbebceab2d"
+      "sha256": "85214aaa041ec0d45962542a392cc6cbbd96a131a9a25377b75c1fed13d6a053"
     }
   ]
 }
