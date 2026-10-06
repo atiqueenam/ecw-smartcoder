@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.02
+// @name         Hasan Sheikh SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.02
+// @version      2.03
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.03 (2026-10-06) - Preventive + Office Visit fix: a chronic dx on the
+//   current visit that was NOT billed in the last 30 days now keeps the
+//   office visit with Preventive. 1.98/2.01 treated every exact
+//   CHRONIC_DISEASE_ICD_CODES entry as non-acute regardless of history,
+//   so the OV was deleted. Now a chronic dx (exact list or same category)
+//   only removes the OV when its category was billed 1-30 days before
+//   this DOS; history not loaded -> OV kept.
 // 2.02 (2026-10-05) - Z71.6 is never kept: Analyze now proposes deleting it
 //   (Auto Link already did). Claim Link: 98012 stays on the claim but its
 //   "Bill to Ins" checkbox is unchecked (runs last in Claim Link).
@@ -2612,11 +2619,14 @@ function __smartCoderReadVersion(fallback) {
                 const c = (e.code || '').toUpperCase();
                 if (!c) return false;
                 if (/^F17/.test(c) || /^E5[3-6]/.test(c) || /^D51/.test(c) || /^E66/.test(c) || /^Z/.test(c)) return false;
-                if (CHRONIC_DISEASE_ICD_CODES.has(c)) return false;
-                // 2.01: a chronic-condition code not on the exact list (e.g.
-                // E11.649) whose same condition (ICD category, e.g. E11) was
-                // already billed in a prior encounter within the last 30
-                // days is not a new problem either.
+                // 2.03: a chronic condition (exact CHRONIC_DISEASE_ICD_CODES
+                // entry or same ICD category, e.g. any E11.xx) only stops
+                // the office visit when that condition was already billed
+                // in a prior encounter within the last 30 days. A chronic
+                // dx NOT billed in the last 30 days still justifies the
+                // office visit alongside Preventive (1.98 removed it
+                // unconditionally — wrong). History not loaded -> the
+                // helper returns false -> OV kept.
                 if (chronicConditionBilledInLast30Days(c)) return false;
                 return true;
             });
@@ -2634,14 +2644,14 @@ function __smartCoderReadVersion(fallback) {
                 if (OFFICE_VISIT_EM_CODES.includes(toAdd[i].code)) toAdd.splice(i, 1);
             }
         } else if (hasPreventiveVisit && !hasAcuteDxForPreventiveOV()) {
-            // Preventive applied + no acute dx (only chronic-disease ICDs,
-            // chronic conditions billed in the last 30 days, and/or
+            // Preventive applied + no acute dx (only chronic conditions
+            // already billed in the last 30 days, and/or
             // non-problem codes like Z/F17/E53-56/D51/E66): the
             // preventive visit covers it — remove any office-visit E/M
             // already on the chart and don't suggest a new one.
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Preventive applied with only chronic diagnoses (no acute dx, or chronic condition already billed in the last 30 days) — office-visit E/M code not billed' });
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Preventive applied and every chronic diagnosis was already billed in the last 30 days (no acute dx) — office-visit E/M code not billed' });
                 }
             });
             for (let i = toAdd.length - 1; i >= 0; i--) {
