@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.06
+// @name         Getwell SmartCoder by ATQ v6.08
 // @namespace    http://tampermonkey.net/
-// @version      6.06
+// @version      6.08
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,25 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.08 (2026-10-07) - Faster CPT batch add. Profiled live: all CPTs are
+//   handed to eCW within 1 ms, but every eCW server answer then ran a
+//   full Billing page refresh (Angular digest, ~130-150 ms with a new row;
+//   224 refreshes / 2.1 s in one Start Action), one CPT after another.
+//   During the CPT batch those refresh requests are now merged into one
+//   per <=250 ms window; eCW's code for each CPT still runs unchanged.
+//   Restored (plus one real refresh) when the batch ends, even on error.
+//   Off switch: smcDigestBatch.disable().
+// 6.07 (2026-10-07) - Faster Start Action deletes. Profiled live:
+//   each ICD delete froze the page ~0.6 s (two synchronous eCW calls), and
+//   ICD deletes only started after the CPT server deletes finished.
+//   Now the CPT server deletes run while the ICDs are removed, and during
+//   SmartCoder's batch ICD delete eCW's getCPTsForICD check is skipped —
+//   it only opens the "Associated CPT Codes" pop-up, which SmartCoder
+//   always answers No (same result, ~0.3 s less per ICD). The 2.5 s panel
+//   tick (~130 ms of page work) pauses while Start Action runs.
+//   Note: eCW logs "TypeError ... reading 'push'" (processAssessmentDx)
+//   on every ICD add on this practice; it happens after the ICD is already
+//   added and marked for save, so it is harmless and left alone.
 // 6.06 (2026-10-07) - Faster CPT adds. eCW asks its server
 //   CPSPisEnabled4Patient.jsp (synchronous, ~300 ms, page frozen) once per
 //   CPT added. During Start Action the answer to the identical request is
@@ -818,6 +837,7 @@ function __smartCoderReadVersion(fallback) {
     let analysisState = null;   // { toAdd:[{code,reason}], toDelete:[{code,row,reason}] }
     let analysisRunning = false;
     let actionRunning = false;
+    let smcSkipIcdAssocCheck = false;   // 6.07: see batchDeleteBillingCodes / smcBeginCpspCache
     let actionLog = [];         // [{code, action:'add'|'delete', status:'success'|'fail', message}]
 
     // Caches SOAP-note text from the last time it was visible (billing tab
@@ -2511,25 +2531,24 @@ function __smartCoderReadVersion(fallback) {
         if (!cptPicks.length && !icdPicks.length) return results;
 
         // ---- 1. CPTs: parallel server deletes ----
-        if (cptPicks.length) {
-            const settled = await Promise.allSettled(cptPicks.map(p => {
+        // 6.07: the CPT deletes are only STARTED here; the ICD removals
+        // below run while eCW's server works on them (they don't depend on
+        // each other), and the CPT results are collected after the ICDs.
+        const cptSettledPromise = cptPicks.length
+            ? Promise.allSettled(cptPicks.map(p => {
                 const billingId = p.obj.billingid !== undefined ? parseInt(p.obj.billingid, 10) : 0;
                 return Promise.resolve(billingService.deleteCpt(scope.encounterId, p.obj.id, billingId));
-            }));
-            const deleted = [];
-            settled.forEach((r, k) => {
-                const p = cptPicks[k];
-                if (r.status === 'fulfilled') { deleted.push(p.obj); results.set(p.item, { ok: true, batch: true }); }
-                else {
-                    console.warn(`SmartCoder batch delete: server refused CPT ${p.obj.code}`, r.reason);
-                    results.set(p.item, { ok: false, batch: true });
-                }
-            });
-            if (deleted.length) fastDeleteRemoveCptObjs(scope, deleted);
-        }
+            }))
+            : null;
 
         // ---- 2. ICDs: highest index first ----
+        // 6.07: during these removals eCW's "CPTs linked to this ICD" server
+        // check is skipped (see smcSkipIcdAssocCheck) — it only exists to
+        // open the "Associated CPT Codes" pop-up, which SmartCoder always
+        // answers No. Same result, ~0.3 s less frozen page per ICD.
         icdPicks.sort((a, b) => scope.icdData.indexOf(b.obj) - scope.icdData.indexOf(a.obj));
+        smcSkipIcdAssocCheck = true;
+        try {
         for (const p of icdPicks) {
             if (fastDeleteIcdStuck) break; // remaining ones -> click delete
             const index = scope.icdData.indexOf(p.obj);
@@ -2553,6 +2572,22 @@ function __smartCoderReadVersion(fallback) {
                 }
             }
             results.set(p.item, { ok: true, batch: true });
+        }
+        } finally { smcSkipIcdAssocCheck = false; }
+
+        // ---- 1b. collect the CPT server deletes ----
+        if (cptSettledPromise) {
+            const settled = await cptSettledPromise;
+            const deleted = [];
+            settled.forEach((r, k) => {
+                const p = cptPicks[k];
+                if (r.status === 'fulfilled') { deleted.push(p.obj); results.set(p.item, { ok: true, batch: true }); }
+                else {
+                    console.warn(`SmartCoder batch delete: server refused CPT ${p.obj.code}`, r.reason);
+                    results.set(p.item, { ok: false, batch: true });
+                }
+            });
+            if (deleted.length) fastDeleteRemoveCptObjs(scope, deleted);
         }
 
         // ---- 3. one refresh + bounce-back check ----
@@ -5002,6 +5037,57 @@ function __smartCoderReadVersion(fallback) {
         try { return isInjectionEnabled() && localStorage.getItem(INJECT_BATCH_KEY) !== '0'; } catch { return isInjectionEnabled(); }
     }
 
+    // ── One screen refresh for the whole CPT batch (6.08) ──────────
+    // Profiled live: after each CPT eCW's server answer triggers a full
+    // Angular refresh of the Billing page (~130-150 ms each with a new
+    // row, 224 refreshes in one Start Action), so 12 CPTs = ~1.8 s of
+    // frozen page even though all 12 were sent at once. While a CPT batch
+    // is being added, refresh requests are merged: eCW's own code still
+    // runs for every CPT exactly as before, only the page redraw is done
+    // once per short window (<= 250 ms) instead of once per CPT. Always
+    // switched back (with one real refresh) when the batch ends.
+    // Off switch: smcDigestBatch.disable() (localStorage).
+    const DIGEST_BATCH_KEY = 'smc_getwell_digest_batch';
+    function isDigestBatchEnabled() {
+        try { return localStorage.getItem(DIGEST_BATCH_KEY) !== '0'; } catch { return true; }
+    }
+    function smcBeginDigestBatch(scope) {
+        const root = scope && scope.$root;
+        if (!root || !isDigestBatchEnabled() || Object.prototype.hasOwnProperty.call(root, '$digest')) return () => {};
+        const orig = root.$digest;   // Scope.prototype.$digest
+        if (typeof orig !== 'function') return () => {};
+        let timer = null, firstAsk = 0, merged = 0, ended = false;
+        const runNow = () => {
+            timer = null; firstAsk = 0;
+            if (root.$$phase) { timer = setTimeout(runNow, 10); return; }
+            try { orig.call(root); } catch (e) { console.warn('SmartCoder digest batch: refresh error', e); }
+        };
+        const batched = function () {
+            // Child-scope digests (scope.$digest() on a sub-scope) stay
+            // immediate; only full-page refreshes are merged.
+            if (this !== root || ended) return orig.apply(this, arguments);
+            merged++;
+            const now = Date.now();
+            if (!firstAsk) firstAsk = now;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(runNow, now - firstAsk >= 250 ? 0 : 40);
+        };
+        try { root.$digest = batched; } catch (e) { return () => {}; }
+        return () => {
+            if (ended) return;
+            ended = true;
+            if (timer) { clearTimeout(timer); timer = null; }
+            try { if (root.$digest === batched) delete root.$digest; } catch (e) {}
+            if (!root.$$phase) { try { orig.call(root); } catch (e) {} }
+            if (merged) console.debug(`SmartCoder digest batch: ${merged} refresh request(s) merged`);
+        };
+    }
+    window.smcDigestBatch = {
+        enable() { try { localStorage.setItem(DIGEST_BATCH_KEY, '1'); } catch {} console.info('SmartCoder: CPT batch single-refresh ENABLED.'); },
+        disable() { try { localStorage.setItem(DIGEST_BATCH_KEY, '0'); } catch {} console.info('SmartCoder: CPT batch single-refresh DISABLED.'); },
+        status() { return isDigestBatchEnabled(); }
+    };
+
     function setCPTBatchEnabled(on) {
         try { localStorage.setItem(INJECT_BATCH_KEY, on ? '1' : '0'); } catch {}
         console.info(`SmartCoder: CPT batch injection ${on ? 'ENABLED' : 'DISABLED (one-by-one)'}.`);
@@ -5056,6 +5142,8 @@ function __smartCoderReadVersion(fallback) {
 
         // 2) Fire them all, back-to-back, in the original order.
         const before = injCPTCodeCounts();
+        const endDigestBatch = smcBeginDigestBatch(scope);   // 6.08
+        try {
         sent.forEach(x => {
             try {
                 scope.setBillingInsightsCpt({ action: 'add', isEm: false, cpt: x.r.selected });
@@ -5082,6 +5170,7 @@ function __smartCoderReadVersion(fallback) {
             if (!nudged && Date.now() - waitStart > INJECT_BATCH_CONFIRM_MS / 2) { injNudgeDigest(scope); nudged = true; }
             await injSleep(50);
         }
+        } finally { endDigestBatch(); }
         const t2 = performance.now();
 
         // 4) Verify.
@@ -8249,6 +8338,9 @@ function __smartCoderReadVersion(fallback) {
         const cache = new Map();
         const wrapped = function (url, ...rest) {
             const u = String(url);
+            // 6.07: only while SmartCoder's own batch ICD delete runs.
+            // '' makes eCW's IsCptAdded() return false = no pop-up.
+            if (smcSkipIcdAssocCheck && /getCPTsForICD\.jsp/i.test(u)) return '';
             if (/CPSPisEnabled4Patient\.jsp/i.test(u)) {
                 if (cache.has(u)) return cache.get(u);
                 const r = orig.call(this, url, ...rest);
@@ -9033,6 +9125,9 @@ function __smartCoderReadVersion(fallback) {
         // the page's own render work, and there's nothing meaningful to
         // detect yet anyway.
         if (document.readyState !== 'complete') return;
+        // 6.07: Start Action refreshes the panel itself; the 2.5 s tick
+        // (~130 ms of page work) only slowed it down.
+        if (actionRunning) return;
 
         const onChart = isPatientChart();
 
