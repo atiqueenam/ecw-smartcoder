@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         El Nunu Medical SmartCoder v1.02
+// @name         El Nunu Medical SmartCoder v1.05
 // @namespace    http://tampermonkey.net/
-// @version      1.02
+// @version      1.05
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,24 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.05 (2026-10-07) - 96127 and 99408 never get modifier 59 (1.03 had put
+//   59 on 96127). Auto Link / Claim Link no longer add it, and clear a 59
+//   already sitting on either line. They still trigger 25 on the office
+//   visit / preventive code.
+// 1.04 (2026-10-07) - 96127 / 99408 are not annual codes. Added every
+//   time the depression (12+) / alcohol (18+) screening is documented,
+//   together with the result code, for every payer incl. Medicaid and
+//   Medicare, with or without a preventive visit; no once-per-year limit.
+//   Only removed for the age gate (and 96127 for UHC, per the SOP UHC
+//   list). Like other 9xxxx codes they trigger modifier 25 on the office
+//   visit / preventive code. Any G0444/G0442 is still replaced.
+// 1.03 (2026-10-07) - Annual screening CPTs: depression screening is
+//   96127 instead of G0444, alcohol screening 99408 instead of G0442.
+//   Same rules as the G-codes: preventive visit only, not for
+//   Medicaid/Medicare/UHC, age 12+ / 18+, once per calendar year (a
+//   G0444/G0442 billed earlier this year counts). Any G0444/G0442 on the
+//   chart is replaced. 96127 links to Z13.31 and gets modifier 59 (as
+//   G0444 did); 99408 links to Z13.9/Z13.89.
 // 1.02 (2026-10-07) - Fast + batch delete (from Hasan Sheikh 2.07/2.08).
 //   Start Action: all CPT deletes sent to eCW's server at once
 //   (pnBillingService.deleteCpt), ICDs removed in one pass with
@@ -1325,6 +1343,10 @@ function __smartCoderReadVersion(fallback) {
     // flagged for deletion. 3014F/3015F/3017F/99000 are add-only, never
     // deleted (not in this set on purpose). G0444/G0442 also excluded —
     // once-per-year codes, left alone if already on the chart.
+    // El Nunu (1.03): annual screening CPTs used instead of G0444 / G0442.
+    const EN_DEP_SCREEN_CPT = '96127';
+    const EN_ALC_SCREEN_CPT = '99408';
+
     const MANAGED_CODES = new Set([
         '3008F', 'G8418', 'G8420', 'G8417',
         '3074F', '3075F', '3077F',
@@ -2435,14 +2457,19 @@ function __smartCoderReadVersion(fallback) {
         // any G0444/G0442 already on the chart is deleted further below.
         // Still skipped for Medicaid/Medicare/UHC and gated to once/year.
         // Rule 19 age gates apply here too.
-        if (hasPreventiveVisit && annualGCodesEligible(insurance)) {
-            const dosYear = getCurrentDosYear();
-            if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
-                desired.set('G0444', 'Annual depression screening (once/year)');
-            }
-            if (age >= 18 && hasAlc !== null && !codeUsedInYear('G0442', dosYear)) {
-                desired.set('G0442', 'Annual alcohol screening (once/year)');
-            }
+        // El Nunu (1.04): depression screening is billed as 96127 and
+        // alcohol screening as 99408 (never G0444/G0442). These are NOT
+        // annual codes: every visit where the screening is documented gets
+        // the code, together with its result code (G8510/G8431,
+        // G9622/3016F), for every payer incl. Medicaid/Medicare, with or
+        // without a preventive visit. Same age gates as the result codes
+        // (depression 12+, alcohol 18+). UHC: 96127 is on the SOP's UHC
+        // removal list, so it isn't added for UHC.
+        if (age >= 12 && hasDep !== null && !isUHCInsurance(insurance)) {
+            desired.set(EN_DEP_SCREEN_CPT, 'Depression screening documented');
+        }
+        if (age >= 18 && hasAlc !== null) {
+            desired.set(EN_ALC_SCREEN_CPT, 'Alcohol screening documented');
         }
 
         // ---- Diff against current chart ----
@@ -2485,11 +2512,11 @@ function __smartCoderReadVersion(fallback) {
         // the bundle survives — Z13.31/Z13.9 are correctly never
         // suggested/kept for UHC in that case either, same as the G-code
         // itself. ICD and CPT move together, never one without the other.
-        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
-        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
-        // Without a preventive visit, G0444/G0442 are deleted below, so they
-        // must not count as the CPT that keeps Z13.31/Z13.9 on the chart.
-        const ANNUAL_GCODES_NEED_PREVENTIVE = ['G0444', 'G0442'];
+        const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', EN_DEP_SCREEN_CPT, '3725F'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'H0049', EN_ALC_SCREEN_CPT];
+        // 96127/99408 count for the Z13.31/Z13.9 bundle on any visit (not
+        // preventive-only). G0444/G0442 are always replaced, never counted.
+        const ANNUAL_GCODES_NEED_PREVENTIVE = [];
         const screeningCptCounts = c => desired.has(c) ||
             (currentCodes.has(c) && (hasPreventiveVisit || !ANNUAL_GCODES_NEED_PREVENTIVE.includes(c)));
         const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(screeningCptCounts);
@@ -2909,63 +2936,21 @@ function __smartCoderReadVersion(fallback) {
         // ---- CPT codes starting with '8' → delete + add Z13.88 ----
         // Previously only in the Link-button module; now also enforced
         // here so it fires from Analyze/Start Action too, not just Link.
-        if (age != null && age < 18) {
-            const g0442Row = currentRows.find(r => r.code === 'G0442');
-            if (g0442Row && !toDelete.some(d => d.code === 'G0442')) {
-                toDelete.push({ code: 'G0442', row: g0442Row.row, kind: 'cpt', reason: `Patient age ${age} — under 18, alcohol screening G-code not applicable` });
-            }
-        }
-        if (age != null && age < 12) {
-            const g0444Row = currentRows.find(r => r.code === 'G0444');
-            if (g0444Row && !toDelete.some(d => d.code === 'G0444')) {
-                toDelete.push({ code: 'G0444', row: g0444Row.row, kind: 'cpt', reason: `Patient age ${age} — under 12, depression screening G-code not applicable` });
-            }
-        }
-
-        // Medicaid/Medicare never use G0444/G0442 at all — same reasoning
-        // as the age cleanup above (deliberately excluded from
-        // MANAGED_CODES, so this is the only path that removes either one
-        // if it's already on the chart, e.g. left from a prior insurance).
-        if (isMedicaidOrMedicareIns(insurance)) {
-            ['G0444', 'G0442'].forEach(code => {
-                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
-                    const row = getCPTRowByCode(code);
-                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
-                }
-            });
-        }
-
-        // ---- G0444/G0442: no preventive visit on this chart -> delete ----
-        // Base bills the annual depression/alcohol screening G-codes
-        // only together with a preventive visit. Excluded from
-        // MANAGED_CODES, so this is the path that removes them.
-        if (!hasPreventiveVisit) {
-            ['G0444', 'G0442'].forEach(code => {
-                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
-                    const row = getCPTRowByCode(code);
-                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} only billed with a preventive visit — no preventive visit on this chart` });
-                }
-            });
-        }
-
-        // ---- G0444/G0442: already billed this calendar year -> delete ----
-        // Mirrors the add rule above (only added when NOT already billed
-        // this year, per codeUsedInYear). If one is already on THIS chart
-        // but a PRIOR encounter this same calendar year already billed it,
-        // it can't be billed again — deleted outright regardless of
-        // whether a preventive visit is present this encounter. Excluded
-        // from MANAGED_CODES on purpose (see the age-cleanup comment
-        // above), so this is the only path that catches this specific
-        // case.
+        // ---- El Nunu screening CPTs (96127 depression / 99408 alcohol):
+        // replace any G0444/G0442; remove only when the age gate fails
+        // (and 96127 for UHC, already on the UHC removal list). No payer,
+        // preventive-visit or once-per-year removal — they are billed every
+        // time the screening is done. ----
         {
-            const dosYearForAnnualGCodes = getCurrentDosYear();
-            ['G0444', 'G0442'].forEach(code => {
-                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code) &&
-                    codeUsedInYear(code, dosYearForAnnualGCodes)) {
-                    const row = getCPTRowByCode(code);
-                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} already billed this calendar year — can't bill again` });
-                }
-            });
+            const enDelete = (code, reason) => {
+                if (!rawCPTCodesNow.includes(code) || toDelete.some(d => d.code === code)) return;
+                const row = getCPTRowByCode(code);
+                if (row) toDelete.push({ code, row, kind: 'cpt', reason });
+            };
+            enDelete('G0444', `El Nunu bills depression screening as ${EN_DEP_SCREEN_CPT}, not G0444`);
+            enDelete('G0442', `El Nunu bills alcohol screening as ${EN_ALC_SCREEN_CPT}, not G0442`);
+            if (age != null && age < 18) enDelete(EN_ALC_SCREEN_CPT, `Patient age ${age} — under 18, alcohol screening ${EN_ALC_SCREEN_CPT} not applicable`);
+            if (age != null && age < 12) enDelete(EN_DEP_SCREEN_CPT, `Patient age ${age} — under 12, depression screening ${EN_DEP_SCREEN_CPT} not applicable`);
         }
 
         // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
@@ -4744,6 +4729,7 @@ function __smartCoderReadVersion(fallback) {
             "3725F": { type: "exact", icds: ["Z13.31"], fallback: "al_officeVisit" },
             "G8510": { type: "exact", icds: ["Z13.31"], fallback: "al_officeVisit" },
             "G0444": { type: "exact", icds: ["Z13.31"], fallback: "al_officeVisit" },
+            "96127": { type: "exact", icds: ["Z13.31"], fallback: "al_officeVisit" },
             "G8431": { type: "exact", icds: ["Z13.31"], fallback: "al_officeVisit" },
             "1000F": { type: "startsWith", icds: ["F17"], fallback: "al_officeVisit" },
             "1036F": { type: "startsWith", icds: ["F17"], fallback: "al_officeVisit" },
@@ -5444,6 +5430,9 @@ function __smartCoderReadVersion(fallback) {
         '99401', '99402', '99403', '99404', '99497'
     ]);
     const SOP_59_CODES = new Set(['G0442', 'G0444', 'Q0091', 'G0447', '96372']);
+    // El Nunu (1.05): 96127 / 99408 never carry modifier 59 — a 59 already
+    // on either line is cleared by Auto Link / Claim Link.
+    const EN_NO_59_CODES = new Set(['96127', '99408']);
     const SOP_25_SPECIFIC_TRIGGERS = new Set(['G0438', 'G0439', 'G0101', 'Q0091', 'G0008', 'G0009', 'G0010']);
     const SOP_25_NON_TRIGGERS = new Set(['99051', '99000', '98012', 'LSM01', 'PD001', 'CP001', 'AST01']);
     function sopIs25Trigger(code) {
@@ -5497,17 +5486,22 @@ function __smartCoderReadVersion(fallback) {
         const codes = rows.map(row => (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase());
         const plan = sopModifierPlan(codes.filter(Boolean), isTele, teleMod);
         rows.forEach((row, i) => {
-            const wanted = plan[codes[i]];
-            if (!wanted || !wanted.length) return;
+            const wanted = plan[codes[i]] || [];
+            const strip59 = EN_NO_59_CODES.has(codes[i]);
+            if (!wanted.length && !strip59) return;
             try {
                 const scope = angular.element(row).scope();
                 if (scope && scope.cpt) {
                     const keys = ['mod1', 'mod2', 'mod3', 'mod4'].filter((k, idx) => idx === 0 || k in scope.cpt);
-                    const merged = sopMergeModifiers(keys.map(k => scope.cpt[k]), wanted);
-                    if (merged) scope.$applyAsync(() => { keys.forEach((k, idx) => { scope.cpt[k] = merged[idx]; }); });
+                    const current = keys.map(k => strip59 && String(scope.cpt[k] || '').trim() === '59' ? '' : scope.cpt[k]);
+                    const stripped = current.some((v, idx) => v !== scope.cpt[keys[idx]]);
+                    const merged = wanted.length ? sopMergeModifiers(current, wanted) : null;
+                    const finalSlots = merged || (stripped ? current : null);
+                    if (finalSlots) scope.$applyAsync(() => { keys.forEach((k, idx) => { scope.cpt[k] = finalSlots[idx]; }); });
                     return;
                 }
             } catch (e) { /* fall through to manual input path */ }
+            if (!wanted.length) return;
             const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
                              row.querySelector('input[name="mod1"]') ||
                              row.querySelector('input[id*="mod1"]');
@@ -5530,9 +5524,12 @@ function __smartCoderReadVersion(fallback) {
         const codes = cptRows.map(row => (cl_getCPTCode(row) || '').trim().toUpperCase());
         const plan = sopModifierPlan(codes.filter(Boolean), isTele, teleMod);
         cptRows.forEach((row, i) => {
-            const wanted = plan[codes[i]];
-            if (!wanted || !wanted.length) return;
+            const wanted = plan[codes[i]] || [];
             const inputs = [1, 2, 3, 4].map(n => row.querySelector(`input[data-fieldname="ClaimCPTMOD${n}"]`));
+            if (EN_NO_59_CODES.has(codes[i])) {
+                inputs.forEach(inp => { if (inp && inp.value.trim() === '59') cl_setInputValue(inp, ''); });
+            }
+            if (!wanted.length) return;
             const merged = sopMergeModifiers(inputs.map(inp => inp ? inp.value : 'X'), wanted);
             if (!merged) return;
             merged.forEach((v, idx) => {
@@ -6066,6 +6063,7 @@ function __smartCoderReadVersion(fallback) {
             "3725F": { type: "exact", icds: ["Z13.31"], fallback: "cl_officeVisit" },
             "G8510": { type: "exact", icds: ["Z13.31"], fallback: "cl_officeVisit" },
             "G0444": { type: "exact", icds: ["Z13.31"], fallback: "cl_officeVisit" },
+            "96127": { type: "exact", icds: ["Z13.31"], fallback: "cl_officeVisit" },
             "G8431": { type: "exact", icds: ["Z13.31"], fallback: "cl_officeVisit" },
             "1000F": { type: "startsWith", icds: ["F17"], fallback: "cl_officeVisit" },
             "1036F": { type: "startsWith", icds: ["F17"], fallback: "cl_officeVisit" },
