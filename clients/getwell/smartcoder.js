@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.05
+// @name         Getwell SmartCoder by ATQ v6.06
 // @namespace    http://tampermonkey.net/
-// @version      6.05
+// @version      6.06
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,12 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.06 (2026-10-07) - Faster CPT adds. eCW asks its server
+//   CPSPisEnabled4Patient.jsp (synchronous, ~300 ms, page frozen) once per
+//   CPT added. During Start Action the answer to the identical request is
+//   now reused instead of asked again (first call always real, failures
+//   never reused, eCW's urlGet restored when Start Action ends). Live
+//   test: Start Action 4973 ms -> 2539 ms.
 // 6.05 (2026-10-07) - Batch ICD add for Start Action. All ICD lookups run
 //   in parallel, every ICD is sent to eCW right after the previous one
 //   (each only waits until eCW's data has it, normally instantly — no
@@ -8229,7 +8235,41 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
     }
 
+    // ── CPSP check cache (6.06) ─────────────────────────────────────
+    // eCW calls CPSPisEnabled4Patient.jsp through urlGet once for EVERY CPT
+    // it adds, and each call freezes the page ~300 ms (synchronous). It is a
+    // patient-level yes/no. While Start Action runs, the answer to an
+    // IDENTICAL request (same full URL) is reused instead of asking again;
+    // the first call always goes to the server, failed/empty answers are
+    // never reused, and urlGet is restored as soon as Start Action ends.
+    // Verified on a live chart: Start Action 4973 ms -> 2539 ms.
+    function smcBeginCpspCache() {
+        const orig = window.urlGet;
+        if (typeof orig !== 'function' || orig.__smcCpspWrapped) return () => {};
+        const cache = new Map();
+        const wrapped = function (url, ...rest) {
+            const u = String(url);
+            if (/CPSPisEnabled4Patient\.jsp/i.test(u)) {
+                if (cache.has(u)) return cache.get(u);
+                const r = orig.call(this, url, ...rest);
+                if (r) cache.set(u, r);
+                return r;
+            }
+            return orig.call(this, url, ...rest);
+        };
+        wrapped.__smcCpspWrapped = true;
+        try { window.urlGet = wrapped; } catch (e) { return () => {}; }
+        return () => { try { if (window.urlGet === wrapped) window.urlGet = orig; } catch (e) {} };
+    }
+
     async function applyAnalysis() {
+        if (!analysisState || actionRunning) return;
+        const endCpspCache = smcBeginCpspCache();
+        try { await applyAnalysisRun(); }
+        finally { endCpspCache(); }
+    }
+
+    async function applyAnalysisRun() {
         if (!analysisState || actionRunning) return;
         actionRunning = true;
         actionLog = [];
