@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.44
+// @name         Hasnayen Medical SmartCoder v1.45
 // @namespace    http://tampermonkey.net/
-// @version      1.44
+// @version      1.45
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,13 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.45 (2026-10-07) - Televisit 95 modifier fixes (Auto Link). (1) 95 was
+//   only given when the appointment visit type was exactly CON; TEL and
+//   "Televisit" captions (which Analyze already treats as televisit) got
+//   nothing. Now all three. (2) New-patient E&M 99204/99205 now get 95 too.
+//   (3) On a televisit that also had 93000 / an immunization / a pap smear,
+//   the 25 rule read mod1 before Angular had applied the 95 and overwrote
+//   it with 25 — now 95 stays in mod1 and 25 goes to mod2.
 // 1.44 (2026-10-07) - ICD swap rules removed: T78.40XS -> J30.9,
 //   dorsalgia (M54.5x/M54.9) -> M54.50, R05.x -> R05.9, R50.x -> R50.9 and
 //   E78.1 -> E78.5 no longer run. Those codes stay exactly as charted.
@@ -6353,13 +6360,16 @@ function __smartCoderReadVersion(fallback) {
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
-    // On Link click, a televisit (appointment caption visit type = CON)
+    // On Link click, a televisit (appointment caption visit type = CON, TEL
+    // or Televisit)
     // gets modifier 95 on the office-visit code, for EVERY insurance —
     // Bronx doesn't follow the 93-modifier carve-out some other clients
     // use for Healthfirst/MetroPlus/Fidelis. Determined from the caption,
     // not from CPT 98012 — this client doesn't use 98012 as a televisit
     // signal.
-    const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203']);
+    // 1.45: 99204/99205 added (same list as OFFICE_VISIT_EM_CODES) so a new-
+    // patient televisit also gets 95.
+    const AL_OFFICE_VISIT_CODES = new Set(['99211', '99212', '99213', '99214', '99215', '99203', '99204', '99205']);
 
     // 95250 (CGM placement) and 95251 (CGM interpretation) share the same
     // modifier rules — wherever one applies, the other does too.
@@ -6374,11 +6384,23 @@ function __smartCoderReadVersion(fallback) {
     // Sets a modifier field on a CPT row, trying the live Angular scope
     // first (so eCW's own bindings update immediately) and falling back to
     // a manual input event dispatch if the scope isn't reachable.
+    // 1.45: modifier writes go through $applyAsync, so a later rule in the
+    // same Link pass (e.g. the 25 modifier) used to read the OLD empty mod1
+    // and overwrite the televisit 95. Pending writes are remembered here
+    // and al_getCPTModifier sees them immediately.
+    const al_pendingModifiers = new WeakMap();
     function al_setCPTModifier(row, field, value) {
         try {
             const scope = angular.element(row).scope();
             if (scope && scope.cpt) {
-                scope.$applyAsync(() => { scope.cpt[field] = value; });
+                const pend = al_pendingModifiers.get(row) || {};
+                pend[field] = value;
+                al_pendingModifiers.set(row, pend);
+                scope.$applyAsync(() => {
+                    scope.cpt[field] = value;
+                    const p = al_pendingModifiers.get(row);
+                    if (p && p[field] === value) delete p[field];
+                });
                 return;
             }
         } catch (e) { /* fall through to manual input path */ }
@@ -6401,7 +6423,10 @@ function __smartCoderReadVersion(fallback) {
             .filter(Boolean);
         const has9525x = codesPresent.some(c => CGM_9525X_CODES.has(c));
 
-        if (getVisitType().toLowerCase().trim() === 'con') {
+        // 1.45: same televisit test as Analyze (CON, TEL or "Televisit"
+        // caption) — this used to accept only CON, so TEL / Televisit
+        // visits never got 95.
+        if (isTelevisitNow()) {
             // ---- Televisit ----
             // Always 95 on mod1 — no insurance-based 93 carve-out for this
             // client. 95250/95251 present -> office visit code also gets
@@ -6446,6 +6471,8 @@ function __smartCoderReadVersion(fallback) {
     // first, DOM input as fallback) — same two-path approach
     // al_setCPTModifier already uses for writing.
     function al_getCPTModifier(row, field) {
+        const pend = row && al_pendingModifiers.get(row);
+        if (pend && typeof pend[field] === 'string') return pend[field].trim();
         try {
             const scope = angular.element(row).scope();
             if (scope && scope.cpt && typeof scope.cpt[field] === 'string') {
