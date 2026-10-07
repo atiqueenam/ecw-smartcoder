@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-07T12:07:21.154Z",
+  "generatedAt": "2026-10-07T12:14:34.073Z",
   "clients": [
     {
       "id": "bronx",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.44",
+      "version": "1.45",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "53724ee68c8c6033c990e9064a8df5cfa1a9a68a014a9b21051b3d83a353c849"
+      "sha256": "e5746c54b046414f2f96babc6eefddd829f51d3b52ad3c67c3d05f3faccdcce8"
     },
     {
       "id": "highland-medical",
