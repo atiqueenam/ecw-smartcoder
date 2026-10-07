@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.04
+// @name         Getwell SmartCoder by ATQ v6.05
 // @namespace    http://tampermonkey.net/
-// @version      6.04
+// @version      6.05
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,13 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.05 (2026-10-07) - Batch ICD add for Start Action. All ICD lookups run
+//   in parallel, every ICD is sent to eCW right after the previous one
+//   (each only waits until eCW's data has it, normally instantly — no
+//   per-code grid wait), and the grid is checked once at the end. ICD
+//   order is kept; eCW's "Associated CPT Codes" pop-up is closed as
+//   before. Anything not confirmed uses the normal one-by-one add, which
+//   never adds a code twice. Failed ICDs are listed in one alert.
 // 6.04 (2026-10-07) - Start Action waits less. The "did it stick?"
 //   check after adds/deletes re-reads every 150 ms instead of 400 ms (still
 //   needs 2 matching reads, still up to 4.5 s), so a normal run confirms in
@@ -4135,6 +4142,59 @@ function __smartCoderReadVersion(fallback) {
         return await waitForICDRowAppear(code);
     }
 
+    // ── Batch ICD add (6.05, Start Action) ──────────────────────────
+    // Instead of add -> wait for the grid -> next add, every ICD is looked
+    // up in parallel, then sent to eCW one right after the other (each
+    // only waits until eCW's own data has it, normally immediately), and
+    // the grid is checked ONCE at the end. ICD order is kept. Anything not
+    // confirmed goes through the normal one-by-one add, which never adds
+    // a code twice (it waits if the code is already in eCW's data).
+    // Returns Map(UPPERCASE code -> ok).
+    async function addICDCodesBatch(rawCodes) {
+        const codes = [...new Set((rawCodes || []).map(injNorm).filter(Boolean))];
+        const results = new Map();
+        const oneByOne = async list => {
+            for (const c of list) results.set(c, await addSingleICDCodeFast(c));
+        };
+        let scope = null;
+        try {
+            if (isInjectionEnabled()) { scope = getBillingScopeForInjection(); requireXmlHelpers(); }
+        } catch (e) { scope = null; }
+        if (!scope || typeof scope.addToSelectedListFromGrid !== 'function') {
+            await oneByOne(codes);
+        } else {
+            const todo = [];
+            codes.forEach(c => { if (findICDRowByCodeFast(c)) results.set(c, true); else todo.push(c); });
+            const resolved = await Promise.allSettled(todo.map(c => injResolveICD(c, scope)));
+            const sent = [], retry = [];
+            for (let k = 0; k < todo.length; k++) {
+                const code = todo[k];
+                if (injScopeHasICD(scope, code)) { sent.push(code); continue; } // already in eCW data
+                const r = resolved[k];
+                if (r.status !== 'fulfilled' || !r.value || !r.value.selected) { retry.push(code); continue; }
+                try { injSafeApply(scope, () => scope.addToSelectedListFromGrid(r.value.selected)); }
+                catch (e) {
+                    if (!injScopeHasICD(scope, code)) { retry.push(code); continue; }
+                }
+                // Wait only until eCW's data has it (keeps the order), closing
+                // eCW's "Associated CPT Codes" pop-up if it shows.
+                await injWaitFor(() => injScopeHasICD(scope, code), 1500, dismissAssociatedCPTModalIfPresent, 25);
+                sent.push(code);
+            }
+            injNudgeDigest(scope);
+            await injWaitFor(() => sent.every(c => !!findICDRowByCodeFast(c)), INJECT_ICD_CONFIRM_MS, dismissAssociatedCPTModalIfPresent, 50);
+            sent.forEach(c => { if (findICDRowByCodeFast(c)) results.set(c, true); else retry.push(c); });
+            // Not confirmed -> normal path (safe: it won't re-add a code that
+            // is already in eCW's data, it waits for the grid instead).
+            await oneByOne(retry);
+        }
+        const failed = codes.filter(c => !results.get(c));
+        if (failed.length) {
+            alert(`Could not add ICD: ${failed.join(", ")}\n(check the code is valid, or add it manually)`);
+        }
+        return results;
+    }
+
     async function addICDCodesFast(codes) {
         prefetchICDLookups(codes);   // 5.97: all lookups in parallel up front
         const results = [];
@@ -8226,8 +8286,23 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
         tMark.deletes = performance.now();
 
+        // 6.05: all ICDs in one batch (order kept), then E&M / other CPTs.
+        const batchIcdItems = analysisState.toAdd.filter(i => i.kind === 'icd');
+        if (batchIcdItems.length) {
+            let icdResults = null;
+            try { icdResults = await addICDCodesBatch(batchIcdItems.map(i => i.code)); }
+            catch (e) { console.warn('SmartCoder batch ICD add failed — adding one by one', e); icdResults = null; }
+            if (icdResults) {
+                batchIcdItems.forEach(item => {
+                    actionLog.push({ code: item.code, action: 'add', kind: 'icd', status: icdResults.get(injNorm(item.code)) ? 'success' : 'fail' });
+                });
+            }
+        }
+        const icdBatchDone = actionLog.some(e => e.action === 'add' && e.kind === 'icd');
+
         const deferredCPT = [];
         for (const item of analysisState.toAdd) {
+            if (item.kind === 'icd' && icdBatchDone) continue;
             if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredCPT.push(item); continue; }
             if (item.kind === 'icd') {
                 const results = await addICDCodesFast([item.code]);
