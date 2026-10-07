@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.43
+// @name         Hasnayen Medical SmartCoder v1.44
 // @namespace    http://tampermonkey.net/
-// @version      1.43
+// @version      1.44
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,11 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.44 (2026-10-07) - ICD swap rules removed: T78.40XS -> J30.9,
+//   dorsalgia (M54.5x/M54.9) -> M54.50, R05.x -> R05.9, R50.x -> R50.9 and
+//   E78.1 -> E78.5 no longer run. Those codes stay exactly as charted.
+//   All other rules unchanged (K29.00 delete, Z13.89->Z13.9, Z00/Z71/L21/
+//   Z68/E66 corrections, Z23/Z12.4 still as before).
 // 1.43 (2026-10-07) - Fast + batch delete (from Hasan Sheikh 2.07/2.08).
 //   Start Action: all CPT deletes sent to eCW's server at once
 //   (pnBillingService.deleteCpt), ICDs removed in one pass with
@@ -3701,54 +3706,9 @@ function __smartCoderReadVersion(fallback) {
             const alreadyQueuedForDelete = code => toDelete.some(d => (d.code || '').toUpperCase() === code.toUpperCase());
             const alreadyQueuedForAdd = code => toAdd.some(a => (a.code || '').toUpperCase() === code.toUpperCase());
 
-            // Replace every ICD matching `test` with `replacement`.
-            // Nothing is added if the replacement is already on the chart
-            // (or already queued), and nothing is deleted unless a match
-            // is actually present.
-            const replaceIcds = (test, replacement, reason) => {
-                const matches = hasnayenIcdEntries.filter(e => {
-                    const c = e.code.toUpperCase();
-                    return c !== replacement.toUpperCase() && test(c, (e.name || ''));
-                });
-                if (!matches.length) return;
-                matches.forEach(e => {
-                    if (!alreadyQueuedForDelete(e.code)) {
-                        toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason });
-                    }
-                });
-                if (!hasnayenIcdCodes.includes(replacement.toUpperCase()) && !alreadyQueuedForAdd(replacement)) {
-                    toAdd.push({ code: replacement, reason, kind: 'icd' });
-                }
-            };
-
-            // ---- Rule 14: T78.40XS -> J30.9 ----
-            replaceIcds(c => c === 'T78.40XS', 'J30.9',
-                'T78.40XS is replaced with J30.9 for this practice');
-
-            // ---- Rule 15 REMOVED: vitamin-deficiency ICDs are no longer
-            // auto-consolidated to E56.9. Whatever vitamin-deficiency code
-            // (E53.9, E55.9, etc.) is already on the chart is left as-is;
-            // this engine no longer replaces it.
-
-            // ---- Rule 16: dorsalgia -> M54.50 ----
-            // M54.5 and its children (M54.50/M54.51/M54.59) plus the
-            // unspecified-dorsalgia code M54.9 are all "dorsalgia" codes;
-            // M54.50 (low back pain, unspecified) is the one Hasnayen
-            // uses. Matched by code AND by the diagnosis name containing
-            // "dorsalgia", so a dorsalgia code outside the M54.5x range is
-            // caught too.
-            replaceIcds((c, name) => /^M54\.(5|9)/.test(c) || c === 'M54.9' || /dorsalgia/i.test(name),
-                'M54.50', 'Dorsalgia ICD replaced with M54.50, low back pain unspecified');
-
-            // ---- Rule 18: cough -> R05.9, fever -> R50.9 ----
-            replaceIcds(c => /^R05(\.|$)/.test(c), 'R05.9',
-                'Cough is always coded R05.9 for this practice');
-            replaceIcds(c => /^R50(\.|$)/.test(c), 'R50.9',
-                'Fever is always coded R50.9 for this practice');
-
-            // ---- Rule 20: E78.1 -> E78.5 ----
-            replaceIcds(c => c === 'E78.1', 'E78.5',
-                'E78.1 (pure hyperglyceridemia) replaced with E78.5, hyperlipidemia');
+            // ---- Rules 14, 16, 18, 20 REMOVED (1.44): T78.40XS, dorsalgia
+            // (M54.5x/M54.9), cough (R05.x), fever (R50.x) and E78.1 are no
+            // longer replaced — whatever code is on the chart stays as-is.
 
             // ---- Rule 24: K29.00 (acute gastritis) — delete, no replacement ----
             hasnayenIcdEntries.forEach(e => {
