@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.03
+// @name         Getwell SmartCoder by ATQ v6.04
 // @namespace    http://tampermonkey.net/
-// @version      6.03
+// @version      6.04
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,12 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.04 (2026-10-07) - Start Action waits less. The "did it stick?"
+//   check after adds/deletes re-reads every 150 ms instead of 400 ms (still
+//   needs 2 matching reads, still up to 4.5 s), so a normal run confirms in
+//   ~0.3 s instead of ~0.8 s. The SmartCoder panel is redrawn once per step
+//   instead of after every single add. The console now prints the time of
+//   each step: deletes / adds / stick-check / recheck pass.
 // 6.03 (2026-10-07) - Fast + batch delete (from Hasan Sheikh 2.07/2.08).
 //   Start Action: all CPT deletes sent to eCW's server at once
 //   (pnBillingService.deleteCpt), ICDs removed in one pass with
@@ -8168,6 +8174,8 @@ function __smartCoderReadVersion(fallback) {
         actionRunning = true;
         actionLog = [];
         renderSnapshotBlock();
+        // 6.04: phase timings in the console (Start Action speed check).
+        const tStart = performance.now(), tMark = {};
         prefetchAnalysisLookups(analysisState.toAdd);
 
         // Snapshot of how many rows carry each code BEFORE any deletes run
@@ -8216,6 +8224,7 @@ function __smartCoderReadVersion(fallback) {
             if (!(result && result.batch)) renderSnapshotBlock();
         }
         renderSnapshotBlock();
+        tMark.deletes = performance.now();
 
         const deferredCPT = [];
         for (const item of analysisState.toAdd) {
@@ -8242,9 +8251,10 @@ function __smartCoderReadVersion(fallback) {
                 const result = await addSingleCPT(item.code);
                 actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: result.message });
             }
-            renderSnapshotBlock();
         }
         await applyDeferredCPTBatch(deferredCPT);
+        renderSnapshotBlock();
+        tMark.adds = performance.now();
 
         // eCW sometimes shows a row instantly then silently removes it a
         // moment later (duplicate/modifier/insurance rule rejection). Polls
@@ -8290,7 +8300,7 @@ function __smartCoderReadVersion(fallback) {
                     : () => getCPTRows().filter(r =>
                           (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase() === codeUpper
                       ).length;
-                const currentCount = await pollUntilStable(countCheckFn, 4500, 400);
+                const currentCount = await pollUntilStable(countCheckFn, 4500, 150);
                 if (currentCount > expectedRemaining) {
                     entry.status = 'fail';
                     entry.message = 'Row reappeared after a moment — deletion did not actually stick.';
@@ -8300,13 +8310,14 @@ function __smartCoderReadVersion(fallback) {
             const checkFn = entry.kind === 'icd'
                 ? () => !!findICDRowByCodeFast(entry.code)
                 : () => !!getCPTRowByCode(entry.code);
-            const stillPresent = await pollUntilStable(checkFn, 4500, 400);
+            const stillPresent = await pollUntilStable(checkFn, 4500, 150);
             if (entry.action === 'add' && !stillPresent) {
                 entry.status = 'fail';
                 entry.message = 'Row disappeared after a moment — likely rejected by a background check (duplicate, modifier, or insurance rule). Not actually added.';
             }
         }));
         renderSnapshotBlock();
+        tMark.verify = performance.now();
 
         // ---- Second-pass crosscheck ----
         // Re-run the analysis fresh against the chart as it stands now.
@@ -8339,7 +8350,6 @@ function __smartCoderReadVersion(fallback) {
                     status: result.ok ? 'success' : 'fail',
                     message: 'Found on recheck pass'
                 });
-                renderSnapshotBlock();
             }
             prefetchAnalysisLookups(recheck.toAdd);
             const deferredRecheckCPT = [];
@@ -8366,10 +8376,13 @@ function __smartCoderReadVersion(fallback) {
                     const result = await addSingleCPT(item.code);
                     actionLog.push({ code: item.code, action: 'add', kind: 'cpt', status: result.ok ? 'success' : 'fail', message: 'Found on recheck pass' });
                 }
-                renderSnapshotBlock();
             }
             await applyDeferredCPTBatch(deferredRecheckCPT, 'Found on recheck pass');
         }
+
+        const tEnd = performance.now();
+        const ms = (x, y) => Math.round((x || tEnd) - (y || tStart));
+        console.log(`SmartCoder Start Action: total ${ms(tEnd, tStart)} ms — deletes ${ms(tMark.deletes, tStart)}, adds ${ms(tMark.adds, tMark.deletes)}, stick-check ${ms(tMark.verify, tMark.adds)}, recheck pass ${ms(tEnd, tMark.verify)}`);
 
         actionRunning = false;
         analysisState = null;
