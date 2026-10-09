@@ -5222,7 +5222,7 @@ function __smartCoderReadVersion(fallback) {
             // SOP §15: Z01.00, Z02.5, Z09 removed. Z00.129 (child normal
             // well visit) is a valid SOP preventive ICD, so it's kept.
             'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89', 'Z09',
-            'Z11.3', 'Z11.4', 'Z71.6'
+            'Z11.3', 'Z11.4', 'Z71.6', 'Z00.129'
         ]);
         const AL_Z021_PREVENTIVE_CPTS = new Set([
             '99381', '99382', '99383', '99384', '99385', '99386', '99387',
