@@ -5440,8 +5440,7 @@ function __smartCoderReadVersion(fallback) {
             ...(deleteEyeExam99173AL ? ['99173'] : [])
         ]);
         const icdsToDelete = new Set([
-            'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89',
-            'Z00.129', 'Z11.3', 'Z11.4','Z71.6'
+            'Z09', 'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89','Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
         ]);
         // Z02.1 (pre-employment exam) can't coexist with the preventive
         // Z00.01/Z00.121, so it's deleted ONLY when a preventive visit code
