@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.09
+// @name         Hasan Sheikh SmartCoder v2.10
 // @namespace    http://tampermonkey.net/
-// @version      2.09
+// @version      2.10
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.10 (2026-10-09) - Z00 dx / no-dx rule (same as El Nunu 1.06).
+//   Preventive quick action: no diagnosis on the chart (no non-Z ICD) ->
+//   Z00.00 (18+) / Z00.129 (under 18), Z00.01/Z00.121 deleted; with a
+//   diagnosis -> Z00.01/Z00.121 as before, Z00.00/Z00.129 deleted. Auto
+//   Link no longer deletes Z00.129. Z00.00/Z00.129 link to the preventive
+//   codes and 99173 (Auto Link + Claim Link) and are cleared with the
+//   preventive bundle (other quick action, or no preventive visit on
+//   Analyze). With no non-Z dx, CPTs that link like the office visit
+//   (unlisted codes / fallbacks) link to the Z00.xx row instead of blank.
 // 2.09 (2026-10-07) - Fast/batch delete hardened (same code as the other
 //   clients). Single CPT fast delete now uses pnBillingService.deleteCpt
 //   and removes the row by identity/id after the server confirms, instead
@@ -2208,7 +2217,7 @@ function __smartCoderReadVersion(fallback) {
         if (current !== 'pv') {
             await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
             await deleteCPTCodesByCode(MEDICARE_AWV_CODES);
-            await deleteICDCodesByCode(["Z00.01", "Z00.121"]);
+            await deleteICDCodesByCode(["Z00.01", "Z00.121", "Z00.00", "Z00.129"]);
         }
         if (current !== 'pv' && current !== 'pc') {
             await deleteICDCodesByCode(["Z71.3", "Z71.82", "Z71.89"]);
@@ -2764,7 +2773,7 @@ function __smartCoderReadVersion(fallback) {
         // Action flow, not just when a quick-action button is clicked. ----
         if (!hasPreventiveVisit) {
             const preventiveBundleEntries = getICDRows().filter(e =>
-                e.code.toUpperCase() === 'Z00.01' || e.code.toUpperCase() === 'Z00.121');
+                ['Z00.01', 'Z00.121', 'Z00.00', 'Z00.129'].includes(e.code.toUpperCase()));
             preventiveBundleEntries.forEach(e => {
                 toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present this encounter — preventive bundle ICD not applicable' });
             });
@@ -4899,7 +4908,7 @@ function __smartCoderReadVersion(fallback) {
     // ─── CPT Rules ──────────────────────────────────────────────────────
     function al_buildCPTRules() {
         const rules = {};
-        const prevICDs = ["Z00.01", "Z00.121", "Z68", "Z71.3", "Z71.82", "Z71.89"];
+        const prevICDs = ["Z00.01", "Z00.121", "Z00.00", "Z00.129", "Z68", "Z71.3", "Z71.82", "Z71.89"];
         const prevCodes = [
             "99391","99392","99393","99394","99395","99396","99397",
             "99381","99382","99383","99384","99385","99386","99387",
@@ -5101,6 +5110,17 @@ function __smartCoderReadVersion(fallback) {
     const al_cptRules = al_buildCPTRules();
 
     // ─── Core Functions ──────────────────────────────────────────────
+    // Well-visit Z00.xx row (Z00.00/Z00.129 without findings, Z00.01/
+    // Z00.121 with findings), used when there's no disease dx to link to.
+    const WELL_VISIT_Z00_CODES = ["Z00.00", "Z00.129", "Z00.01", "Z00.121"];
+    function al_findWellVisitRow(icdRows) {
+        for (const code of WELL_VISIT_Z00_CODES) {
+            const r = icdRows.find(row => row.querySelector('td:nth-child(3)')?.textContent.trim().toUpperCase() === code);
+            if (r) return r;
+        }
+        return null;
+    }
+
     function al_officeVisit(cptCodes, icdRows, cptRows) {
         const topICDs = [];
         for (const row of icdRows) {
@@ -5113,6 +5133,13 @@ function __smartCoderReadVersion(fallback) {
                 if (rowNum) topICDs.push(rowNum);
                 if (topICDs.length === 4) break;
             }
+        }
+        // 2.10: no disease dx on the grid (Preventive with Z00.00/Z00.129)
+        // -> link to the well-visit Z00.xx row instead of leaving it blank.
+        if (!topICDs.length) {
+            const wvRow = al_findWellVisitRow(icdRows);
+            const wvNum = wvRow?.querySelector('td:first-child center.ng-binding')?.textContent.trim();
+            if (wvNum) topICDs.push(wvNum);
         }
         if (!topICDs.length) return;
         cptCodes.forEach(code => {
@@ -5440,7 +5467,9 @@ function __smartCoderReadVersion(fallback) {
             ...(deleteEyeExam99173AL ? ['99173'] : [])
         ]);
         const icdsToDelete = new Set([
-            'Z09', 'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89','Z00.129', 'Z11.3', 'Z11.4', 'Z71.6'
+            'Z09', 'Z02.1', 'Z02.5', 'Z01.00', 'Z01.30', 'Z02.89', 'Z11.3', 'Z11.4', 'Z71.6'
+            // 2.10: Z00.129 no longer deleted — Preventive adds it when the
+            // chart has no diagnosis.
         ]);
         // Z02.1 (pre-employment exam) can't coexist with the preventive
         // Z00.01/Z00.121, so it's deleted ONLY when a preventive visit code
@@ -6297,7 +6326,7 @@ function __smartCoderReadVersion(fallback) {
     // ─── CPT Rules (full parity with billing-tab script) ────────────────
     function cl_buildCPTRules() {
         const rules = {};
-        const prevICDs = ["Z00.01", "Z00.121", "Z68", "Z71.3", "Z71.82", "Z71.89"];
+        const prevICDs = ["Z00.01", "Z00.121", "Z00.00", "Z00.129", "Z68", "Z71.3", "Z71.82", "Z71.89"];
         const prevCodes = [
             "99391","99392","99393","99394","99395","99396","99397",
             "99381","99382","99383","99384","99385","99386","99387",
@@ -6456,7 +6485,7 @@ function __smartCoderReadVersion(fallback) {
             "97802": { type: "customICDCollector", icdList: ["Y93.79","Y93.81"], fallback: "cl_officeVisit" },
             "J3420": { type: "customICDCollector", icdList: b12ICDs, fallback: "cl_officeVisit" },
             "99408": { type: "exact", icds: ["Z13.9"], fallback: "cl_officeVisit" },
-            "99173": { type: "exact", icds: ["Z01.00","Z00.01","Z00.121"], fallback: "cl_officeVisit" },
+            "99173": { type: "exact", icds: ["Z01.00","Z00.01","Z00.121","Z00.00","Z00.129"], fallback: "cl_officeVisit" },
             "82270": { type: "exact", icds: ["Z12.11"], fallback: "cl_officeVisit" },
             "G0108": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
             "2028F": { type: "startsWith", icds: ["E11"], fallback: "cl_officeVisit" },
@@ -6513,6 +6542,14 @@ function __smartCoderReadVersion(fallback) {
                 const rowNum = cl_getICDRowNumber(row);
                 if (rowNum) topICDs.push(rowNum);
                 if (topICDs.length === 4) break;
+            }
+        }
+        // 2.10: no disease dx -> link to the well-visit Z00.xx row.
+        if (!topICDs.length) {
+            for (const code of ["Z00.00", "Z00.129", "Z00.01", "Z00.121"]) {
+                const r = icdRows.find(row => cl_getICDCode(row) === code);
+                const n = r && cl_getICDRowNumber(r);
+                if (n) { topICDs.push(n); break; }
             }
         }
         if (!topICDs.length) return;
@@ -7261,7 +7298,16 @@ function __smartCoderReadVersion(fallback) {
             const icdEntries = getICDGridEntriesFast();
 
             const codes = [];
-            codes.push(age >= 18 ? "Z00.01" : "Z00.121");
+            // 2.10: no diagnosis on the chart (no non-Z ICD) -> well visit
+            // WITHOUT abnormal findings: Z00.00 (18+) / Z00.129 (<18), and
+            // Z00.01/Z00.121 are deleted. Otherwise Z00.01/Z00.121 and the
+            // no-findings pair is deleted.
+            const hasDxForPV = icdEntries.some(e => !/^Z/i.test(e.code));
+            const wellVisitCode = hasDxForPV
+                ? (age >= 18 ? "Z00.01" : "Z00.121")
+                : (age >= 18 ? "Z00.00" : "Z00.129");
+            const wellVisitStale = ["Z00.01", "Z00.121", "Z00.00", "Z00.129"].filter(c => c !== wellVisitCode);
+            codes.push(wellVisitCode);
             const z68 = mapBMIToZ68(bmi, age);
             if (z68) codes.push(z68);
             codes.push("Z71.3");
@@ -7284,7 +7330,7 @@ function __smartCoderReadVersion(fallback) {
                 prefetchCPTLookups([{ code: emCode, isEm: true }]);
             }
             await clearOtherQuickActionBundles('pv');
-            await deleteICDCodesByCode([z71Opposite]);
+            await deleteICDCodesByCode([z71Opposite, ...wellVisitStale]);
             await addICDCodesFast(codes);
 
             if (isVNS || isMedicare) {
