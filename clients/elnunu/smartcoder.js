@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         El Nunu Medical SmartCoder v1.06
+// @name         El Nunu Medical SmartCoder v1.07
 // @namespace    http://tampermonkey.net/
-// @version      1.06
+// @version      1.07
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,22 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.07 (2026-10-09) - Vaccines per the Updated Vaccine Component Table
+//   (2026) + Hasan Sheikh rules:
+//   - COVID (91304/91319-91323): always 90480, every payer and age;
+//     never 90460/90461/90471/90472 (was Medicare-only per SOP §6.1).
+//   - Flu+COVID combo 90612/90613: 90480 + 90481, not component-billed.
+//   - RSV monoclonal antibodies 90380/90381/90382 are not vaccines: no
+//     90460/90461/90471; admin is 96380 (18 and under, counseling) or
+//     96381 (19+), one unit per product.
+//   - Adults (19+): oral/intranasal products (90660, 90672, 90680,
+//     90681, 90690) use 90473/90474 instead of 90471/90472: injected
+//     present -> 90471 + 90472 x(injected-1) + 90474 x(oral); oral only
+//     -> 90473 + 90474 x(oral-1). 18 and under unchanged (90460/90461).
+//   - 90473/90474/90481 and every table product code (29 were missing,
+//     e.g. 90670, 90750, 90739, 90636) link to Z23 in Auto Link + Claim
+//     Link. SL on every table product code plus
+//     90480/96380/96381 for 18 and under (as Hasan Sheikh).
 // 1.06 (2026-10-09) - Preventive quick action, no diagnosis on the chart
 //   (no non-Z ICD on the grid): adds Z00.00 (18+) / Z00.129 (under 18)
 //   instead of Z00.01 / Z00.121, and deletes Z00.01 / Z00.121. With a
@@ -1420,8 +1436,8 @@ function __smartCoderReadVersion(fallback) {
         '90744': 1, '90746': 1, '90747': 1, '90750': 1, '90756': 1,
         '91304': 1, '91319': 1, '91320': 1, '91321': 1, '91322': 1, '91323': 1
     };
-    // SOP §6.1: COVID-19 administration is 90480 for Medicare only; other
-    // payers use 90471/90472 (or 90460/90461 for 18 and under).
+    // 1.07: COVID-19 administration is always 90480 (every payer and age),
+    // never 90460/90461/90471/90472 — per the 2026 component table.
     const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
     // Medicare-only overrides (no age limit) — these use their own G-codes
     // instead of the standard 90460-90474 scheme, for Medicare patients only.
@@ -1429,7 +1445,14 @@ function __smartCoderReadVersion(fallback) {
     const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
     const HEPB_VACCINE_CODES = new Set(['90739', '90740', '90743', '90744', '90746', '90747']);
     // Every admin code this feature manages — used to find stale/wrong ones.
-    const VACCINE_ADMIN_CODE_UNIVERSE = ['90460', '90461', '90471', '90472', '90473', '90474', 'G0008', 'G0009', 'G0010', '90480'];
+    // 1.07 (2026 component table): RSV monoclonal antibodies are not
+    // vaccines — administered with 96380 (counseling) / 96381.
+    const RSV_MAB_CODES = new Set(['90380', '90381', '90382']);
+    // Flu + COVID combination products: 90480 + 90481.
+    const FLU_COVID_COMBO_CODES = new Set(['90612', '90613']);
+    // Oral / intranasal products: adults use 90473/90474, not 90471/90472.
+    const ORAL_NASAL_VACCINE_CODES = new Set(['90660', '90672', '90680', '90681', '90690']);
+    const VACCINE_ADMIN_CODE_UNIVERSE = ['90460', '90461', '90471', '90472', '90473', '90474', 'G0008', 'G0009', 'G0010', '90480', '90481', '96380', '96381'];
 
     function getCPTRowUnits(row) {
         const input = row.querySelector('input[data-fieldname="units"]');
@@ -1475,10 +1498,14 @@ function __smartCoderReadVersion(fallback) {
         const pneumoRows = [];
         const hepbRows = [];
         const otherVaccineRows = [];
+        const comboRows = [];
+        const rsvMabRows = [];
 
         rows.forEach(r => {
             const code = r.code;
-            if (isMedicareIns && COVID_VACCINE_CODES.has(code)) { covidRows.push(r); return; }
+            if (COVID_VACCINE_CODES.has(code)) { covidRows.push(r); return; }
+            if (FLU_COVID_COMBO_CODES.has(code)) { comboRows.push(r); return; }
+            if (RSV_MAB_CODES.has(code)) { rsvMabRows.push(r); return; }
             if (!(code in VACCINE_COMPONENT_MAP)) return; // not a vaccine product code
             if (isMedicareIns && FLU_VACCINE_CODES.has(code)) { fluRows.push(r); return; }
             if (isMedicareIns && PNEUMOCOCCAL_VACCINE_CODES.has(code)) { pneumoRows.push(r); return; }
@@ -1488,8 +1515,18 @@ function __smartCoderReadVersion(fallback) {
 
         const plan = []; // { code, units, reason }
 
-        if (covidRows.length) {
-            plan.push({ code: '90480', units: 1, reason: 'Medicare — COVID-19 vaccine administration' });
+        if (covidRows.length || comboRows.length) {
+            plan.push({ code: '90480', units: 1, reason: comboRows.length && !covidRows.length
+                ? 'Influenza + COVID-19 combination vaccine administration'
+                : 'COVID-19 vaccine administration (all payers)' });
+        }
+        if (comboRows.length) {
+            plan.push({ code: '90481', units: comboRows.length, reason: 'Influenza + COVID-19 combination product — additional antigen' });
+        }
+        if (rsvMabRows.length && age != null) {
+            plan.push(age < 19
+                ? { code: '96380', units: rsvMabRows.length, reason: 'RSV monoclonal antibody administration with counseling (not a vaccine — no 90460/90461)' }
+                : { code: '96381', units: rsvMabRows.length, reason: 'RSV monoclonal antibody administration (not a vaccine)' });
         }
         if (fluRows.length) {
             plan.push({ code: 'G0008', units: 1, reason: 'Medicare — Influenza vaccine administration' });
@@ -1505,9 +1542,22 @@ function __smartCoderReadVersion(fallback) {
             const vaccineCount = otherVaccineRows.length;
             // SOP §6: adult admin codes from age 19; 90460/90461 for 18 and under.
             if (age != null && age >= 19) {
-                plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
-                if (vaccineCount > 1) {
-                    plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
+                // 1.07: injected vs oral/intranasal (90473/90474).
+                const oralCount = otherVaccineRows.filter(r => ORAL_NASAL_VACCINE_CODES.has(r.code)).length;
+                const injCount = vaccineCount - oralCount;
+                if (injCount > 0) {
+                    plan.push({ code: '90471', units: 1, reason: `${injCount} injected vaccine(s) — first injected vaccine` });
+                    if (injCount > 1) {
+                        plan.push({ code: '90472', units: injCount - 1, reason: `${injCount} injected vaccine(s) — each additional injected vaccine` });
+                    }
+                    if (oralCount > 0) {
+                        plan.push({ code: '90474', units: oralCount, reason: `${oralCount} oral/intranasal vaccine(s) — additional to the injected vaccine` });
+                    }
+                } else {
+                    plan.push({ code: '90473', units: 1, reason: `${oralCount} oral/intranasal vaccine(s) — first oral/intranasal vaccine` });
+                    if (oralCount > 1) {
+                        plan.push({ code: '90474', units: oralCount - 1, reason: `${oralCount} oral/intranasal vaccine(s) — each additional` });
+                    }
                 }
             } else if (age != null) {
                 const totalComponents = otherVaccineRows.reduce((sum, r) => sum + (VACCINE_COMPONENT_MAP[r.code] || 1), 0);
@@ -4780,6 +4830,40 @@ function __smartCoderReadVersion(fallback) {
             "90461": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90471": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90472": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90473": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90474": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90481": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            // 1.07: remaining 2026 component-table products -> Z23.
+            "90612": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90613": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90632": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90636": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90639": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90649": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90650": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90655": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90670": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90672": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90675": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90678": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90679": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90682": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90683": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90684": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90685": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90687": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90690": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90691": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90717": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90733": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90739": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90749": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90750": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90756": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "G0010": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -4821,7 +4905,6 @@ function __smartCoderReadVersion(fallback) {
             "90622": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90611": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90716": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
-            "90749": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90656": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90657": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90658": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -6136,6 +6219,40 @@ function __smartCoderReadVersion(fallback) {
             "90461": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90471": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90472": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90473": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90474": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90481": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            // 1.07: remaining 2026 component-table products -> Z23.
+            "90612": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90613": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90632": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90636": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90639": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90649": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90650": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90655": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90670": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90672": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90675": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90678": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90679": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90682": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90683": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90684": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90685": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90687": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90690": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90691": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90717": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90733": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90739": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90749": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90750": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90756": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0008": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0009": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "G0010": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
@@ -6177,7 +6294,6 @@ function __smartCoderReadVersion(fallback) {
             "90622": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90611": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90716": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
-            "90749": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90656": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90657": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90658": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
