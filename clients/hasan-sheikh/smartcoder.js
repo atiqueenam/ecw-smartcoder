@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.11
+// @name         Hasan Sheikh SmartCoder v2.12
 // @namespace    http://tampermonkey.net/
-// @version      2.11
+// @version      2.12
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.12 (2026-10-12) - Pinned eCW itemIds for Preventive and Office Visit
+//   codes. When Start Action / quick actions push 99381-99387,
+//   99391-99397, G0438, G0439, 99202-99205 or 99211-99215, the catalog
+//   entry with Hasan Sheikh's verified itemId is used (VisitCodes), not
+//   just the first exact match. Both catalogs are searched for these
+//   codes. If the pinned itemId isn't returned, falls back to the old
+//   pick with a console warning. Cached lookups for these codes are
+//   re-keyed so an old cached pick isn't reused.
 // 2.11 (2026-10-12) - Vaccine admin age cutoff moved to 19 (same as XcellCare /
 //   El Nunu). 90471/90472 now apply from age 19; 90460/90461 for 18 and
 //   under (was 18+ / under 18). SL modifier for pediatric vaccines
@@ -3604,12 +3612,49 @@ function __smartCoderReadVersion(fallback) {
         }));
     }
 
+    // ---------- Pinned itemIds (2.12) ----------
+    // Verified on Hasan Sheikh's eCW (VisitCodes catalog). When one of these
+    // codes is pushed, the catalog row with exactly this itemId is used.
+    const HS_PINNED_CPT_ITEM_IDS = {
+        // Preventive — new patient
+        '99381': '188181', '99382': '188182', '99383': '188183', '99384': '455',
+        '99385': '456',    '99386': '457',    '99387': '458',
+        // Preventive — established patient
+        '99391': '188178', '99392': '188179', '99393': '188180', '99394': '459',
+        '99395': '460',    '99396': '461',    '99397': '462',
+        // Medicare AWV
+        'G0438': '275969', 'G0439': '275970',
+        // Office visit — new patient
+        '99202': '443', '99203': '444', '99204': '445', '99205': '446',
+        // Office visit — established patient
+        '99211': '447', '99212': '448', '99213': '449', '99214': '450', '99215': '451'
+    };
+    window.__hsPinnedItemIds = HS_PINNED_CPT_ITEM_IDS;
+
     async function injLookupCPT(code, isEm = false) {
         code = injNorm(code);
         const scope = getBillingScopeForInjection();
         requireXmlHelpers();
         if (!scope.encounterId) {
             throw new InjectionError('precheck', 'Billing scope has no encounterId — cannot run the CPT lookup.');
+        }
+        const pinnedId = HS_PINNED_CPT_ITEM_IDS[code];
+        if (pinnedId) {
+            const [normalRes, visitRes] = await Promise.all([
+                injLookupCPTCatalog(code, 'normal', scope.encounterId).catch(() => []),
+                injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(() => [])
+            ]);
+            const pinVisit = visitRes.find(x => injCodeText(x) === code && String(x.itemId).trim() === pinnedId);
+            const pinNormal = normalRes.find(x => injCodeText(x) === code && String(x.itemId).trim() === pinnedId);
+            const pin = pinVisit || pinNormal;
+            if (pin) {
+                return { results: normalRes.concat(visitRes), exact: [pin], catalog: pinVisit ? 'visit' : 'normal', pinned: true };
+            }
+            console.warn(`[SmartCoder] Pinned itemId ${pinnedId} for ${code} not returned by eCW — using the default pick.`,
+                { normal: normalRes.map(x => `${x.code}:${x.itemId}`), visit: visitRes.map(x => `${x.code}:${x.itemId}`) });
+            const nEx = normalRes.filter(x => injCodeText(x) === code);
+            if (nEx.length) return { results: normalRes, exact: nEx, catalog: 'normal' };
+            return { results: normalRes.concat(visitRes), exact: visitRes.filter(x => injCodeText(x) === code), catalog: 'visit' };
         }
         // E&M: query both catalogs AT THE SAME TIME (one round-trip instead
         // of two). Same preference as before: a CPTCodes+HCPCS exact match
@@ -3959,7 +4004,7 @@ function __smartCoderReadVersion(fallback) {
 
     // ---------- CPT resolve + prefetch (5.98) ----------
     async function injResolveCPT(code, isEm, scope, { fresh = false } = {}) {
-        const key = `${injCptYear(scope.encounterDate)}|${isEm ? 'em' : 'cpt'}|${code}`;
+        const key = `${injCptYear(scope.encounterDate)}|${HS_PINNED_CPT_ITEM_IDS[code] ? 'pin' + HS_PINNED_CPT_ITEM_IDS[code] : (isEm ? 'em' : 'cpt')}|${code}`;
         const r = await injResolveCached('cpt', key, fresh, async () => {
             const lookup = await injLookupCPT(code, isEm);
             if (!lookup.exact.length) {
