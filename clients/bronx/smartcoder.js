@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.96
+// @name         Bronx Health SmartCoder v1.97
 // @namespace    http://tampermonkey.net/
-// @version      1.96
+// @version      1.97
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 1.97 (2026-10-12) - Vaccine admin age cutoff moved to 19 (same as XcellCare /
+//   El Nunu). 90471/90472 now apply from age 19; 90460/90461 for 18 and
+//   under (was 18+ / under 18). SL modifier for pediatric vaccines
+//   unchanged (still applies through age 18).
 // 1.96 (2026-10-07) - Fast + batch delete (from Hasan Sheikh 2.07/2.08).
 //   Start Action: all CPT deletes sent to eCW's server at once
 //   (pnBillingService.deleteCpt), ICDs removed in one pass with
@@ -1960,7 +1964,8 @@ function __smartCoderReadVersion(fallback) {
 
         if (otherVaccineRows.length) {
             const vaccineCount = otherVaccineRows.length;
-            if (age != null && age >= 18) {
+            // Adult admin codes from age 19; 90460/90461 for 18 and under.
+            if (age != null && age >= 19) {
                 plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
                 if (vaccineCount > 1) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
@@ -3700,8 +3705,8 @@ function __smartCoderReadVersion(fallback) {
         }
 
         // ---- Vaccine administration coding ----
-        // Works out 90460/90461 (under 18, component-based), 90471/90472
-        // (18+, per-vaccine), and the Medicare-only overrides (G0008 flu,
+        // Works out 90460/90461 (18 and under, component-based), 90471/90472
+        // (19+, per-vaccine), and the Medicare-only overrides (G0008 flu,
         // G0009 pneumococcal, G0010 HepB, 90480 COVID — no age limit) from
         // whatever vaccine PRODUCT codes are already on the chart. Uses
         // kind:'vaxadmin' so Start Action will fix the Units field even

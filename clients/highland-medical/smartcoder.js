@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.07
+// @name         Highland Medical SmartCoder v1.08
 // @namespace    http://tampermonkey.net/
-// @version      1.07
+// @version      1.08
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.08 (2026-10-12) - Vaccine admin age cutoff moved to 19 (same as XcellCare /
+//   El Nunu). 90471/90472 now apply from age 19; 90460/90461 for 18 and
+//   under (was 18+ / under 18). SL modifier for pediatric vaccines
+//   unchanged (still applies through age 18).
 // 1.07 (2026-10-07) - Fast + batch delete (from Hasan Sheikh 2.07/2.08).
 //   Start Action: all CPT deletes sent to eCW's server at once
 //   (pnBillingService.deleteCpt), ICDs removed in one pass with
@@ -1429,7 +1433,8 @@ function __smartCoderReadVersion(fallback) {
 
         if (otherVaccineRows.length) {
             const vaccineCount = otherVaccineRows.length;
-            if (age != null && age >= 18) {
+            // Adult admin codes from age 19; 90460/90461 for 18 and under.
+            if (age != null && age >= 19) {
                 plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
                 if (vaccineCount > 1) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });

@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.10
+// @name         Hasan Sheikh SmartCoder v2.11
 // @namespace    http://tampermonkey.net/
-// @version      2.10
+// @version      2.11
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.11 (2026-10-12) - Vaccine admin age cutoff moved to 19 (same as XcellCare /
+//   El Nunu). 90471/90472 now apply from age 19; 90460/90461 for 18 and
+//   under (was 18+ / under 18). SL modifier for pediatric vaccines
+//   unchanged (still applies through age 18).
+//   Blood draw Z13.0: when 36415 is on the chart and there is no
+//   diagnosis (no non-Z ICD, counting ICDs Analyze is adding), Analyze
+//   adds Z13.0; Auto Link / Claim Link already link 36415 to Z13.0 in
+//   that case.
 // 2.10 (2026-10-09) - Z00 dx / no-dx rule (same as El Nunu 1.06).
 //   Preventive quick action: no diagnosis on the chart (no non-Z ICD) ->
 //   Z00.00 (18+) / Z00.129 (under 18), Z00.01/Z00.121 deleted; with a
@@ -1711,7 +1719,8 @@ function __smartCoderReadVersion(fallback) {
 
         if (otherVaccineRows.length) {
             const vaccineCount = otherVaccineRows.length;
-            if (age != null && age >= 18) {
+            // Adult admin codes from age 19; 90460/90461 for 18 and under.
+            if (age != null && age >= 19) {
                 plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
                 if (vaccineCount > 1) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
@@ -3190,8 +3199,8 @@ function __smartCoderReadVersion(fallback) {
         }
 
         // ---- Vaccine administration coding ----
-        // Works out 90460/90461 (under 18, component-based), 90471/90472
-        // (18+, per-vaccine), and the Medicare-only overrides (G0008 flu,
+        // Works out 90460/90461 (18 and under, component-based), 90471/90472
+        // (19+, per-vaccine), and the Medicare-only overrides (G0008 flu,
         // G0009 pneumococcal, G0010 HepB, 90480 COVID — no age limit) from
         // whatever vaccine PRODUCT codes are already on the chart. Uses
         // kind:'vaxadmin' so Start Action will fix the Units field even
@@ -3229,6 +3238,25 @@ function __smartCoderReadVersion(fallback) {
                         toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Vaccine admin code not applicable for the vaccines currently on this chart' });
                     }
                 });
+            }
+        }
+
+        // ---- Blood draw with no diagnosis -> Z13.0 (2.11) ----
+        // Runs last so every ICD add/delete above is known. 36415 with no
+        // real dx (no non-Z ICD left on the chart after this run's deletes,
+        // and none being added) gets Z13.0; Auto Link / Claim Link
+        // (officeVisitThenZ13) then link 36415 to it.
+        {
+            const icdNow = getICDGridEntriesFast().map(e => e.code.toUpperCase());
+            const cptStays = (currentCodes.has('36415') && !toDelete.some(d => d.kind === 'cpt' && d.code === '36415')) || desired.has('36415');
+            if (cptStays && !icdNow.includes('Z13.0') && !toAdd.some(a => a.code === 'Z13.0')) {
+                const icdDeletes = new Set(toDelete.filter(d => d.kind === 'icd').map(d => String(d.code).toUpperCase()));
+                const remaining = icdNow.filter(c => !icdDeletes.has(c));
+                const pendingIcdAdds = toAdd.filter(a => a.kind === 'icd').map(a => String(a.code).toUpperCase());
+                const hasRealDx = [...remaining, ...pendingIcdAdds].some(c => c && !c.startsWith('Z'));
+                if (!hasRealDx) {
+                    toAdd.push({ code: 'Z13.0', reason: '36415 with no diagnosis — blood draw screening ICD', kind: 'icd' });
+                }
             }
         }
 
