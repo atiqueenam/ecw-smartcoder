@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-09T11:34:33.640Z",
+  "generatedAt": "2026-10-12T03:30:41.471Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "1.96",
+      "version": "1.97",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "ea3821c03f9cff2262c5679cfc2ab5d38ac5a65b5780b69327ae205bbab258a8"
+      "sha256": "cf2bd792d80f29db727236bd7cb714186c921468cd23d36bcbe15c4f0c04e8a9"
     },
     {
       "id": "elnunu",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "6.08",
+      "version": "6.09",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "6ba0f1cf8eddebc94d2cb78f07817f86543b044fba0da3665ceac661a73b0002"
+      "sha256": "c21d815588fea184e40ba4265a94e37985b0c139b3f473c34d527bc41ddd3ffa"
     },
     {
       "id": "hasan-sheikh",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "2.10",
+      "version": "2.11",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "b0cdf07970302e3c7f0227cd5ca7075b3fe1849c79063263491a7ee5fd4db275"
+      "sha256": "7760e92767f56329a804d8ad93c603dfe62a1d5c9d46dce0ccbe7efaa0468236"
     },
     {
       "id": "hasnayen",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.45",
+      "version": "1.46",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "02902ab7564c50b6126c1930e4e8b6f6cf3e715fb5a99a128c44a0f026a9bd62"
+      "sha256": "1d19290f6b8e5d90d049091e79b4c8b491006fa3ee8a65e045798882536e6127"
     },
     {
       "id": "highland-medical",
@@ -64,9 +64,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.07",
+      "version": "1.08",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "9639d34e3979d3026866462551900eeaba8102f55749314bbf8cc7f613dfbccd"
+      "sha256": "c1b78aaf3b71fa35b929e573d1c3d8c4f2ef69066096b10957d36331f581143f"
     },
     {
       "id": "xcellcare",
