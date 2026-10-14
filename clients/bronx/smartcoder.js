@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bronx Health SmartCoder v1.99
+// @name         Bronx Health SmartCoder v2.02
 // @namespace    http://tampermonkey.net/
-// @version      1.99
+// @version      2.02
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,25 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.02 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
+//   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
+//   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
+//   longer resets eligibility. Prior encounters under a non-Medicare payer
+//   (Medicaid, commercial, ...) are ignored.
+//   ALSO: commercial-insurance rule added (ported from Getwell): Aetna, Cigna,
+//   Anthem, BCBS/Blue Cross, Empire, United/UMR/Oxford + a Preventive code on
+//   the chart -> no office-visit code suggested, existing one removed (same
+//   as NYCE PPO). Without a Preventive code the office visit is suggested.
+// 2.01 (2026-10-14) - Preventive eligibility for ANY Medicare plan (insurance name
+//   contains "medicare": Medicare, Healthfirst Medicare, ...) now uses a rolling
+//   365 days: if a preventive code (993xx / G0438 / G0439) was billed in the
+//   last 365 days the PV button is disabled. Other payers keep the calendar-
+//   year rule. Same change in every client.
+// 2.00 (2026-10-14) - ANN visit type: when the Preventive bundle is not
+//   applicable (e.g. already billed this calendar year), the visit is now
+//   treated as an established office visit and 99212/99213/99214 is
+//   suggested as usual. Before, ANN visits never got an office-visit code.
+//   While PV is available, ANN still gets no office visit (preventive only).
 // 1.99 (2026-10-14) - Added G0438 (275969) and G0439 (275970) to the common
 //   pinned eCW itemIds (VisitCodes). If eCW doesn't return the ID, the
 //   old first-exact-match rule applies. Hasan Sheikh already pinned both.
@@ -1467,7 +1486,7 @@ function __smartCoderReadVersion(fallback) {
     // Same insurance-change carve-out as codeUsedInYear above: a prior
     // encounter billed under a different payer than the current
     // encounter's insurance doesn't count against the day window.
-    function codeUsedInLastDays(code, days) {
+    function codeUsedInLastDays(code, days, opts) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
         if (!data || !data.length) return false;
@@ -1481,7 +1500,15 @@ function __smartCoderReadVersion(fallback) {
             if (!ts) return false;
             const diffDays = Math.abs(currentTs - ts) / 86400000;
             if (diffDays > days) return false;
-            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
+            // opts.anyMedicarePlan (Medicare preventive 365-day rule): the current
+            // plan is a Medicare plan, so a prior encounter counts when it was
+            // billed under ANY Medicare plan (Medicare, Healthfirst Medicare, ...)
+            // or its payer is unknown. A prior encounter under a non-Medicare
+            // payer (Medicaid, commercial, ...) does not count.
+            if (opts && opts.anyMedicarePlan) {
+                const priorIns = String(enc.insurance_name || '').trim();
+                if (priorIns && !/medicare/i.test(priorIns)) return false;
+            } else if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -2752,7 +2779,8 @@ function __smartCoderReadVersion(fallback) {
         // Preventive visit for this payer — used both to remove any
         // office-visit code already on the chart (below, once toDelete
         // exists) and to skip suggesting a new one further down.
-        const isNycePPOForOV = isNycePPOIns(insurance);
+        // (Also covers commercial payers — see isBronxCommercialInsurance.)
+        const isNycePPOForOV = isNycePPOIns(insurance) || isBronxCommercialInsurance(insurance);
 
         // ---- Quick-action gating cleanup ----
         // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
@@ -3231,7 +3259,7 @@ function __smartCoderReadVersion(fallback) {
         if (isNycePPOForOV && hasPreventiveVisit) {
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'NYCE PPO — office-visit E/M code not billable alongside a Preventive visit' });
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: (isNycePPOIns(insurance) ? 'NYCE PPO' : `Commercial insurance (${insurance || 'commercial'})`) + ' — office-visit E/M code not billable alongside a Preventive visit' });
                 }
             });
         }
@@ -3383,7 +3411,8 @@ function __smartCoderReadVersion(fallback) {
         // below) exist for this provider. Suggested code goes to the TOP
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
-        // Bronx does not follow the "commercial payer" exclusion other
+        // Commercial payers (isBronxCommercialInsurance) + NYCE PPO get no
+        // office visit when a Preventive code is on the chart (see below). Bronx formerly did not follow the "commercial payer" exclusion other
         // clients use — every visit (regardless of insurance) gets an
         // office-visit E&M code suggested.
         // Captured for the TCM/99401/99406 billing-exclusivity rules below,
@@ -3391,7 +3420,13 @@ function __smartCoderReadVersion(fallback) {
         // even though `ovCode` itself is scoped to the block below.
         let computedOvCodeForBilling = null;
         const visitType = getVisitType();
-        const visitCategory = classifyVisitType(visitType);
+        // ANN visit (annual): preventive is the normal code, so no office
+        // visit is suggested while the PV bundle is available. When PV is
+        // not applicable (already billed this year, televisit, etc.) the
+        // visit is evaluated as an established office visit instead.
+        const isAnnualVisitType = /^ann(ual)?(\s+visit)?$/i.test((visitType || '').trim());
+        const visitCategory = classifyVisitType(visitType)
+            || (isAnnualVisitType && gating.pv.disabled ? 'established' : null);
 
         // Follow-up visit types, for the no-vitals carve-out in the
         // established branch below. classifyVisitType() folds F/U in with
@@ -7450,8 +7485,13 @@ function __smartCoderReadVersion(fallback) {
 
         // ---- PV: Preventive ----
         let pv = { disabled: false, title: 'Preventive' };
-        if (PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
-            pv = { disabled: true, title: 'Preventive already billed this calendar year' };
+        // Any Medicare plan (Medicare, Healthfirst Medicare, ...): eligible only
+        // if no preventive was billed in the last 365 days (rolling). Every
+        // other payer keeps the calendar-year rule.
+        if (/medicare/i.test(insurance || '')
+            ? PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 365, { anyMedicarePlan: true }))
+            : PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
+            pv = { disabled: true, title: /medicare/i.test(insurance || '') ? 'Preventive already billed within the last 365 days (Medicare)' : 'Preventive already billed this calendar year' };
         } else if (isTelevisit) {
             pv = { disabled: true, title: 'Preventive not applicable for a televisit' };
         }
@@ -7668,6 +7708,28 @@ function __smartCoderReadVersion(fallback) {
         } finally {
             quickActionRunning = false;            renderSnapshotBlock();
         }
+    }
+
+    // Commercial insurances (ported from Getwell): a Preventive visit code on
+    // the chart means no office-visit E&M is billable, same as NYCE PPO.
+    // Anthem is included. Without a Preventive code the office visit is
+    // suggested as usual.
+    function isBronxCommercialInsurance(insurance) {
+        if (!insurance) return false;
+        if (isUHCInsurance(insurance)) return true; // United Healthcare, UMR, Oxford...
+        const name = insurance.trim().toLowerCase()
+            .replace(/[.,]/g, '')
+            .replace(/[\s-]+/g, ' ')
+            .trim()
+            .replace(/^the\s+/, '');
+        if (/^aetna\b/.test(name)) return true;
+        if (/^cigna\b/.test(name)) return true;
+        if (/^anthem\b/.test(name)) return true;
+        if (/^bcbs\b/.test(name)) return true;
+        if (/^blue\s+cross\b/.test(name)) return true;
+        if (/^empire\b/.test(name)) return true;
+        if (/\bempire\b/.test(name) && /\bbcbs\b/.test(name)) return true;
+        return false;
     }
 
     // NYCE PPO — used both by isPreventiveCounselBlockedIns() below (P/C

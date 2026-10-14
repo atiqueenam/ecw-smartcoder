@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.13
+// @name         Hasan Sheikh SmartCoder v2.15
 // @namespace    http://tampermonkey.net/
-// @version      2.13
+// @version      2.15
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,16 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.15 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
+//   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
+//   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
+//   longer resets eligibility. Prior encounters under a non-Medicare payer
+//   (Medicaid, commercial, ...) are ignored.
+// 2.14 (2026-10-14) - Preventive eligibility for ANY Medicare plan (insurance name
+//   contains "medicare": Medicare, Healthfirst Medicare, ...) now uses a rolling
+//   365 days: if a preventive code (993xx / G0438 / G0439) was billed in the
+//   last 365 days the PV button is disabled. Other payers keep the calendar-
+//   year rule. Same change in every client.
 // 2.13 (2026-10-14) - Pinned eCW itemIds for the codes whose itemId is the same
 //   in all 6 scanned clients (Getwell, Hasan Sheikh, Highland, El Nunu,
 //   Bronx, Hasnayen): 32 CPT/HCPCS/visit codes (E&M 99203/99211-99215,
@@ -1426,7 +1436,7 @@ function __smartCoderReadVersion(fallback) {
     // Same insurance-change carve-out as codeUsedInYear above: a prior
     // encounter billed under a different payer than the current
     // encounter's insurance doesn't count against the day window.
-    function codeUsedInLastDays(code, days) {
+    function codeUsedInLastDays(code, days, opts) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
         if (!data || !data.length) return false;
@@ -1440,7 +1450,15 @@ function __smartCoderReadVersion(fallback) {
             if (!ts) return false;
             const diffDays = Math.abs(currentTs - ts) / 86400000;
             if (diffDays > days) return false;
-            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
+            // opts.anyMedicarePlan (Medicare preventive 365-day rule): the current
+            // plan is a Medicare plan, so a prior encounter counts when it was
+            // billed under ANY Medicare plan (Medicare, Healthfirst Medicare, ...)
+            // or its payer is unknown. A prior encounter under a non-Medicare
+            // payer (Medicaid, commercial, ...) does not count.
+            if (opts && opts.anyMedicarePlan) {
+                const priorIns = String(enc.insurance_name || '').trim();
+                if (priorIns && !/medicare/i.test(priorIns)) return false;
+            } else if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
             const codes = [
                 ...(enc.visit_codes || []),
                 ...(enc.procedure_codes || [])
@@ -7221,8 +7239,13 @@ function __smartCoderReadVersion(fallback) {
 
         // ---- PV: Preventive ----
         let pv = { disabled: false, title: 'Preventive' };
-        if (PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
-            pv = { disabled: true, title: 'Preventive already billed this calendar year' };
+        // Any Medicare plan (Medicare, Healthfirst Medicare, ...): eligible only
+        // if no preventive was billed in the last 365 days (rolling). Every
+        // other payer keeps the calendar-year rule.
+        if (/medicare/i.test(insurance || '')
+            ? PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 365, { anyMedicarePlan: true }))
+            : PREVENTIVE_ALL_CODES.some(c => codeUsedInYear(c, dosYear))) {
+            pv = { disabled: true, title: /medicare/i.test(insurance || '') ? 'Preventive already billed within the last 365 days (Medicare)' : 'Preventive already billed this calendar year' };
         } else if (isTelevisit) {
             pv = { disabled: true, title: 'Preventive not applicable for a televisit' };
         }
