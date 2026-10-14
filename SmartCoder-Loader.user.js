@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eCW SmartCoder by ATQ
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.2.7
+// @version      1.2.8
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.2.7: userscript started.");
+  console.info("eCW SmartCoder Loader v1.2.8: userscript started.");
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/dev/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
@@ -31,6 +31,14 @@
   const HEADER_STYLE_ID = "ecwSmartCoderLoaderHeaderStyle";
   const CLIENT_PICKER_ID = "ecwSmartCoderClientPicker";
   const RELOAD_BUTTON_ID = "ecsHotReload";
+  const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;   // look for a newer client script every 10 minutes
+  const UPDATE_CHECK_FIRST_DELAY_MS = 15 * 1000;
+
+  // The script this page is actually running, and — once a background check
+  // finds a different one published — the update that is waiting. Nothing is
+  // downloaded or run for an update until the user clicks the reload button.
+  let runningClient = null;     // { id, sha256 }
+  let updateAvailable = null;   // { name, version }
 
   let registry = null;
 
@@ -319,6 +327,20 @@
         shape-rendering:geometricPrecision;
       }
       #${RELOAD_BUTTON_ID}.loading svg { animation:ecwLoaderSpin .7s linear infinite; }
+      /* Red dot: a newer SmartCoder script is published for this client. */
+      #${RELOAD_BUTTON_ID}.ecw-sc-update { position:relative !important; }
+      #${RELOAD_BUTTON_ID}.ecw-sc-update::after {
+        content:""; position:absolute; top:-3px; right:-3px;
+        width:9px; height:9px; border-radius:50%;
+        background:#ef4444; border:1.5px solid #fff; box-sizing:border-box;
+        box-shadow:0 0 0 0 rgba(239,68,68,.6);
+        animation:ecwScUpdatePulse 1.8s ease-out infinite;
+      }
+      @keyframes ecwScUpdatePulse {
+        0% { box-shadow:0 0 0 0 rgba(239,68,68,.6); }
+        70% { box-shadow:0 0 0 6px rgba(239,68,68,0); }
+        100% { box-shadow:0 0 0 0 rgba(239,68,68,0); }
+      }
       @keyframes ecwLoaderSpin { to { transform:rotate(360deg); } }
 
       /* Bigger, easier target for the close/minimize (×) button now that
@@ -332,10 +354,44 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
+  // Shows/hides the red dot on the reload button and updates its tooltip.
+  function applyUpdateBadge() {
+    const button = document.getElementById(RELOAD_BUTTON_ID);
+    if (!button) return;
+    button.classList.toggle("ecw-sc-update", Boolean(updateAvailable));
+    const text = updateAvailable
+      ? `Update available: ${updateAvailable.name} v${updateAvailable.version} - click to reload and update`
+      : "Check updates and reload";
+    button.title = text;
+    button.setAttribute("aria-label", updateAvailable ? text : "Check SmartCoder updates and reload");
+  }
+
+  // Reads the published registry only (never replaces the cached one, so the
+  // running script is not swapped) and flags an update when the checksum
+  // published for this client differs from the script this page is running.
+  async function checkForUpdate() {
+    if (!runningClient) return;
+    try {
+      const latest = validateRegistry(JSON.parse(await downloadText(REGISTRY_URL)));
+      const entry = latest.clients.find(item => item.id === runningClient.id);
+      if (!entry) return;
+      const isNewer = entry.sha256.toLowerCase() !== runningClient.sha256.toLowerCase();
+      updateAvailable = isNewer ? { name: entry.name, version: entry.version } : null;
+      applyUpdateBadge();
+    } catch (error) {
+      console.warn("eCW SmartCoder Loader: update check failed; will retry.", error);
+    }
+  }
+
+  function startUpdateChecks() {
+    setTimeout(checkForUpdate, UPDATE_CHECK_FIRST_DELAY_MS);
+    setInterval(checkForUpdate, UPDATE_CHECK_INTERVAL_MS);
+  }
+
   function installHeaderControls() {
     const header = document.getElementById("ecsHeader");
     if (!header || !registry) return false;
-    if (document.getElementById(CLIENT_PICKER_ID)) return true;
+    if (document.getElementById(CLIENT_PICKER_ID)) { applyUpdateBadge(); return true; }
 
     const title = Array.from(header.children).find(element =>
       element.tagName === "SPAN" && element.id !== "ecsHeaderBtns"
@@ -425,6 +481,7 @@
       location.reload();
     });
     minimize.replaceWith(reload);
+    applyUpdateBadge();
     return true;
   }
 
@@ -476,9 +533,11 @@
 
     const script = await obtainClientScript(client);
     console.info(`eCW SmartCoder Loader: ${client.name} script verified.`);
+    runningClient = { id: client.id, sha256: (await sha256(script.code)).toLowerCase() };
     executeScript(client, script.code);
     console.info(`eCW SmartCoder Loader: ${client.name} script executed.`);
     maintainHeaderControls();
+    startUpdateChecks();
     console.info(`eCW SmartCoder Loader: ${client.name} v${client.version} active${script.stale ? " from older cache" : ""}.`);
   }
 
