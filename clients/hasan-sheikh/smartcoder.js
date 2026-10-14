@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.15
+// @name         Hasan Sheikh SmartCoder v2.16
 // @namespace    http://tampermonkey.net/
-// @version      2.15
+// @version      2.16
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.16 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
+//   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
+//   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
+//   P/C for 30 days. Same rule as El Nunu / XcellCare, now in every client.
 // 2.15 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
 //   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
 //   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
@@ -7265,10 +7269,10 @@ function __smartCoderReadVersion(fallback) {
         const isHealthfirstForPC = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
         if (isCapitatedInsurance(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling (99401) not applicable for capitated insurance (${insurance})` };
-        } else if (isHealthfirstForPC && codeUsedInLastDays('99401', 60)) {
-            pc = { disabled: true, title: 'Preventive Counseling (99401) needs a 2-month gap for Healthfirst — already billed within the last 60 days' };
-        } else if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
-            pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
+        } else if (codeUsedInLastDays('99401', 60)) {
+            pc = { disabled: true, title: 'Preventive Counseling (99401) billed in the last 2 months (60-day gap)' };
+        } else if (PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 30))) {
+            pc = { disabled: true, title: 'Preventive billed in the last 30 days' };
         } else if (isPreventiveCounselBlockedIns(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insurance || 'this insurance'}` };
         } else if (!hasChronicDiseaseThisEncounter) {

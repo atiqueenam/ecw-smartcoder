@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.50
+// @name         Hasnayen Medical SmartCoder v1.51
 // @namespace    http://tampermonkey.net/
-// @version      1.50
+// @version      1.51
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,10 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.51 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
+//   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
+//   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
+//   P/C for 30 days. Same rule as El Nunu / XcellCare, now in every client.
 // 1.50 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
 //   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
 //   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
@@ -5248,11 +5252,10 @@ function __smartCoderReadVersion(fallback) {
         return false;
     }
 
-    // Hasnayen rules 3 + 4: the "recently used" gap for 99401 and G0447 is
-    // 2 months (60 days) for Healthfirst and 1 month (30 days) for every
-    // other payer that allows the code at all.
+    // Hasnayen rule 3: the "recently used" gap for 99401 is 2 months (60 days)
+    // for every payer that allows the code. (G0447 has its own gap below.)
     function hasnayenCounselingGapDays(insurance) {
-        return isHealthfirstIns(insurance) ? 60 : 30;
+        return 60;   // 2-month gap for every payer
     }
 
     // Obesity Counseling (G0447) gap — separate from the 99401 gap above.

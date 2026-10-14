@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.12
+// @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.13 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
+//   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
+//   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
+//   P/C for 30 days. Same rule as El Nunu / XcellCare, now in every client.
 // 1.12 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
 //   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
 //   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
@@ -6652,8 +6656,10 @@ function __smartCoderReadVersion(fallback) {
         // chronic condition to counsel on, Preventive Counseling doesn't apply.
         const hasChronicDiseaseThisEncounter = getICDRows().some(r => CHRONIC_DISEASE_ICD_CODES.has((r.code || '').toUpperCase()));
         let pc = { disabled: false, title: 'Preventive Counseling' };
-        if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
-            pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
+        if (PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 30))) {
+            pc = { disabled: true, title: 'Preventive billed in the last 30 days' };
+        } else if (codeUsedInLastDays('99401', 60)) {
+            pc = { disabled: true, title: 'Preventive Counseling (99401) billed in the last 2 months (60-day gap)' };
         } else if (isPreventiveCounselBlockedIns(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insurance || 'this insurance'}` };
         } else if (!hasChronicDiseaseThisEncounter) {

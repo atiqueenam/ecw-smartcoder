@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.14
+// @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.14
+// @version      6.15
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,10 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.15 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
+//   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
+//   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
+//   P/C for 30 days. Same rule as El Nunu / XcellCare, now in every client.
 // 6.14 (2026-10-14) - Wellness/Annual/Same Day visit type for a FIRST-time patient
 //   (history loaded, no prior encounter) now gets new-patient 99203 instead of
 //   being corrected to an established 99213/99214 (which also deleted the
@@ -8016,8 +8020,10 @@ function __smartCoderReadVersion(fallback) {
         const hasChronicDiseaseThisEncounter = getICDRows().some(r => CHRONIC_DISEASE_ICD_CODES.has((r.code || '').toUpperCase()));
         let pc = { disabled: false, title: 'Preventive Counseling' };
         const pcBlockedInsurance = getPreventiveCounselBlockedInsurance(insurance);
-        if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
-            pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
+        if (PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 30))) {
+            pc = { disabled: true, title: 'Preventive billed in the last 30 days' };
+        } else if (codeUsedInLastDays('99401', 60)) {
+            pc = { disabled: true, title: 'Preventive Counseling (99401) billed in the last 2 months (60-day gap)' };
         } else if (pcBlockedInsurance) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${pcBlockedInsurance}` };
         } else if (!hasChronicDiseaseThisEncounter) {
