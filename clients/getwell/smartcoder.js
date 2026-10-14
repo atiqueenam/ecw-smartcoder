@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Getwell SmartCoder by ATQ v6.09
+// @name         Getwell SmartCoder by ATQ v6.10
 // @namespace    http://tampermonkey.net/
-// @version      6.09
+// @version      6.10
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.10 (2026-10-14) - Pinned eCW itemIds for the codes whose itemId is the same
+//   in all 6 scanned clients (Getwell, Hasan Sheikh, Highland, El Nunu,
+//   Bronx, Hasnayen): 32 CPT/HCPCS/visit codes (E&M 99203/99211-99215,
+//   preventive 99381-99387/99391-99397, 90471/90472, 93000, 99051, 99401,
+//   G0009, G0101, Q0091, 3017F, 3077F, 3078F, 3080F). The catalog row with
+//   exactly that itemId is used; if eCW doesn't return it, the old rule
+//   (first exact match) applies. Codes whose itemId differs by client, and
+//   all ICD codes, are unchanged. Same change: Getwell 6.10, Bronx 1.98,
+//   Hasnayen 1.47, El Nunu 1.08, Highland 1.09, Hasan Sheikh 2.13.
 // 6.09 (2026-10-12) - Vaccine admin age cutoff moved to 19 (same as XcellCare /
 //   El Nunu). 90471/90472 now apply from age 19; 90460/90461 for 18 and
 //   under (was 18+ / under 18). SL modifier for pediatric vaccines
@@ -4510,6 +4519,24 @@ function __smartCoderReadVersion(fallback) {
         }));
     }
 
+    // ---------- Common pinned eCW itemIds (all-client) ----------
+    // CPT/HCPCS/VisitCodes whose eCW itemId is IDENTICAL in all 6 scanned
+    // clients (Getwell, Hasan Sheikh, Highland, El Nunu, Bronx, Hasnayen).
+    // When one of these is pushed, the catalog row with exactly this itemId
+    // is used. If eCW doesn't return it, the old rule (first exact match)
+    // applies, so a missing entry never blocks an add. Codes whose itemId
+    // differs by client are intentionally NOT listed.
+    const ECW_COMMON_PINNED_CPT_ITEM_IDS = {
+        '3017F': '196823', '3077F': '196846', '3078F': '196847', '3080F': '196849',
+        '90471': '140689', '90472': '140690', '93000': '134644', '99051': '196761',
+        '99203': '444', '99211': '447', '99212': '448', '99213': '449',
+        '99214': '450', '99215': '451', '99381': '188181', '99382': '188182',
+        '99383': '188183', '99384': '455', '99385': '456', '99386': '457',
+        '99387': '458', '99391': '188178', '99392': '188179', '99393': '188180',
+        '99394': '459', '99395': '460', '99396': '461', '99397': '462',
+        '99401': '48479', 'G0009': '135801', 'G0101': '135822', 'Q0091': '137528'
+    };
+
     async function injLookupCPT(code, isEm = false) {
         code = injNorm(code);
         const scope = getBillingScopeForInjection();
@@ -4520,11 +4547,21 @@ function __smartCoderReadVersion(fallback) {
         // E&M: query both catalogs AT THE SAME TIME (one round-trip instead
         // of two). Same preference as before: a CPTCodes+HCPCS exact match
         // wins; VisitCodes is used only when that has none.
+        const commonPinId = ECW_COMMON_PINNED_CPT_ITEM_IDS[code];
         const [normalResults, visitResults] = await Promise.all([
             injLookupCPTCatalog(code, 'normal', scope.encounterId),
-            isEm ? injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(err => ({ err })) : Promise.resolve([])
+            (isEm || commonPinId) ? injLookupCPTCatalog(code, 'visit', scope.encounterId).catch(err => ({ err })) : Promise.resolve([])
         ]);
         const normalExact = normalResults.filter(x => injCodeText(x) === code);
+        if (commonPinId) {
+            const visitList = Array.isArray(visitResults) ? visitResults : [];
+            const pinNormal = normalExact.find(x => String(x.itemId || '').trim() === commonPinId);
+            const pinVisit = visitList.find(x => injCodeText(x) === code && String(x.itemId || '').trim() === commonPinId);
+            if (pinNormal || pinVisit) {
+                return { results: normalResults.concat(visitList), exact: [pinNormal || pinVisit], catalog: pinNormal ? 'normal' : 'visit', pinned: true };
+            }
+            console.warn(`[SmartCoder] Common pinned itemId ${commonPinId} for ${code} not returned by eCW — using the default pick.`);
+        }
         if (normalExact.length || !isEm) return { results: normalResults, exact: normalExact, catalog: 'normal' };
         if (visitResults && visitResults.err) throw visitResults.err;
         return {
@@ -4865,7 +4902,7 @@ function __smartCoderReadVersion(fallback) {
 
     // ---------- CPT resolve + prefetch (5.98) ----------
     async function injResolveCPT(code, isEm, scope, { fresh = false } = {}) {
-        const key = `${injCptYear(scope.encounterDate)}|${isEm ? 'em' : 'cpt'}|${code}`;
+        const key = `${injCptYear(scope.encounterDate)}|${ECW_COMMON_PINNED_CPT_ITEM_IDS[code] ? 'pin' + ECW_COMMON_PINNED_CPT_ITEM_IDS[code] : (isEm ? 'em' : 'cpt')}|${code}`;
         const r = await injResolveCached('cpt', key, fresh, async () => {
             const lookup = await injLookupCPT(code, isEm);
             if (!lookup.exact.length) {

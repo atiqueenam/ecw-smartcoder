@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasan Sheikh SmartCoder v2.12
+// @name         Hasan Sheikh SmartCoder v2.13
 // @namespace    http://tampermonkey.net/
-// @version      2.12
+// @version      2.13
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.13 (2026-10-14) - Pinned eCW itemIds for the codes whose itemId is the same
+//   in all 6 scanned clients (Getwell, Hasan Sheikh, Highland, El Nunu,
+//   Bronx, Hasnayen): 32 CPT/HCPCS/visit codes (E&M 99203/99211-99215,
+//   preventive 99381-99387/99391-99397, 90471/90472, 93000, 99051, 99401,
+//   G0009, G0101, Q0091, 3017F, 3077F, 3078F, 3080F). The catalog row with
+//   exactly that itemId is used; if eCW doesn't return it, the old rule
+//   (first exact match) applies. Codes whose itemId differs by client, and
+//   all ICD codes, are unchanged. Same change: Getwell 6.10, Bronx 1.98,
+//   Hasnayen 1.47, El Nunu 1.08, Highland 1.09, Hasan Sheikh 2.13.
 // 2.12 (2026-10-12) - Pinned eCW itemIds for Preventive and Office Visit
 //   codes. When Start Action / quick actions push 99381-99387,
 //   99391-99397, G0438, G0439, 99202-99205 or 99211-99215, the catalog
@@ -3627,7 +3636,11 @@ function __smartCoderReadVersion(fallback) {
         // Office visit — new patient
         '99202': '443', '99203': '444', '99204': '445', '99205': '446',
         // Office visit — established patient
-        '99211': '447', '99212': '448', '99213': '449', '99214': '450', '99215': '451'
+        '99211': '447', '99212': '448', '99213': '449', '99214': '450', '99215': '451',
+        // Common to all 6 clients (2.13)
+        '3017F': '196823', '3077F': '196846', '3078F': '196847', '3080F': '196849',
+        '90471': '140689', '90472': '140690', '93000': '134644', '99051': '196761',
+        '99401': '48479', 'G0009': '135801', 'G0101': '135822', 'Q0091': '137528'
     };
     window.__hsPinnedItemIds = HS_PINNED_CPT_ITEM_IDS;
 
