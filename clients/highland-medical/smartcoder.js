@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Highland Medical SmartCoder v1.09
+// @name         Highland Medical SmartCoder v1.10
 // @namespace    http://tampermonkey.net/
-// @version      1.09
+// @version      1.10
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.10 (2026-10-14) - Added G0438 (275969) and G0439 (275970) to the common
+//   pinned eCW itemIds (VisitCodes). If eCW doesn't return the ID, the
+//   old first-exact-match rule applies. Hasan Sheikh already pinned both.
 // 1.09 (2026-10-14) - Pinned eCW itemIds for the codes whose itemId is the same
 //   in all 6 scanned clients (Getwell, Hasan Sheikh, Highland, El Nunu,
 //   Bronx, Hasnayen): 32 CPT/HCPCS/visit codes (E&M 99203/99211-99215,
@@ -3281,7 +3284,8 @@ function __smartCoderReadVersion(fallback) {
         '99383': '188183', '99384': '455', '99385': '456', '99386': '457',
         '99387': '458', '99391': '188178', '99392': '188179', '99393': '188180',
         '99394': '459', '99395': '460', '99396': '461', '99397': '462',
-        '99401': '48479', 'G0009': '135801', 'G0101': '135822', 'Q0091': '137528'
+        '99401': '48479', 'G0009': '135801', 'G0101': '135822', 'Q0091': '137528',
+        'G0438': '275969', 'G0439': '275970'
     };
 
     async function injLookupCPT(code, isEm = false) {
