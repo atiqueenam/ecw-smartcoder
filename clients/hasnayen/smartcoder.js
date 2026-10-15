@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Hasnayen Medical SmartCoder v1.51
+// @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.51
+// @version      1.52
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,12 @@
 
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
+
+// 1.52 (2026-10-15) - Modifier 25 for 93000 moved off the 93000 row onto the E/M
+//   code, like the other 25 triggers: Auto Link no longer adds 25 to 93000;
+//   when 93000 is on the chart the 25 goes on the office-visit code (else the
+//   preventive code), first free modifier slot, never overwriting another
+//   modifier. The 93000 ICD-link priority order is unchanged.
 
 // 1.51 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
 //   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
@@ -6608,14 +6614,11 @@ function __smartCoderReadVersion(fallback) {
             .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
             .filter(Boolean);
 
-        // ---- Rule 19: if 93000 stays on the chart it gets a 25 modifier.
-        // (Its ICD-link priority order is handled by the 93000 entry in
-        // al_buildCPTRules; if none of those ICDs are present it falls
-        // through to the office-visit codes — no Z13.6 fallback.)
-        cptRows.forEach(row => {
-            const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
-            if (code === '93000') al_apply25Modifier(row);
-        });
+        // 1.52: 93000 no longer gets a 25 itself (old Rule 19). Instead it
+        // behaves like the other 25-triggers (rules 28/29): the 25 goes on
+        // the office-visit code (else the preventive code) — see below.
+        // (Its ICD-link priority order is still handled by the 93000 entry
+        // in al_buildCPTRules.)
 
         // ---- Rules 28 + 29: an immunization, or Q0091/G0101, puts a 25
         // modifier on whichever E/M code applies (office visit, else
@@ -6623,7 +6626,8 @@ function __smartCoderReadVersion(fallback) {
         // rules is enforced on the Analyze side (computeAnalysis).
         const hasImmunization = codesPresent.some(c => AL_IMMUNIZATION_CPT_CODES.has(c));
         const hasPapScreening = codesPresent.some(c => AL_PAP_SCREENING_CODES.has(c));
-        if (hasImmunization || hasPapScreening) {
+        const hasEKG = codesPresent.includes('93000');
+        if (hasImmunization || hasPapScreening || hasEKG) {
             al_apply25Modifier(al_findEMRowForModifier25(cptRows));
         }
     }
