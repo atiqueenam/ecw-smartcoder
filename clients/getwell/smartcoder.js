@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.15
+// @version      6.16
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -622,7 +622,7 @@ function __smartCoderReadVersion(fallback) {
   const MAX_HISTORY_ENCOUNTERS    = 50;
   const BUTTON_CHECK_INTERVAL_MS  = 3000;
   const PROGRESS_RENDER_THROTTLE_MS = 300;
-  const FETCH_CONCURRENCY         = 4;
+  const FETCH_CONCURRENCY         = 8;
   const FETCH_TIMEOUT_MS          = 12000;
 
   let lastUrl             = location.href;
