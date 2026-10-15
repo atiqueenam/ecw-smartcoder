@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         El Nunu Medical SmartCoder v1.11
+// @name         El Nunu Medical SmartCoder v1.12
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.12 (2026-10-15) - Preventive (PV) no longer depends on vitals. The "no vitals
+//   documented" fade now applies only to Preventive Counseling, Smoking
+//   Counseling and Obesity Counseling; PV is enabled whenever it is otherwise
+//   eligible.
 // 1.11 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
 //   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
 //   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
@@ -7129,15 +7133,15 @@ function __smartCoderReadVersion(fallback) {
             if (!ob.disabled) ob = { disabled: true, title: reason };
         }
 
-        // ---- No vitals documented: none of the four bundles apply ----
-        // Preventive/Preventive Counseling/Smoking Counseling/Obesity
-        // Counseling all require at least one vital sign (BP, weight,
-        // height, pulse, temp, resp rate, O2 sat) documented this
-        // encounter. With no vitals at all, every one of the four is
-        // faded regardless of what its own rule above would otherwise
-        // allow — this check runs last so it always wins.
+        // ---- No vitals documented: the three counseling bundles don't apply ----
+        // Preventive Counseling/Smoking Counseling/Obesity Counseling
+        // require at least one vital sign (BP, weight, height, pulse,
+        // temp, resp rate, O2 sat) documented this encounter. With no
+        // vitals at all they are faded regardless of what their own rule
+        // above would otherwise allow — this check runs last so it always
+        // wins. El Nunu 1.12: Preventive (PV) does NOT depend on vitals,
+        // so it stays governed only by its own eligibility rules above.
         if (!isVitalsDocumented(text)) {
-            pv = { disabled: true, title: "No vitals documented — Preventive can't be applied" };
             pc = { disabled: true, title: "No vitals documented — Preventive Counseling can't be applied" };
             sm = { disabled: true, title: "No vitals documented — Smoking Counseling can't be applied" };
             ob = { disabled: true, title: "No vitals documented — Obesity Counseling can't be applied" };
