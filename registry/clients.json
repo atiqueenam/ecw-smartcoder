@@ -1,10 +1,6 @@
 {
   "schemaVersion": 1,
-<<<<<<< HEAD
-  "generatedAt": "2026-10-16T04:42:47.196Z",
-=======
-  "generatedAt": "2026-10-15T10:08:30.553Z",
->>>>>>> 975f99e21cde3f606f67e1d386dbb4cd1b62c997
+  "generatedAt": "2026-10-16T04:47:01.080Z",
   "clients": [
     {
       "id": "bronx",
@@ -15,7 +11,7 @@
       ],
       "version": "2.04",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "20b886c9607ab5b5a80c275730bc6756869f23143b1a2e6c67319276511c7eb5"
+      "sha256": "ab19c5e52618daf0f96b076c2e4309a3403252f4bd5a31d9c4e2d15734440bc6"
     },
     {
       "id": "elnunu",
@@ -26,7 +22,7 @@
       ],
       "version": "1.12",
       "file": "clients/elnunu/smartcoder.js",
-      "sha256": "93dbf72329707b271e682013a5f8da24d4c5092fcf32b57a34ee2929e481aa13"
+      "sha256": "07765f7fb06204a221369e20a099f2961a7989fc388cf075a0b32eb1c2d4cb38"
     },
     {
       "id": "getwell",
@@ -35,15 +31,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-<<<<<<< HEAD
       "version": "6.17",
       "file": "clients/getwell/smartcoder.js",
       "sha256": "b51285a5d07a41822df2509ccf9025e8230865a8a203d31266b033c36cbc7007"
-=======
-      "version": "6.16",
-      "file": "clients/getwell/smartcoder.js",
-      "sha256": "17339ad2f9334d877fef23a65b9e3a6d4fb42a75066efb83d479dfbd0e1cc9ea"
->>>>>>> 975f99e21cde3f606f67e1d386dbb4cd1b62c997
     },
     {
       "id": "hasan-sheikh",
@@ -65,7 +55,7 @@
       ],
       "version": "1.53",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "fc38ae80dd128b6e88e36fe14453e17fca1bb5c05ad57a40905659c5b4ce4f07"
+      "sha256": "f0585a7d9078b2d473511e2ac7a080c1615c472439f94170f81c352296ffdfe1"
     },
     {
       "id": "highland-medical",
@@ -76,7 +66,7 @@
       ],
       "version": "1.14",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "06a75c176a5cded278df38e318e83546873eb53d39fc8383f69064b4772c6ae4"
+      "sha256": "b30da96e0ce4507c0acdf26dccb2a0967ba1d7238933ca6f27f7faf0fb776c70"
     },
     {
       "id": "xcellcare",
@@ -87,7 +77,7 @@
       ],
       "version": "1.06",
       "file": "clients/xcellcare/smartcoder.js",
-      "sha256": "a333b9a8f2deaa6491bba436bbf719e6357b1a594d159cc8f1664422ad270637"
+      "sha256": "78aa522c5869f2fc6940b2608c07c7a345cc1e29c65f62e490a4b03911dfc2e2"
     }
   ]
 }
