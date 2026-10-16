@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.16
+// @version      6.17
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,8 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.17 (2026-10-16) - United Health Care: CPT 99000 is never added and is removed if already
+//   on the chart. Same fix: all clients (Xcellcare/Elnunu already had it).
 // 6.15 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
 //   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
 //   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
@@ -3698,6 +3700,9 @@ function __smartCoderReadVersion(fallback) {
             Array.from(desired.keys()).forEach(code => {
                 if (/^G\d/i.test(code) && !UHC_GCODE_EXCEPTIONS.has(code)) desired.delete(code);
             });
+            // 99000 is never billed to UHC — never added, and (being in
+            // MANAGED_CODES) the sweep below removes it if already on chart.
+            desired.delete('99000');
         }
 
         const toAdd = [];

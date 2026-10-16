@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.52
+// @version      1.53
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,8 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.53 (2026-10-16) - United Health Care: CPT 99000 is never added and is removed if already
+//   on the chart. Same fix: all clients (Xcellcare/Elnunu already had it).
 // 1.52 (2026-10-15) - Modifier 25 for 93000 moved off the 93000 row onto the E/M
 //   code, like the other 25 triggers: Auto Link no longer adds 25 to 93000;
 //   when 93000 is on the chart the 25 goes on the office-visit code (else the
@@ -3186,6 +3188,12 @@ function __smartCoderReadVersion(fallback) {
             currentRows.forEach(r => {
                 if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
+                }
+            });
+            // 99000 is never billed to UHC — remove if already on the chart.
+            currentRows.forEach(r => {
+                if (r.code === '99000' && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — 99000 not billed for this payer' });
                 }
             });
         }

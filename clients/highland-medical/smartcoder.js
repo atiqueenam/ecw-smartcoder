@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.14 (2026-10-16) - United Health Care: CPT 99000 is never added and is removed if already
+//   on the chart. Same fix: all clients (Xcellcare/Elnunu already had it).
 // 1.13 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
 //   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
 //   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
@@ -2577,6 +2579,12 @@ function __smartCoderReadVersion(fallback) {
             currentRows.forEach(r => {
                 if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
+                }
+            });
+            // 99000 is never billed to UHC — remove if already on the chart.
+            currentRows.forEach(r => {
+                if (r.code === '99000' && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — 99000 not billed for this payer' });
                 }
             });
         }
