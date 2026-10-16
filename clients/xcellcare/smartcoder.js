@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.06
+// @version      1.07
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.07 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
+//   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
+//   present (claim rejections). Same rules ported to all clients.
 // 1.06 (2026-10-14) - Medicare 365-day preventive rule refined: a prior preventive
 //   counts when it was billed under ANY Medicare plan (e.g. Medicare ->
 //   Healthfirst Medicare) or an unknown payer, so changing Medicare plans no
@@ -2260,6 +2263,7 @@ function __smartCoderReadVersion(fallback) {
                 rawCPTCodeSet.has('G0447') ||
                 rawCPTCodeSet.has('99406') ||
                 isTelevisitForWeekend ||
+                /well[s-]*care/i.test(insurance || '') || // Wellcare: no 99051
                 isUHCFamilyForWeekend ||
                 hasHighLevelCode;
             if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
@@ -2615,6 +2619,17 @@ function __smartCoderReadVersion(fallback) {
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason });
             }
         });
+
+        // Wellcare: CPT 99051 must not be used (claim rejections) — remove it
+        // if it's already on the chart. Also blocked from being added by the
+        // weekend rule above.
+        if (/well[s-]*care/i.test(insurance || '')) {
+            currentRows.forEach(r => {
+                if (r.code === '99051' && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Wellcare — 99051 not allowed for this payer (claim rejections)' });
+                }
+            });
+        }
 
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/

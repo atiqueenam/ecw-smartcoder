@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.17
+// @version      6.18
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,8 +12,9 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
-// 6.17 (2026-10-16) - United Health Care: CPT 99000 is never added and is removed if already
-//   on the chart. Same fix: all clients (Xcellcare/Elnunu already had it).
+// 6.18 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
+//   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
+//   present (claim rejections). Same rules ported to all clients.
 // 6.15 (2026-10-14) - Preventive Counseling (99401) needs a 2-month (60-day) gap since
 //   the last 99401, for EVERY payer (was 30 days; Healthfirst-only 60 days in
 //   Hasan Sheikh / Hasnayen). A Preventive visit (993xx/G0438/G0439) still blocks
@@ -3304,6 +3305,7 @@ function __smartCoderReadVersion(fallback) {
                 rawCPTCodesNow.includes('G0447') ||
                 rawCPTCodeSet.has('99406') ||
                 isTelevisitForWeekend ||
+                /well[s-]*care/i.test(insurance || '') || // Wellcare: no 99051
                 isUHCFamilyForWeekend ||
                 hasHighLevelCode;
             if (!weekendBlocked) desired.set('99051', 'Weekend/holiday visit, no blocking code or televisit present');
@@ -3848,6 +3850,17 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
+        // Wellcare: CPT 99051 must not be used (claim rejections) — remove it
+        // if it's already on the chart. Also blocked from being added by the
+        // weekend rule above.
+        if (/well[s-]*care/i.test(insurance || '')) {
+            currentRows.forEach(r => {
+                if (r.code === '99051' && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Wellcare — 99051 not allowed for this payer (claim rejections)' });
+                }
+            });
+        }
+
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/
         // G0442) — this payer doesn't use G-codes at all, EXCEPT
@@ -3856,6 +3869,12 @@ function __smartCoderReadVersion(fallback) {
             currentRows.forEach(r => {
                 if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
+                }
+            });
+            // UHC rejects these as non-covered — remove if already on the chart.
+            currentRows.forEach(r => {
+                if (['99000', '99497', 'Q0091'].includes(r.code) && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — ' + r.code + ' rejected as non-covered' });
                 }
             });
         }
