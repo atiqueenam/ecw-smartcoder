@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.18
+// @version      6.19
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,8 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.19 (2026-10-19) - Getwell only: removed the rule that forced modifier 59 onto CPT 96372
+//   in Auto Link and Claim Link (5.7). 96372 no longer gets a 59 modifier.
 // 6.18 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
 //   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
 //   present (claim rejections). Same rules ported to all clients.
@@ -6750,42 +6752,6 @@ function __smartCoderReadVersion(fallback) {
         tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
     }
 
-    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
-    // injection) always needs modifier 59 (distinct procedural service)
-    // to avoid a bundling denial. Same Angular-scope-with-DOM-fallback
-    // mechanics as the 95 modifier above. Runs as part of Auto Link.
-    function al_apply59ModifierFor96372() {
-        const tbody = document.querySelector("#billingTbl4 tbody");
-        if (!tbody) return;
-        const rows = Array.from(tbody.querySelectorAll("tr"));
-        rows.forEach(row => {
-            const cptCode = row.querySelector("td:nth-child(2)")?.textContent.trim();
-            if (cptCode !== "96372") return;
-            try {
-                const scope = angular.element(row).scope();
-                if (scope) {
-                    scope.$applyAsync(() => {
-                        if (scope.cpt) scope.cpt.mod1 = "59";
-                    });
-                } else {
-                    const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
-                                     row.querySelector('input[name="mod1"]') ||
-                                     row.querySelector('input[id*="mod1"]');
-                    if (modInput) {
-                        modInput.focus();
-                        modInput.value = "59";
-                        modInput.dispatchEvent(new Event("input", { bubbles: true }));
-                        modInput.dispatchEvent(new Event("change", { bubbles: true }));
-                        modInput.blur();
-                    }
-                }
-            } catch (e) {
-                console.error("59 modifier error:", cptCode, e);
-            }
-        });
-        tbody.dispatchEvent(new Event("mouseup", { bubbles: true }));
-    }
-
     // G0447 modifier rule (Getwell, 5.90). The separate "ECW Sorting by
     // HackeRudro" extension puts 25 on the office-visit E&M (and on the
     // preventive code, when one is present) whenever G0447 is on the chart,
@@ -6929,7 +6895,6 @@ function __smartCoderReadVersion(fallback) {
                 al_handleUnlistedCPTs(cptRows);
                 al_applySLModifierForPedsVaccines();
                 al_apply95ModifierForTelevisit();
-                al_apply59ModifierFor96372();
                 al_applyG0447ModifierRule();
                 al_apply25ModifierFor99211();
                 al_alertDuplicateICDStart(icdRows);
@@ -7742,18 +7707,6 @@ function __smartCoderReadVersion(fallback) {
         if (claimPOSInput) cl_setInputValue(claimPOSInput, '10');
     }
 
-    // 96372 modifier: CPT 96372 (therapeutic/prophylactic/diagnostic
-    // injection) always needs modifier 59 (distinct procedural service)
-    // to avoid a bundling denial. Runs as part of Claim Link.
-    function cl_apply59ModifierFor96372(cptRows) {
-        cptRows.forEach(row => {
-            const code = cl_getCPTCode(row);
-            if (code !== '96372') return;
-            const modInput = cl_getCPTMod1Input(row);
-            if (modInput) cl_setInputValue(modInput, '59');
-        });
-    }
-
     // G0447 modifier rule, Claim Link side — same logic as
     // al_applyG0447ModifierRule (see comment there).
     function cl_applyG0447ModifierRule(cptRows) {
@@ -7923,7 +7876,6 @@ function __smartCoderReadVersion(fallback) {
         cl_checkForFluVaccineCPTs(cptRows);
         cl_checkMedicarePreventiveCPT(cptRows);
         cl_checkMedicaidCPTCount(cptRows);
-        cl_apply59ModifierFor96372(cptRows);
         cl_applyG0447ModifierRule(cptRows);
         cl_apply25ModifierFor99211(cptRows);
         cl_applyHealthfirstTelehealthPOS(cptRows);
