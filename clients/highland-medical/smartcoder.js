@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.17 (2026-10-19) - Highland only: flu product replacement. Fluad old 90694 -> 90653 (Fluad aIIV3),
+//   Flucelvax old 90674 -> 90661 (Flucelvax ccIIV3). Old code is deleted and the new one added in the
+//   same Analyze run; vaccine-admin planning (90471/G0008/etc.) counts the new code; 90653 added to
+//   the component map, flu set, Z23 link rules (Auto/Claim Link) and the peds SL modifier list.
 // 1.16 (2026-10-19) - 99214 chronic-dx review: chronic dx billed with 99214 in the prior 30 days are
 //   excluded from the 99214 eligibility count (99213/other-visit dx stay eligible); existing
 //   client criteria unchanged. Same rule: Getwell/Hasan/Highland/Xcellcare/Elnunu (not Bronx/Hasnayen).
@@ -1426,14 +1430,19 @@ function __smartCoderReadVersion(fallback) {
         // Influenza (all single-component)
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
-        '90687': 1, '90688': 1, '90756': 1
+        '90687': 1, '90688': 1, '90756': 1,
+        '90653': 1
     };
     // COVID vaccines are never counted via 90460-90474 — always 90480,
     // for every patient regardless of age or payer.
     const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
     // Medicare-only overrides (no age limit) — these use their own G-codes
     // instead of the standard 90460-90474 scheme, for Medicare patients only.
-    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
+    const FLU_VACCINE_CODES = new Set(['90653', '90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
+    // Highland flu product replacements: the old code is deleted and the new
+    // one added in its place. Fluad old 90694 -> Fluad (aIIV3) 90653;
+    // Flucelvax old 90674 -> Flucelvax (ccIIV3) 90661.
+    const FLU_PRODUCT_REPLACEMENTS = { '90694': '90653', '90674': '90661' };
     const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
     const HEPB_VACCINE_CODES = new Set(['90740', '90743', '90744', '90746', '90747']);
     // Every admin code this feature manages — used to find stale/wrong ones.
@@ -2965,10 +2974,32 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
+        // ---- Flu product replacement: 90694 -> 90653, 90674 -> 90661 ----
+        // Deleting the old code adds the new one in the same run (unless the
+        // new code is already on the chart).
+        Object.entries(FLU_PRODUCT_REPLACEMENTS).forEach(([oldCode, newCode]) => {
+            const oldRow = currentRows.find(r => r.code === oldCode);
+            if (!oldRow) return;
+            if (!toDelete.some(d => d.code === oldCode)) {
+                toDelete.push({ code: oldCode, row: oldRow.row, kind: 'cpt', reason: `${oldCode} is outdated — replaced with ${newCode}` });
+            }
+            if (!currentCodes.has(newCode) && !toAdd.some(a => a.code === newCode)) {
+                toAdd.push({ code: newCode, reason: `Replaces outdated ${oldCode}`, kind: 'cpt' });
+            }
+        });
+
+        // ---- Vaccine administration coding ----
         {
             const isMedicareForVax = isAnyMedicareIns(insurance) || isVNSChoiceIns(insurance);
-            const vaccinePlan = computeVaccineAdminPlan(currentRows, age, isMedicareForVax);
+            // Plan against the replacement codes so the admin code is right
+            // in this same run (old product codes counted as their new code).
+            const vaxPlanRows = [];
+            currentRows.forEach(r => {
+                const newCode = FLU_PRODUCT_REPLACEMENTS[r.code];
+                if (newCode && currentCodes.has(newCode)) return; // new code already counted via its own row
+                vaxPlanRows.push(newCode ? { ...r, code: newCode } : r);
+            });
+            const vaccinePlan = computeVaccineAdminPlan(vaxPlanRows, age, isMedicareForVax);
             const plannedCodes = new Set(vaccinePlan.map(p => p.code));
 
             vaccinePlan.forEach(p => {
@@ -4852,6 +4883,7 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -5398,7 +5430,7 @@ function __smartCoderReadVersion(fallback) {
         if (age === null || age >= 19) return;
         const slModifierCPTs = new Set([
             "90380","90381","90382","90480","90589","90611","90619","90620","90621","90622","90623","90624","90633",
-            "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
+            "90647","90648","90651","90653","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
             "91322","91323","96380","96381"
@@ -6044,6 +6076,7 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
