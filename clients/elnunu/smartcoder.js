@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         El Nunu Medical SmartCoder v1.12
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.14 (2026-10-19) - 99214 chronic-dx review: chronic dx billed with 99214 in the prior 30 days are
+//   excluded from the 99214 eligibility count (99213/other-visit dx stay eligible); existing
+//   client criteria unchanged. Same rule: Getwell/Hasan/Highland/Xcellcare/Elnunu (not Bronx/Hasnayen).
 // 1.13 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
 //   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
 //   present (claim rejections). Same rules ported to all clients.
@@ -1230,6 +1233,44 @@ function __smartCoderReadVersion(fallback) {
                 ...(enc.procedure_codes || [])
             ].map(c => (c.code || "").toUpperCase());
             return codes.includes(upperCode);
+        });
+    }
+
+    // 99214 chronic-dx review: before judging 99214 eligibility, drop from
+    // the dx list every CHRONIC diagnosis (CHRONIC_DISEASE_ICD_CODES) that
+    // was billed on a prior encounter with CPT 99214 within the last 30
+    // days (current encounter excluded). Chronic dx last billed with 99213
+    // or any other visit code stay in. Affects only the 99214 eligibility
+    // count — never the dx on the claim. History not loaded -> no exclusion.
+    // Prior encounters billed under a different payer than the current one
+    // don't count (same carve-out as the existing 99214 history checks).
+    function excludeChronicDxBilledOn99214(dxRows, days = 30) {
+        const api = window.__ecwPatientHistory;
+        const data = api && api.getData ? api.getData() : null;
+        if (!data || !data.length) return dxRows;
+        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : null;
+        if (!currentTs) return dxRows;
+        const billedOn99214 = new Set();
+        data.forEach(enc => {
+            if (enc.encounter_date === currentDosStr) return;
+            const ts = parseUSDateSnap(enc.encounter_date);
+            if (!ts) return;
+            const diffDays = (currentTs - ts) / 86400000;
+            if (diffDays < 0 || diffDays > days) return;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return;
+            const is99214 = [...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
+                .some(c => (c.code || "").toUpperCase() === '99214');
+            if (!is99214) return;
+            (enc.assessments || []).forEach(a => {
+                const c = (a.code || "").toUpperCase();
+                if (c) billedOn99214.add(c);
+            });
+        });
+        if (!billedOn99214.size) return dxRows;
+        return dxRows.filter(e => {
+            const c = e.code.toUpperCase();
+            return !(CHRONIC_DISEASE_ICD_CODES.has(c) && billedOn99214.has(c));
         });
     }
 
@@ -2989,16 +3030,17 @@ function __smartCoderReadVersion(fallback) {
                     ovCode = '99213';
                     ovReason = 'Televisit — 99213 (televisit modifier applied by Auto Link)';
                 } else {
-                    const chronicCount = qualifyingDx.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
-                    const eligible99214 = qualifyingDx.length >= 4 && chronicCount >= 1;
-                    const repeat99214 = eligible99214 && same99214DiagnosisInLastMonth(qualifyingDx[0]?.code);
+                    const qualifyingDx99214 = excludeChronicDxBilledOn99214(qualifyingDx);
+                    const chronicCount = qualifyingDx99214.filter(e => CHRONIC_DISEASE_ICD_CODES.has(e.code.toUpperCase())).length;
+                    const eligible99214 = qualifyingDx99214.length >= 4 && chronicCount >= 1;
+                    const repeat99214 = eligible99214 && same99214DiagnosisInLastMonth(qualifyingDx99214[0]?.code);
                     if (eligible99214 && !repeat99214) {
                         ovCode = '99214';
-                        ovReason = `${qualifyingDx.length} qualifying dx incl. ${chronicCount} chronic — 99214`;
+                        ovReason = `${qualifyingDx99214.length} qualifying dx incl. ${chronicCount} chronic — 99214`;
                     } else {
                         ovCode = '99213';
                         ovReason = eligible99214
-                            ? `99214 criteria met but 99214 was billed in the last month for the same diagnosis (${qualifyingDx[0]?.code}) — 99213`
+                            ? `99214 criteria met but 99214 was billed in the last month for the same diagnosis (${qualifyingDx99214[0]?.code}) — 99213`
                             : 'Established visit — 99213 (default)';
                     }
                 }
