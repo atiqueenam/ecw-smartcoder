@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.08
+// @version      1.09
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.09 (2026-10-19) - 90686 and 90688 are replaced with 90656 in all clients (ported from Bronx/Hasnayen).
 // 1.08 (2026-10-19) - 99214 chronic-dx review: chronic dx billed with 99214 in the prior 30 days are
 //   excluded from the 99214 eligibility count (99213/other-visit dx stay eligible); existing
 //   client criteria unchanged. Same rule: Getwell/Hasan/Highland/Xcellcare/Elnunu (not Bronx/Hasnayen).
@@ -3055,7 +3056,18 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
+        // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
+        ['90686', '90688'].forEach(oldCode => {
+            const row = currentRows.find(r => r.code === oldCode);
+            if (row && !toDelete.some(d => d.code === oldCode)) {
+                toDelete.push({ code: oldCode, row: row.row, kind: 'cpt', reason: 'Replaced with 90656' });
+            }
+        });
+        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '90686' || r.code === '90688')) {
+            toAdd.push({ code: '90656', reason: 'Replaces 90686/90688', kind: 'cpt' });
+        }
+
+        // ---- Vaccine administration coding ----
         {
             const isMedicareForVax = isAnyMedicareIns(insurance) || isVNSChoiceIns(insurance);
             const vaccinePlan = computeVaccineAdminPlan(currentRows, age, isMedicareForVax);

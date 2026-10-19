@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.18 (2026-10-19) - 90686 and 90688 are replaced with 90656 in all clients (ported from Bronx/Hasnayen).
 // 1.17 (2026-10-19) - Highland only: flu product replacement. Fluad old 90694 -> 90653 (Fluad aIIV3),
 //   Flucelvax old 90674 -> 90661 (Flucelvax ccIIV3). Old code is deleted and the new one added in the
 //   same Analyze run; vaccine-admin planning (90471/G0008/etc.) counts the new code; 90653 added to
@@ -2987,6 +2988,17 @@ function __smartCoderReadVersion(fallback) {
                 toAdd.push({ code: newCode, reason: `Replaces outdated ${oldCode}`, kind: 'cpt' });
             }
         });
+
+        // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
+        ['90686', '90688'].forEach(oldCode => {
+            const row = currentRows.find(r => r.code === oldCode);
+            if (row && !toDelete.some(d => d.code === oldCode)) {
+                toDelete.push({ code: oldCode, row: row.row, kind: 'cpt', reason: 'Replaced with 90656' });
+            }
+        });
+        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '90686' || r.code === '90688')) {
+            toAdd.push({ code: '90656', reason: 'Replaces 90686/90688', kind: 'cpt' });
+        }
 
         // ---- Vaccine administration coding ----
         {

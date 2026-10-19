@@ -3,7 +3,7 @@
   "name": "Hasan Sheikh",
   "siteId": "nyshpyapp",
   "hostnames": ["nyshpyapp.eclinicalweb.com"],
-  "version": "2.19",
+  "version": "2.20",
   "entry": "smartcoder.js",
   "enabled": true
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasan Sheikh SmartCoder v2.16
 // @namespace    http://tampermonkey.net/
-// @version      2.19
+// @version      2.20
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.20 (2026-10-19) - 90686 and 90688 are replaced with 90656 in all clients (Hasan Sheikh: fixed typo '96686' so 90686 is now caught).
 // 2.19 (2026-10-19) - 99214 chronic-dx review: chronic dx billed with 99214 in the prior 30 days are
 //   excluded from the 99214 eligibility count (99213/other-visit dx stay eligible); existing
 //   client criteria unchanged. Same rule: Getwell/Hasan/Highland/Xcellcare/Elnunu (not Bronx/Hasnayen).
@@ -2420,7 +2421,7 @@ function __smartCoderReadVersion(fallback) {
 
         // Raw CPT codes currently on the chart — read early so preventive
         // detection, the age-based correction-only codes, and the
-        // 96686/90688→90656 swap can all see what's already there.
+        // 90686/90688→90656 swap can all see what's already there.
         const rawCPTCodesNow = getCPTRows()
             .map(r => (r.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase())
             .filter(Boolean);
@@ -3289,15 +3290,15 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // ---- 96686 / 90688 → 90656 replacement (rule 13) ----
-        ['96686', '90688'].forEach(oldCode => {
+        // ---- 90686 / 90688 → 90656 replacement (rule 13) ----
+        ['90686', '90688'].forEach(oldCode => {
             const row = currentRows.find(r => r.code === oldCode);
             if (row && !toDelete.some(d => d.code === oldCode)) {
                 toDelete.push({ code: oldCode, row: row.row, kind: 'cpt', reason: 'Replaced with 90656' });
             }
         });
-        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '96686' || r.code === '90688')) {
-            toAdd.push({ code: '90656', reason: 'Replaces 96686/90688', kind: 'cpt' });
+        if (!currentCodes.has('90656') && currentRows.some(r => r.code === '90686' || r.code === '90688')) {
+            toAdd.push({ code: '90656', reason: 'Replaces 90686/90688', kind: 'cpt' });
         }
 
         // ---- Vaccine administration coding ----
