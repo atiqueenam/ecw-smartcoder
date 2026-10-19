@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.05
+// @version      2.06
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.06 (2026-10-19) - CPT G0506 and 99490 are always deleted if present (all payers).
 // 2.05 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
 //   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
 //   present (claim rejections). Same rules ported to all clients.
@@ -3182,6 +3183,14 @@ function __smartCoderReadVersion(fallback) {
                 }
             });
         }
+
+        // Bronx Health: G0506 and 99490 are never billed — always delete if
+        // present, for every payer.
+        currentRows.forEach(r => {
+            if (['G0506', '99490'].includes(r.code) && !toDelete.some(d => d.row === r.row)) {
+                toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: r.code + ' is never billed — always deleted if present' });
+            }
+        });
 
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/
