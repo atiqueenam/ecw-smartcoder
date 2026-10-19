@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-19T06:48:07.840Z",
+  "generatedAt": "2026-10-19T07:00:58.397Z",
   "clients": [
     {
       "id": "bronx",
@@ -64,9 +64,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.16",
+      "version": "1.17",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "e7156db7606eaccd06a47de806cc8c00ebb20837e3ff4a52fad04d221bbb6bf7"
+      "sha256": "f03ca132402276744e682956ed85b7aa5650d1ce19f8c080da712217abaac893"
     },
     {
       "id": "xcellcare",
