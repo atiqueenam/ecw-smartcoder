@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.20
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.20 (2026-10-22) - Highland only: "NY State Medicaid" (also NYS / New York State Medicaid) is treated
+//   as Medicaid by isMedicaidOrMedicareIns, so every Medicaid rule using it (e.g. no G0444/G0442) applies.
 // 1.19 (2026-10-22) - Highland only: G0444 (depression) / G0442 (alcohol) no longer need a preventive
 //   visit. Whenever the screening is documented and the code wasn't billed earlier in the running
 //   (DOS) year, it is added (once/year) subject to the existing insurance rules (never Medicaid/
@@ -1029,7 +1031,9 @@ function __smartCoderReadVersion(fallback) {
         // MetroPlus is its own distinct payer (G0444/G0442 ARE billable for
         // it) even though it's administratively Medicaid — never exclude it.
         if (/metro\s*plus/i.test(name)) return false;
-        return /^\s*medicaid\b/i.test(name) || /^\s*medicare\b/i.test(name);
+        // NY State Medicaid (also "NYS Medicaid", "New York State Medicaid")
+        // counts as Medicaid.
+        return /^\s*((ny|nys|new\s+york)\s+(state\s+)?)?medicaid\b/i.test(name) || /^\s*medicare\b/i.test(name);
     }
 
     function isUHCInsurance(insurance) {
