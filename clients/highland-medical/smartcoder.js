@@ -15,7 +15,9 @@
 //   visit. Whenever the screening is documented and the code wasn't billed earlier in the running
 //   (DOS) year, it is added (once/year) subject to the existing insurance rules (never Medicaid/
 //   Medicare/UHC, age gates). The "no preventive visit -> delete" rule is removed; the already-billed-
-//   this-year delete stays. Z13.31/Z13.9 bundle now counts G0444/G0442 on the chart regardless of PV.
+//   this-year delete stays. Z13.31/Z13.9 and the positive/negative result
+//   codes (G8510/G8431/G9622/3016F) are tied to the screening being performed, not to the once-a-year
+//   G0444/G0442, so they stay every time (UHC excepted, as before).
 // 1.18 (2026-10-19) - 90686 and 90688 are replaced with 90656 in all clients (ported from Bronx/Hasnayen).
 // 1.17 (2026-10-19) - Highland only: flu product replacement. Fluad old 90694 -> 90653 (Fluad aIIV3),
 //   Flucelvax old 90674 -> 90661 (Flucelvax ccIIV3). Old code is deleted and the new one added in the
@@ -2525,8 +2527,15 @@ function __smartCoderReadVersion(fallback) {
         const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
         const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
         const screeningCptCounts = c => desired.has(c) || currentCodes.has(c);
-        const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(screeningCptCounts);
-        const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(screeningCptCounts);
+        // Z13.31/Z13.9 follow the screening itself (positive/negative result
+        // codes), NOT the once-a-year G0444/G0442 — so whenever the screening
+        // was performed they are kept/added every time, even if G0444/G0442
+        // was already billed this year (and so isn't added). UHC excepted
+        // (no G-codes at all -> no bundle).
+        const depressionScreened = !isUHC && age >= 12 && hasDep !== null;
+        const alcoholScreened = !isUHC && age >= 18 && hasAlc !== null;
+        const hasDepressionScreeningCpt = depressionScreened || DEPRESSION_SCREENING_CPTS.some(screeningCptCounts);
+        const hasAlcoholScreeningCpt = alcoholScreened || ALCOHOL_SCREENING_CPTS.some(screeningCptCounts);
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
         if (age >= 12 && hasDep !== null && hasDepressionScreeningCpt && !currentICDCodesForScreening.includes('Z13.31')) {
             toAdd.push({ code: 'Z13.31', reason: 'Depression screening documented', kind: 'icd' });
