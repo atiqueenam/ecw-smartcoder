@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.19 (2026-10-22) - Highland only: G0444 (depression) / G0442 (alcohol) no longer need a preventive
+//   visit. Whenever the screening is documented and the code wasn't billed earlier in the running
+//   (DOS) year, it is added (once/year) subject to the existing insurance rules (never Medicaid/
+//   Medicare/UHC, age gates). The "no preventive visit -> delete" rule is removed; the already-billed-
+//   this-year delete stays. Z13.31/Z13.9 bundle now counts G0444/G0442 on the chart regardless of PV.
 // 1.18 (2026-10-19) - 90686 and 90688 are replaced with 90656 in all clients (ported from Bronx/Hasnayen).
 // 1.17 (2026-10-19) - Highland only: flu product replacement. Fluad old 90694 -> 90653 (Fluad aIIV3),
 //   Flucelvax old 90674 -> 90661 (Flucelvax ccIIV3). Old code is deleted and the new one added in the
@@ -2463,13 +2468,11 @@ function __smartCoderReadVersion(fallback) {
         // MANAGED_CODES so any already present are never deleted either.
 
         // ---- Annual screening G-codes: G0444 (depression), G0442 (alcohol) ----
-        // Highland: ONLY when a preventive visit code (99381-99397,
-        // G0438/G0439) is on this chart and its PV bundle isn't faded
-        // (hasPreventiveVisit). No preventive visit -> never added, and
-        // any G0444/G0442 already on the chart is deleted further below.
-        // Still skipped for Medicaid/Medicare/UHC and gated to once/year.
-        // Rule 19 age gates apply here too.
-        if (hasPreventiveVisit && annualGCodesEligible(insurance)) {
+        // Highland: whenever the screening was done (hasDep/hasAlc) and the
+        // code wasn't already billed this calendar year — NO preventive
+        // visit needed. Still skipped for Medicaid/Medicare/UHC and gated
+        // to once/year. Rule 19 age gates apply here too.
+        if (annualGCodesEligible(insurance)) {
             const dosYear = getCurrentDosYear();
             if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
                 desired.set('G0444', 'Annual depression screening (once/year)');
@@ -2521,11 +2524,7 @@ function __smartCoderReadVersion(fallback) {
         // itself. ICD and CPT move together, never one without the other.
         const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
         const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
-        // Without a preventive visit, G0444/G0442 are deleted below, so they
-        // must not count as the CPT that keeps Z13.31/Z13.9 on the chart.
-        const ANNUAL_GCODES_NEED_PREVENTIVE = ['G0444', 'G0442'];
-        const screeningCptCounts = c => desired.has(c) ||
-            (currentCodes.has(c) && (hasPreventiveVisit || !ANNUAL_GCODES_NEED_PREVENTIVE.includes(c)));
+        const screeningCptCounts = c => desired.has(c) || currentCodes.has(c);
         const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(screeningCptCounts);
         const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(screeningCptCounts);
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
@@ -2942,18 +2941,7 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // ---- G0444/G0442: no preventive visit on this chart -> delete ----
-        // Highland bills the annual depression/alcohol screening G-codes
-        // only together with a preventive visit. Excluded from
-        // MANAGED_CODES, so this is the path that removes them.
-        if (!hasPreventiveVisit) {
-            ['G0444', 'G0442'].forEach(code => {
-                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
-                    const row = getCPTRowByCode(code);
-                    if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} only billed with a preventive visit — no preventive visit on this chart` });
-                }
-            });
-        }
+        // (Highland 1.19: no preventive-visit requirement for G0444/G0442.)
 
         // ---- G0444/G0442: already billed this calendar year -> delete ----
         // Mirrors the add rule above (only added when NOT already billed
