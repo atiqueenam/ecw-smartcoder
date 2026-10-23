@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.08
+// @version      2.09
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.09 (2026-10-23) - Bronx only: depression screening (G8510/G8431, Dep chip, Z13.31) is read ONLY from the
+//   structured purple "depression screening" PHQ widget. Free-text note paragraphs (e.g. "PHQ 9 score 4")
+//   and other widgets' "Total Score" (AUDIT etc.) are no longer counted. The widget is also its own
+//   screening label now, so its Total Score can't glue onto the alcohol section before it. No
+//   "depression screening" section on the note = no screening done (no fallback).
 // 2.08 (2026-10-23) - Bronx only: long Chief Complaint in the panel is collapsed to ~3 lines with a See more / See less toggle.
 // 2.07 (2026-10-23) - Every row in the Proposed changes preview (To add / To remove) has a checkbox.
 //   Unchecking a code skips it: Start Action neither adds nor deletes it (the recheck pass skips it
@@ -1609,7 +1614,13 @@ function __smartCoderReadVersion(fallback) {
     // the false positives/negatives reported on this client). Anchoring on
     // the *next* known label instead means a section's content can never
     // run past where the next real category actually begins.
-    const SCREENING_LABEL_RE = /(Tobacco Use|Drugs?\/Alcohol|Alcohol|Tobacco|Social Determinants|Misc|Sexual Hx|Health Promotion and Disease Prevention|Tobacco Control \(Standard\)|PRAPARE)\s*:\s*(?:\(([^)]*)\)\s*:)?/g;
+    // 2.09: the purple "depression screening" PHQ widget is emitted by
+    // extractStructuredScreeningText() under its own unique label
+    // (DEP_WIDGET_LABEL) so its "Total Score" can't glue onto the section
+    // before it, and a free-text "Depression Screening:" heading inside
+    // another widget can never be mistaken for it.
+    const DEP_WIDGET_LABEL = 'Depression Screening Widget';
+    const SCREENING_LABEL_RE = /(Tobacco Use|Drugs?\/Alcohol|Alcohol|Tobacco|Social Determinants|Misc|Sexual Hx|Health Promotion and Disease Prevention|Tobacco Control \(Standard\)|PRAPARE|Depression Screening Widget)\s*:\s*(?:\(([^)]*)\)\s*:)?/g;
 
     function extractScreeningSections(text) {
         if (!text) return [];
@@ -1673,6 +1684,7 @@ function __smartCoderReadVersion(fallback) {
             const link = clone.querySelector('.cattablink');
             if (link) {
                 label = (link.textContent || "").replace(/\s+/g, " ").trim();
+                if (/^depression screening:?$/i.test(label)) label = DEP_WIDGET_LABEL;
                 if (label && !/:$/.test(label)) label += ":";
             }
             clone.querySelectorAll('.leftPaneData, .cattablink').forEach(el => el.remove());
@@ -1833,11 +1845,6 @@ function __smartCoderReadVersion(fallback) {
     function extractClinicalFlags(text) {
         const hpiText = text;
 
-        const depPresent = /Depression Screening|PHQ-?\d/i.test(hpiText);
-        const depScoreMatches = [...hpiText.matchAll(/Total\s+Score\s+(\d+)/gi)];
-        const depScores = depScoreMatches.map(m => Number(m[1]));
-        const hasDep = depPresent ? (depScores.length ? depScores.every(s => s === 0) : null) : null;
-
         // Prefer the structured screening-widget text (freetext narrative
         // stripped out) whenever it's available — see
         // extractStructuredScreeningText() above. Falls back to a plain
@@ -1845,6 +1852,18 @@ function __smartCoderReadVersion(fallback) {
         // all (e.g. a manually dictated "Social History:" paragraph).
         const structuredText = getScreeningText();
         const sections = extractScreeningSections(structuredText);
+
+        // 2.09: depression is read ONLY from the structured (purple)
+        // "depression screening" PHQ widget. Free-text note sections (e.g. a
+        // black "Depression Screening / PHQ 9 score 4" paragraph) and other
+        // widgets' "Total Score" (AUDIT, etc.) used to be scanned across the
+        // whole note and could flip the result.
+        const depSection = sections.find(s => s.label === DEP_WIDGET_LABEL);
+        // No "depression screening" section = no screening done (no fallback).
+        const depScores = depSection
+            ? [...depSection.content.matchAll(/Total\s+Score\s*:?\s*(\d+)/gi)].map(m => Number(m[1]))
+            : [];
+        const hasDep = depScores.length ? depScores.every(s => s === 0) : null;
 
         let hasTob = evaluateTobacco(sections);
         let hasAlc = evaluateAlcohol(sections);
