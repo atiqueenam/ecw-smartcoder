@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.22
+// @version      6.23
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,10 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.23 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
+//   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
+//   The P/C, SM and OB quick-action buttons are disabled for this payer.
+//   Same rule in all clients.
 // 6.22 (2026-10-23) - Getwell only: every row in the Proposed changes preview (To add / To remove)
 //   has a checkbox. Unchecking a code skips it — Start Action neither adds nor deletes it (the
 //   recheck pass skips it too); all other codes run normally. Skips last for the current Analyze only.
@@ -4241,6 +4245,21 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
+        // Healthfirst Medicaid: G0444/G0442/99401/99406/G0447/G0136 are not
+        // billed — dropped from this run's adds and removed if already on the
+        // chart. Runs last so it wins over every add rule above.
+        if (isHealthfirst && /medicaid/i.test(insurance)) {
+            const HF_MEDICAID_REMOVE_CPTS = new Set(['G0444', 'G0442', '99401', '99406', 'G0447', 'G0136']);
+            for (let i = toAdd.length - 1; i >= 0; i--) {
+                if (toAdd[i].kind !== 'icd' && HF_MEDICAID_REMOVE_CPTS.has(String(toAdd[i].code).toUpperCase())) toAdd.splice(i, 1);
+            }
+            currentRows.forEach(r => {
+                if (HF_MEDICAID_REMOVE_CPTS.has(r.code) && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Healthfirst Medicaid — ' + r.code + ' not billed for this payer' });
+                }
+            });
+        }
+
         return { toAdd, toDelete, insurance, bp, bmi, medsPresent, isHealthfirst, isMedicareInsurance, cdssStatus: cdssStatusThisRun };
     }
 
@@ -8156,6 +8175,15 @@ function __smartCoderReadVersion(fallback) {
             pc = { disabled: true, title: tcmReason };
             sm = { disabled: true, title: tcmReason };
             ob = { disabled: true, title: tcmReason };
+        }
+
+        // Healthfirst Medicaid: 99401 / 99406 / G0447 are not billed, so the
+        // P/C, SM and OB quick actions are blocked (Analyze also removes them).
+        if (insurance && /^health[\s-]*first\b/i.test(insurance.trim()) && /medicaid/i.test(insurance)) {
+            const hfReason = 'Healthfirst Medicaid — 99401/99406/G0447 not billed for this payer';
+            pc = { disabled: true, title: hfReason };
+            sm = { disabled: true, title: hfReason };
+            ob = { disabled: true, title: hfReason };
         }
 
         return { pv, pc, sm, ob };

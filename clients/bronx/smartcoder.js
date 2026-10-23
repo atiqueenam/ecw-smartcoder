@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.09
+// @version      2.10
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.10 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
+//   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
+//   The P/C, SM and OB quick-action buttons are disabled for this payer.
+//   Same rule in all clients.
 // 2.09 (2026-10-23) - Bronx only: depression screening (G8510/G8431, Dep chip, Z13.31) is read ONLY from the
 //   structured purple "depression screening" PHQ widget. Free-text note paragraphs (e.g. "PHQ 9 score 4")
 //   and other widgets' "Total Score" (AUDIT etc.) are no longer counted. The widget is also its own
@@ -3851,6 +3855,21 @@ function __smartCoderReadVersion(fallback) {
             }
         }
 
+        // Healthfirst Medicaid: G0444/G0442/99401/99406/G0447/G0136 are not
+        // billed — dropped from this run's adds and removed if already on the
+        // chart. Runs last so it wins over every add rule above.
+        if (isHealthfirst && /medicaid/i.test(insurance)) {
+            const HF_MEDICAID_REMOVE_CPTS = new Set(['G0444', 'G0442', '99401', '99406', 'G0447', 'G0136']);
+            for (let i = toAdd.length - 1; i >= 0; i--) {
+                if (toAdd[i].kind !== 'icd' && HF_MEDICAID_REMOVE_CPTS.has(String(toAdd[i].code).toUpperCase())) toAdd.splice(i, 1);
+            }
+            currentRows.forEach(r => {
+                if (HF_MEDICAID_REMOVE_CPTS.has(r.code) && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Healthfirst Medicaid — ' + r.code + ' not billed for this payer' });
+                }
+            });
+        }
+
         return { toAdd, toDelete, insurance, bp, bmi, isHealthfirst, isMedicareInsurance };
     }
 
@@ -7671,6 +7690,15 @@ function __smartCoderReadVersion(fallback) {
             pc = { disabled: true, title: tcmReason };
             sm = { disabled: true, title: tcmReason };
             ob = { disabled: true, title: tcmReason };
+        }
+
+        // Healthfirst Medicaid: 99401 / 99406 / G0447 are not billed, so the
+        // P/C, SM and OB quick actions are blocked (Analyze also removes them).
+        if (insurance && /^health[\s-]*first\b/i.test(insurance.trim()) && /medicaid/i.test(insurance)) {
+            const hfReason = 'Healthfirst Medicaid — 99401/99406/G0447 not billed for this payer';
+            pc = { disabled: true, title: hfReason };
+            sm = { disabled: true, title: hfReason };
+            ob = { disabled: true, title: hfReason };
         }
 
         return { pv, pc, sm, ob };

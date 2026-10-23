@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.26
+// @version      1.27
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.27 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
+//   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
+//   The P/C, SM and OB quick-action buttons are disabled for this payer. Highland: Healthfirst Medicaid also
+//   counts as not eligible for G0444/G0442, so a documented depression screening gets 3725F.
+//   Same rule in all clients.
 // 1.26 (2026-10-23) - Highland only: depression screening (12+) gets G0444 when billable, otherwise 3725F:
 //   G0444 already billed this calendar year (same insurance), or Medicaid/Medicare/UHC (never G0444).
 //   G0444 and 3725F are never kept together (the one not chosen is deleted). Auto Link no longer
@@ -1121,7 +1126,9 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
     // (previously required truthy insurance, which wrongly blocked/removed
     // G0444/G0442 whenever parsing came back empty).
     function annualGCodesEligible(insurance) {
-        return !isMedicaidOrMedicareIns(insurance) && !isUHCInsurance(insurance);
+        // 1.27: Healthfirst Medicaid doesn't bill G0444/G0442 either.
+        const isHFMedicaid = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim()) && /medicaid/i.test(insurance);
+        return !isMedicaidOrMedicareIns(insurance) && !isUHCInsurance(insurance) && !isHFMedicaid;
     }
 
     // Plan-variant words stripped out when deriving a payer "brand" key —
@@ -3091,6 +3098,21 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
                     }
                 });
             }
+        }
+
+        // Healthfirst Medicaid: G0444/G0442/99401/99406/G0447/G0136 are not
+        // billed — dropped from this run's adds and removed if already on the
+        // chart. Runs last so it wins over every add rule above.
+        if (isHealthfirst && /medicaid/i.test(insurance)) {
+            const HF_MEDICAID_REMOVE_CPTS = new Set(['G0444', 'G0442', '99401', '99406', 'G0447', 'G0136']);
+            for (let i = toAdd.length - 1; i >= 0; i--) {
+                if (toAdd[i].kind !== 'icd' && HF_MEDICAID_REMOVE_CPTS.has(String(toAdd[i].code).toUpperCase())) toAdd.splice(i, 1);
+            }
+            currentRows.forEach(r => {
+                if (HF_MEDICAID_REMOVE_CPTS.has(r.code) && !toDelete.some(d => d.row === r.row)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'Healthfirst Medicaid — ' + r.code + ' not billed for this payer' });
+                }
+            });
         }
 
         return { toAdd, toDelete, insurance, bp, bmi, isHealthfirst, isMedicareInsurance };
@@ -6920,6 +6942,15 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
             pc = { disabled: true, title: tcmReason };
             sm = { disabled: true, title: tcmReason };
             ob = { disabled: true, title: tcmReason };
+        }
+
+        // Healthfirst Medicaid: 99401 / 99406 / G0447 are not billed, so the
+        // P/C, SM and OB quick actions are blocked (Analyze also removes them).
+        if (insurance && /^health[\s-]*first\b/i.test(insurance.trim()) && /medicaid/i.test(insurance)) {
+            const hfReason = 'Healthfirst Medicaid — 99401/99406/G0447 not billed for this payer';
+            pc = { disabled: true, title: hfReason };
+            sm = { disabled: true, title: hfReason };
+            ob = { disabled: true, title: hfReason };
         }
 
         return { pv, pc, sm, ob };
