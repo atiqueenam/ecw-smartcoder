@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.23
+// @version      6.24
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,9 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.24 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
+//   loader update available" box appears bottom-left; its Update button opens Tampermonkey's update page
+//   for loader 1.2.9. Not shown with loader 1.2.9+. Same snippet in all clients.
 // 6.23 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
 //   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
 //   The P/C, SM and OB quick-action buttons are disabled for this payer.
@@ -9439,4 +9442,40 @@ function __smartCoderReadVersion(fallback) {
         getEncounterText,
         extractClinicalFlags: () => extractClinicalFlags(getEncounterText())
     };
+})();
+
+// ====================== LOADER UPDATE NOTICE ======================
+// Loader 1.2.9+ sets window.__smartCoderLoaderVersion before running this
+// script; 1.2.8 and older don't. When this script was started by an older
+// loader (its saved registry exists but the flag is missing), show a small
+// notice whose Update button opens the loader file — Tampermonkey then shows
+// its own update page and the user clicks Update there. Hidden for the rest
+// of the browser session once clicked or closed. Same snippet in all clients.
+(function () {
+    var LOADER_URL = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js";
+    var DISMISS_KEY = "ecw_smartcoder_loader_notice_dismissed";
+    try {
+        if (window.__smartCoderLoaderVersion) return;
+        if (!localStorage.getItem("ecw_smartcoder_registry")) return;
+        if (sessionStorage.getItem(DISMISS_KEY)) return;
+    } catch (e) { return; }
+    function show() {
+        if (!document.body || document.getElementById("ecwScLoaderNotice")) return;
+        var btn = "border:0;border-radius:5px;cursor:pointer;font:inherit;";
+        var box = document.createElement("div");
+        box.id = "ecwScLoaderNotice";
+        box.style.cssText = "position:fixed;left:12px;bottom:12px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:#0f766e;color:#fff;font:600 12px/1.3 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;box-shadow:0 6px 18px rgba(15,23,42,.25);";
+        box.innerHTML = '<span>SmartCoder loader update available</span>' +
+            '<button type="button" data-act="update" style="' + btn + 'padding:4px 10px;background:#fff;color:#0f766e;">Update</button>' +
+            '<button type="button" data-act="close" title="Hide for now" style="' + btn + 'padding:2px 6px;background:transparent;color:#fff;font-size:15px;line-height:1;">&times;</button>';
+        box.addEventListener("click", function (e) {
+            var act = e.target && e.target.getAttribute ? e.target.getAttribute("data-act") : null;
+            if (!act) return;
+            if (act === "update") window.open(LOADER_URL, "_blank");
+            try { sessionStorage.setItem(DISMISS_KEY, "1"); } catch (_) {}
+            box.remove();
+        });
+        document.body.appendChild(box);
+    }
+    if (document.body) show(); else document.addEventListener("DOMContentLoaded", show, { once: true });
 })();

@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         eCW SmartCoder by ATQ
 // @namespace    https://github.com/atiqueenam/ecw-smartcoder
-// @version      1.2.8
+// @version      1.2.9
 // @description  Selects, caches, verifies, and runs the configured SmartCoder client.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.ecwcloud.com/*
 // @match        *://*.eclinicalweb.com/*
 // @updateURL    https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
+// @downloadURL  https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/loader/SmartCoder-Loader.user.js
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -17,10 +18,15 @@
 (function () {
   "use strict";
 
-  console.info("eCW SmartCoder Loader v1.2.8: userscript started.");
+  // Keep in sync with @version above.
+  const LOADER_VERSION = "1.2.9";
+  console.info(`eCW SmartCoder Loader v${LOADER_VERSION}: userscript started.`);
 
   const REPOSITORY_RAW = "https://raw.githubusercontent.com/atiqueenam/ecw-smartcoder/main/";
   const REGISTRY_URL = `${REPOSITORY_RAW}registry/clients.json`;
+  // Same file as @updateURL. Opening it in a tab shows Tampermonkey's own
+  // install/update page — the user confirms there; nothing is run from here.
+  const LOADER_URL = `${REPOSITORY_RAW}loader/SmartCoder-Loader.user.js`;
   const STORAGE = {
     userId: "ecw_smartcoder_user_id",
     selectedClient: "ecw_smartcoder_selected_client",
@@ -39,6 +45,7 @@
   // downloaded or run for an update until the user clicks the reload button.
   let runningClient = null;     // { id, sha256 }
   let updateAvailable = null;   // { name, version }
+  let loaderUpdateAvailable = null;   // newer loader version string published on GitHub
 
   let registry = null;
 
@@ -358,12 +365,37 @@
   function applyUpdateBadge() {
     const button = document.getElementById(RELOAD_BUTTON_ID);
     if (!button) return;
-    button.classList.toggle("ecw-sc-update", Boolean(updateAvailable));
-    const text = updateAvailable
-      ? `Update available: ${updateAvailable.name} v${updateAvailable.version} - click to reload and update`
-      : "Check updates and reload";
+    button.classList.toggle("ecw-sc-update", Boolean(updateAvailable || loaderUpdateAvailable));
+    const parts = [];
+    if (loaderUpdateAvailable) parts.push(`Loader update v${loaderUpdateAvailable}: click to open the Tampermonkey update page, click Update there, then reload eCW`);
+    if (updateAvailable) parts.push(`Update available: ${updateAvailable.name} v${updateAvailable.version} - click to reload and update`);
+    const text = parts.length ? parts.join(" | ") : "Check updates and reload";
     button.title = text;
-    button.setAttribute("aria-label", updateAvailable ? text : "Check SmartCoder updates and reload");
+    button.setAttribute("aria-label", parts.length ? text : "Check SmartCoder updates and reload");
+  }
+
+  // "1.2.10" > "1.2.9" — numeric, part by part.
+  function isNewerVersion(candidate, current) {
+    const a = String(candidate).split(".").map(Number);
+    const b = String(current).split(".").map(Number);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = a[i] || 0, y = b[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+
+  // Reads @version from the published loader and flags it when it is newer
+  // than this one. Tampermonkey can't be made to install it silently, so the
+  // reload button then opens Tampermonkey's own update page for one click.
+  async function checkForLoaderUpdate() {
+    try {
+      const match = (await downloadText(LOADER_URL)).match(/^\/\/\s*@version\s+([0-9][0-9.]*)\s*$/m);
+      loaderUpdateAvailable = match && isNewerVersion(match[1], LOADER_VERSION) ? match[1] : null;
+      applyUpdateBadge();
+    } catch (error) {
+      console.warn("eCW SmartCoder Loader: loader update check failed; will retry.", error);
+    }
   }
 
   // Reads the published registry only (never replaces the cached one, so the
@@ -384,8 +416,9 @@
   }
 
   function startUpdateChecks() {
+    checkForLoaderUpdate();
     setTimeout(checkForUpdate, UPDATE_CHECK_FIRST_DELAY_MS);
-    setInterval(checkForUpdate, UPDATE_CHECK_INTERVAL_MS);
+    setInterval(() => { checkForUpdate(); checkForLoaderUpdate(); }, UPDATE_CHECK_INTERVAL_MS);
   }
 
   function installHeaderControls() {
@@ -476,6 +509,9 @@
     reload.addEventListener("mousedown", event => event.stopPropagation());
     reload.addEventListener("click", event => {
       event.stopPropagation();
+      // Newer loader published: open Tampermonkey's update page in a new
+      // tab (user clicks Update there), then reload as usual.
+      if (loaderUpdateAvailable) window.open(LOADER_URL, "_blank");
       reload.classList.add("loading");
       markForcedRefresh();
       location.reload();
@@ -534,6 +570,9 @@
     const script = await obtainClientScript(client);
     console.info(`eCW SmartCoder Loader: ${client.name} script verified.`);
     runningClient = { id: client.id, sha256: (await sha256(script.code)).toLowerCase() };
+    // Lets client scripts tell this loader apart from 1.2.8 and older (which
+    // don't set it) and show those users a one-click loader update notice.
+    try { unsafeWindow.__smartCoderLoaderVersion = LOADER_VERSION; } catch (_) {}
     executeScript(client, script.code);
     console.info(`eCW SmartCoder Loader: ${client.name} script executed.`);
     maintainHeaderControls();
