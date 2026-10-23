@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.06
+// @version      2.07
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.07 (2026-10-23) - Every row in the Proposed changes preview (To add / To remove) has a checkbox.
+//   Unchecking a code skips it: Start Action neither adds nor deletes it (the recheck pass skips it
+//   too); all other codes run normally. Skips last for the current Analyze only. Same feature: Getwell 6.22.
 // 2.06 (2026-10-19) - CPT G0506 and 99490 are always deleted if present (all payers).
 // 2.05 (2026-10-16) - UHC: CPT 99000/99497/Q0091 never added and removed if present
 //   (payer rejects them as non-covered). Wellcare: CPT 99051 never added and removed if
@@ -7940,7 +7943,13 @@ function __smartCoderReadVersion(fallback) {
         actionRunning = true;
         actionLog = [];
         renderSnapshotBlock();
-        prefetchAnalysisLookups(analysisState.toAdd);
+        // Rows the coder unchecked in the preview are not applied (neither in the
+        // main pass nor in the recheck pass below).
+        const selToDelete = analysisState.toDelete.filter(i => !i.skipped);
+        const selToAdd = analysisState.toAdd.filter(i => !i.skipped);
+        const skippedAddCodes = new Set(analysisState.toAdd.filter(i => i.skipped).map(i => i.code));
+        const skippedDelCodes = new Set(analysisState.toDelete.filter(i => i.skipped).map(i => i.code));
+        prefetchAnalysisLookups(selToAdd);
 
         // 1.91: per-code row counts before any deletes, so the stability
         // recheck below knows how many rows a duplicate should leave.
@@ -7958,10 +7967,10 @@ function __smartCoderReadVersion(fallback) {
         // Batch delete first; only items the batch couldn't handle safely
         // go through the one-by-one delete below.
         let batchDeleteResults = null;
-        try { batchDeleteResults = await batchDeleteBillingCodes(analysisState.toDelete); }
+        try { batchDeleteResults = await batchDeleteBillingCodes(selToDelete); }
         catch (e) { console.warn('SmartCoder batch delete failed — using one-by-one delete', e); batchDeleteResults = null; }
 
-        for (const item of analysisState.toDelete) {
+        for (const item of selToDelete) {
             let result = batchDeleteResults ? batchDeleteResults.get(item) : null;
             if (result) {
                 // handled by the batch delete
@@ -7984,7 +7993,7 @@ function __smartCoderReadVersion(fallback) {
         renderSnapshotBlock();
 
         const deferredCPT = [];
-        for (const item of analysisState.toAdd) {
+        for (const item of selToAdd) {
             if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredCPT.push(item); continue; }
             if (item.kind === 'icd') {
                 const results = await addICDCodesFast([item.code]);
@@ -8079,6 +8088,7 @@ function __smartCoderReadVersion(fallback) {
 
         if (recheck) {
             for (const item of recheck.toDelete) {
+                if (skippedDelCodes.has(item.code)) continue;
                 if (actionLog.some(e => e.code === item.code && e.action === 'delete' && e.status === 'success')) continue;
                 // 1.91: never re-run a duplicate cleanup on the recheck pass —
                 // a grid that hasn't caught up still shows both rows.
@@ -8097,9 +8107,10 @@ function __smartCoderReadVersion(fallback) {
                 });
                 renderSnapshotBlock();
             }
-            prefetchAnalysisLookups(recheck.toAdd);
+            const recheckAdds = recheck.toAdd.filter(i => !skippedAddCodes.has(i.code));
+            prefetchAnalysisLookups(recheckAdds);
             const deferredRecheckCPT = [];
-            for (const item of recheck.toAdd) {
+            for (const item of recheckAdds) {
                 if (actionLog.some(e => e.code === item.code && e.action === 'add')) continue;
                 if (isCPTBatchEnabled() && item.kind !== 'icd' && item.kind !== 'em') { deferredRecheckCPT.push(item); continue; }
                 if (item.kind === 'icd') {
@@ -8163,13 +8174,16 @@ function __smartCoderReadVersion(fallback) {
 
         if (analysisState) {
             const { toAdd, toDelete } = analysisState;
+            // Per-row checkbox: uncheck to skip that suggestion.
+            const skipBox = (list, i) => `<input type="checkbox" class="ecs-skip-cb" data-list="${list}" data-idx="${i}" title="Uncheck to skip this code" style="margin:0 6px 0 0;vertical-align:middle;cursor:pointer;"${(list === 'add' ? toAdd : toDelete)[i].skipped ? '' : ' checked'}>`;
+            const rowStyle = x => x.skipped ? ' style="opacity:.45;text-decoration:line-through;"' : '';
             const addRows = toAdd.length
-                ? toAdd.map(a => `<div class="ecs-diff-row ecs-diff-add">+ <b>${escapeHtml(a.code)}</b><span>${escapeHtml(a.reason)}</span></div>`).join('')
+                ? toAdd.map((a, i) => `<div class="ecs-diff-row ecs-diff-add"${rowStyle(a)}>${skipBox('add', i)}+ <b>${escapeHtml(a.code)}</b><span>${escapeHtml(a.reason)}</span></div>`).join('')
                 : '<div class="ecs-diff-empty">Nothing to add</div>';
             const delRows = toDelete.length
-                ? toDelete.map(d => `<div class="ecs-diff-row ecs-diff-del">− <b>${escapeHtml(d.code)}</b><span>${escapeHtml(d.reason)}</span></div>`).join('')
+                ? toDelete.map((d, i) => `<div class="ecs-diff-row ecs-diff-del"${rowStyle(d)}>${skipBox('del', i)}− <b>${escapeHtml(d.code)}</b><span>${escapeHtml(d.reason)}</span></div>`).join('')
                 : '<div class="ecs-diff-empty">Nothing to remove</div>';
-            const disabled = (!toAdd.length && !toDelete.length) ? 'disabled' : '';
+            const disabled = (!toAdd.some(x => !x.skipped) && !toDelete.some(x => !x.skipped)) ? 'disabled' : '';
             return `<div class="ecs-analysis">
                 <div class="ecs-analysis-title">Proposed changes</div>
                 <div class="ecs-analysis-scroll">
@@ -8592,6 +8606,16 @@ function __smartCoderReadVersion(fallback) {
                 else if (e.target.closest('#ecsObesityBtn')) runObesityAction();
                 else if (e.target.closest('#ecsAutoLinkBtn')) runAutoLinkAction();
                 else if (e.target.closest('#ecsClaimLinkBtn')) runClaimLinkAction();
+            });
+            body.addEventListener('change', (e) => {
+                const skipCb = e.target.closest('.ecs-skip-cb');
+                if (skipCb && analysisState && !actionRunning) {
+                    const list = skipCb.dataset.list === 'add' ? analysisState.toAdd : analysisState.toDelete;
+                    const item = list[Number(skipCb.dataset.idx)];
+                    if (item) item.skipped = !skipCb.checked;
+                    renderSnapshotBlock();
+                    return;
+                }
             });
         }
     }
