@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.25
+// @version      1.26
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.26 (2026-10-23) - Highland only: depression screening (12+) gets G0444 when billable, otherwise 3725F:
+//   G0444 already billed this calendar year (same insurance), or Medicaid/Medicare/UHC (never G0444).
+//   G0444 and 3725F are never kept together (the one not chosen is deleted). Auto Link no longer
+//   deletes 3725F (it was in al_deleteUnwantedCodes).
 // 1.25 (2026-10-23) - Every row in the Proposed changes preview (To add / To remove) has a checkbox.
 //   Unchecking a code skips it: Start Action neither adds nor deletes it (the recheck pass skips it
 //   too); all other codes run normally. Skips last for the current Analyze only. Same feature: Getwell 6.22.
@@ -2503,11 +2507,16 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
         // code wasn't already billed this calendar year — NO preventive
         // visit needed. Still skipped for Medicaid/Medicare/UHC and gated
         // to once/year. Rule 19 age gates apply here too.
+        // 1.26: depression screening gets G0444 when billable; otherwise
+        // 3725F — G0444 already billed this calendar year (same insurance),
+        // or Medicaid/Medicare/UHC (never G0444). Never both on one chart.
+        if (age >= 12 && hasDep !== null) {
+            if (!annualGCodesEligible(insurance)) desired.set('3725F', 'Depression screening — Medicaid/Medicare/UHC use 3725F (no G0444)');
+            else if (codeUsedInYear('G0444', getCurrentDosYear())) desired.set('3725F', 'Depression screening — G0444 already billed this year, using 3725F instead');
+            else desired.set('G0444', 'Annual depression screening (once/year)');
+        }
         if (annualGCodesEligible(insurance)) {
             const dosYear = getCurrentDosYear();
-            if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
-                desired.set('G0444', 'Annual depression screening (once/year)');
-            }
             if (age >= 18 && hasAlc !== null && !codeUsedInYear('G0442', dosYear)) {
                 desired.set('G0442', 'Annual alcohol screening (once/year)');
             }
@@ -2999,6 +3008,19 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
                     if (row) toDelete.push({ code, row, kind: 'cpt', reason: `${code} already billed this calendar year — can't bill again` });
                 }
             });
+        }
+
+        // ---- 1.26: G0444 and 3725F never together ----
+        // Whichever one this run settles on stays; the other is removed.
+        {
+            const dropDepCode = (code, reason) => {
+                if (rawCPTCodesNow.includes(code) && !toDelete.some(d => d.code === code)) {
+                    const row = getCPTRowByCode(code);
+                    if (row) toDelete.push({ code, row, kind: 'cpt', reason });
+                }
+            };
+            if (desired.has('G0444')) dropDepCode('3725F', 'G0444 billed for depression screening — 3725F not used with it');
+            else if (desired.has('3725F')) dropDepCode('G0444', '3725F billed for depression screening — G0444 not used with it');
         }
 
         // ---- Flu product replacement: 90694 -> 90653, 90674 -> 90661 ----
@@ -5318,10 +5340,12 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
         //           rule in al_linkCPTGeneric links to it). If NOT, add
         //           H53.8 (visual disturbance, unspecified) so there's
         //           something for that same eyeExam rule to link 99173 to.
+        // 1.26: 3725F removed from this list — it is now the depression
+        // screening code when G0444 can't be billed (see computeAnalysis).
         const cptsToDelete = new Set([
             'G9432', 'G8783', 'G9920', 'S0612', 'G9820', '4013F',
             'G9744', 'G9903', '4000F', '1034F', '3080F', '3077F',
-            '3061F', '3062F', '3725F', 'H0049', '',
+            '3061F', '3062F', 'H0049', '',
             ...(deleteHTNQualifiersAL ? ['3074F', '3075F', '3078F', '3079F'] : [])
         ]);
         const icdsToDelete = new Set([
