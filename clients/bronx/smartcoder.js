@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.07
+// @version      2.08
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,7 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.08 (2026-10-23) - Bronx only: long Chief Complaint in the panel is collapsed to ~3 lines with a See more / See less toggle.
 // 2.07 (2026-10-23) - Every row in the Proposed changes preview (To add / To remove) has a checkbox.
 //   Unchecking a code skips it: Start Action neither adds nor deletes it (the recheck pass skips it
 //   too); all other codes run normally. Skips last for the current Analyze only. Same feature: Getwell 6.22.
@@ -725,6 +726,7 @@ function __smartCoderReadVersion(fallback) {
     const PANEL_POS_KEY = 'ecs_panel_pos';
 
     // ---- Auto-coding analysis state ----
+    let ccExpanded = false;     // Chief Complaint "see more / see less" state
     let analysisState = null;   // { toAdd:[{code,reason}], toDelete:[{code,row,reason}] }
     let analysisRunning = false;
     let actionRunning = false;
@@ -8211,6 +8213,7 @@ function __smartCoderReadVersion(fallback) {
 
         const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
         const ccLines = ccRaw ? ccRaw[1].split(/\r?\n/).map(l => l.replace(/^[\s•\-\*·]+/, '').trim()).filter(Boolean) : [];
+        const ccIsLong = ccLines.join(' ').length > 180 || ccLines.length > 3;
 
         const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
         let bmi = snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i);
@@ -8291,7 +8294,8 @@ function __smartCoderReadVersion(fallback) {
             </div>
             <div class="cc-area">
                 <strong>Chief Complaint</strong><br>
-                ${ccLines.length ? ccLines.map(l => `• ${escapeHtml(l)}`).join('<br>') : '—'}
+                <div${ccIsLong && !ccExpanded ? ' style="max-height:4.2em;overflow:hidden;"' : ''}>${ccLines.length ? ccLines.map(l => `• ${escapeHtml(l)}`).join('<br>') : '—'}</div>
+                ${ccIsLong ? `<a href="#" class="ecs-cc-toggle" style="color:#0f766e;font-weight:600;text-decoration:none;">${ccExpanded ? 'See less' : 'See more'}</a>` : ''}
             </div>
             <div class="vitals">
                 ${bp ? `<span class="chip"><b>BP</b> <span class="${bpClass}">${bp}</span>${(sysCode || diaCode) ? `<span class="code-tag">${[sysCode, diaCode].filter(Boolean).join('/')}</span>` : ''}</span>` : ''}
@@ -8596,7 +8600,8 @@ function __smartCoderReadVersion(fallback) {
         if (body && !body._ecsWired) {
             body._ecsWired = true;
             body.addEventListener('click', (e) => {
-                if (e.target.closest('#ecsAnalyzeBtn')) runAnalysis();
+                if (e.target.closest('.ecs-cc-toggle')) { e.preventDefault(); ccExpanded = !ccExpanded; renderSnapshotBlock(); }
+                else if (e.target.closest('#ecsAnalyzeBtn')) runAnalysis();
                 else if (e.target.closest('#ecsApplyBtn')) applyAnalysis();
                 else if (e.target.closest('#ecsCancelBtn')) { analysisState = null; renderSnapshotBlock(); }
                 else if (e.target.closest('#ecsDoneBtn')) { analysisState = null; actionLog = []; renderSnapshotBlock(); }
