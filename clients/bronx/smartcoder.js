@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.10
+// @version      2.11
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.11 (2026-10-23) - Preventive (P) quick action: ANY insurance whose name contains "Medicare"
+//   (e.g. "Healthfirst Medicare", Medicare Advantage plans) now gets G0438 (new) / G0439 (established)
+//   instead of the age-banded 993xx code. Before, only plain "Medicare" did (VNS Choice
+//   unchanged). Same as
+//   El Nunu/Hasan/Highland/XcellCare/Getwell.
 // 2.10 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
 //   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
 //   The P/C, SM and OB quick-action buttons are disabled for this payer.
@@ -7749,18 +7754,17 @@ function __smartCoderReadVersion(fallback) {
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
-            // Only STRAIGHT/plain Medicare and VNS Choice get the
-            // G0438/G0439 Medicare AWV codes. Every other insurance —
-            // Clover Health included, and any Medicare Advantage or other
-            // plan whose name merely mentions "Medicare" — gets the
-            // age-banded 993xx preventive E&M code instead, same as any
-            // other non-Medicare payer.
-            const isStraightMedicare = isStraightMedicareIns(insurance);
+            // 2.11: ANY insurance whose name contains "Medicare" (plain
+            // Medicare and Medicare Advantage plans like "Healthfirst
+            // Medicare") plus VNS Choice get the G0438/G0439 Medicare AWV
+            // codes — same as El Nunu/Hasan/Highland/XcellCare/Getwell.
+            // Every other insurance gets the age-banded 993xx code.
+            const isMedicare = isAnyMedicareIns(insurance);
 
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
             prefetchICDLookups(codes);
-            if (isVNS || isStraightMedicare) {
+            if (isVNS || isMedicare) {
                 prefetchCPTLookups([{ code: established ? 'G0439' : 'G0438', isEm: false }]);
             } else if (emCode) {
                 prefetchCPTLookups([{ code: emCode, isEm: true }]);
@@ -7769,8 +7773,8 @@ function __smartCoderReadVersion(fallback) {
             await deleteICDCodesByCode([z71Opposite, z00Opposite]);
             await addICDCodesFast(codes);
 
-            if (isVNS || isStraightMedicare) {
-                // VNS Choice and straight Medicare are treated the same:
+            if (isVNS || isMedicare) {
+                // VNS Choice and Medicare are treated the same:
                 // directly add G0438/G0439. Never G0402 (retired).
                 const medicareAwvCode = established ? 'G0439' : 'G0438';
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);

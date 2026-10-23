@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.56
+// @version      1.57
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,12 @@
 
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
+
+// 1.57 (2026-10-23) - Preventive (P) quick action: ANY insurance whose name contains "Medicare"
+//   (e.g. "Healthfirst Medicare", Medicare Advantage plans) now gets G0438 (new) / G0439 (established)
+//   instead of the age-banded 993xx code. Before, only plain "Medicare" did (CenterLight
+//   and VNS Choice unchanged). Same as
+//   El Nunu/Hasan/Highland/XcellCare/Getwell.
 
 // 1.56 (2026-10-23) - Healthfirst Medicaid (insurance starting "Healthfirst"/"Health First" and containing
 //   "Medicaid"): G0444, G0442, 99401, 99406, G0447, G0136 are never added and removed if present.
@@ -8224,13 +8230,13 @@ function __smartCoderReadVersion(fallback) {
             const emCode = mapAgeToPreventiveCPT(age, established);
             const insurance = parseInsuranceFromPage(text);
             const isVNS = isVNSChoiceIns(insurance);
-            // Only STRAIGHT/plain Medicare, VNS Choice and (Hasnayen rule
-            // 8) CenterLight get the G0438/G0439 Medicare AWV codes. Every
-            // other insurance — Clover Health included, and any Medicare
-            // Advantage or other plan whose name merely mentions
-            // "Medicare" — gets the age-banded 993xx preventive E&M code
-            // instead, same as any other non-Medicare payer.
-            const isStraightMedicare = isStraightMedicareIns(insurance);
+            // 1.57: ANY insurance whose name contains "Medicare" (plain
+            // Medicare and Medicare Advantage plans like "Healthfirst
+            // Medicare"), VNS Choice and (Hasnayen rule 8) CenterLight get
+            // the G0438/G0439 Medicare AWV codes — same as El Nunu/Hasan/
+            // Highland/XcellCare/Getwell. Every other insurance gets the
+            // age-banded 993xx code.
+            const isMedicare = isAnyMedicareIns(insurance);
             // Rule 8: CenterLight's preventive AWV codes are G0438/G0439,
             // picked by the exact same established-vs-new (subsequent vs
             // first) branch below that Medicare/VNS Choice already use.
@@ -8239,7 +8245,7 @@ function __smartCoderReadVersion(fallback) {
             // Delete first, then add — matches how eCW itself expects it,
             // and avoids stale codes interfering with the new additions.
             prefetchICDLookups(codes);
-            if (isVNS || isStraightMedicare || isCenterLight) {
+            if (isVNS || isMedicare || isCenterLight) {
                 prefetchCPTLookups([{ code: established ? 'G0439' : 'G0438', isEm: false }]);
             } else if (emCode) {
                 prefetchCPTLookups([{ code: emCode, isEm: true }]);
@@ -8248,8 +8254,8 @@ function __smartCoderReadVersion(fallback) {
             await deleteICDCodesByCode([z71Opposite, z00Opposite]);
             await addICDCodesFast(codes);
 
-            if (isVNS || isStraightMedicare || isCenterLight) {
-                // VNS Choice, straight Medicare and CenterLight are treated
+            if (isVNS || isMedicare || isCenterLight) {
+                // VNS Choice, Medicare and CenterLight are treated
                 // the same: directly add G0438/G0439. Never G0402 (retired).
                 const medicareAwvCode = established ? 'G0439' : 'G0438';
                 await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
