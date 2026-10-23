@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-23T08:41:15.591Z",
+  "generatedAt": "2026-10-23T09:20:56.652Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "2.10",
+      "version": "2.11",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "249c4e9a24406bbb1f282f7df198afb4775b02de759c7353439a2f6eb9e1a4f3"
+      "sha256": "18e2926087a4873d41afd9dfe272318128c5c3d0688983139e0fc93334e87e06"
     },
     {
       "id": "elnunu",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.56",
+      "version": "1.57",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "0b5b02e738a5abe04f46fff7a66331e3dac412c8c4a5c0741cfb595078d12fa5"
+      "sha256": "14346ded787a17356ec3c5b3f65b6f714fb247c604b3294eb4c5f3938360a9d1"
     },
     {
       "id": "highland-medical",
