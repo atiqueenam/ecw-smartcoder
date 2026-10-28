@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-23T11:28:01.000Z",
+  "generatedAt": "2026-10-28T11:25:43.432Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "2.12",
+      "version": "2.13",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "2390f0d053efa77827395e8c8bd06d1ba73d4701641d3f972a89bce0b57d0fd5"
+      "sha256": "05ecc7ccc102a22549431ebbcbafbbdc63c8a523d683e8024c479de6737773ee"
     },
     {
       "id": "elnunu",
