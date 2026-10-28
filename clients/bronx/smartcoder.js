@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.12
+// @version      2.13
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.13 (2026-10-28) - Bronx only: commercial-insurance rule (added 2.02) removed. Aetna, Cigna, Anthem,
+//   BCBS/Blue Cross, Empire, United/UMR/Oxford with a Preventive code on the chart now get the
+//   office-visit E&M suggested as usual (no longer skipped/removed). NYCE PPO rule unchanged.
 // 2.12 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
 //   loader update available" box appears bottom-left; its Update button opens Tampermonkey's update page
 //   for loader 1.2.9. Not shown with loader 1.2.9+. Same snippet in all clients.
@@ -2823,8 +2826,8 @@ function __smartCoderReadVersion(fallback) {
         // Preventive visit for this payer — used both to remove any
         // office-visit code already on the chart (below, once toDelete
         // exists) and to skip suggesting a new one further down.
-        // (Also covers commercial payers — see isBronxCommercialInsurance.)
-        const isNycePPOForOV = isNycePPOIns(insurance) || isBronxCommercialInsurance(insurance);
+        // Bronx does NOT follow the commercial-insurance rule (2.13).
+        const isNycePPOForOV = isNycePPOIns(insurance);
 
         // ---- Quick-action gating cleanup ----
         // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
@@ -3328,7 +3331,7 @@ function __smartCoderReadVersion(fallback) {
         if (isNycePPOForOV && hasPreventiveVisit) {
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: (isNycePPOIns(insurance) ? 'NYCE PPO' : `Commercial insurance (${insurance || 'commercial'})`) + ' — office-visit E/M code not billable alongside a Preventive visit' });
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'NYCE PPO — office-visit E/M code not billable alongside a Preventive visit' });
                 }
             });
         }
@@ -3480,10 +3483,10 @@ function __smartCoderReadVersion(fallback) {
         // below) exist for this provider. Suggested code goes to the TOP
         // of Proposed Changes; any other office-visit code on the chart
         // gets flagged for removal if it doesn't match.
-        // Commercial payers (isBronxCommercialInsurance) + NYCE PPO get no
-        // office visit when a Preventive code is on the chart (see below). Bronx formerly did not follow the "commercial payer" exclusion other
-        // clients use — every visit (regardless of insurance) gets an
-        // office-visit E&M code suggested.
+        // Only NYCE PPO gets no office visit when a Preventive code is on
+        // the chart (see below). Bronx does not follow the "commercial
+        // payer" exclusion other clients use — every other visit
+        // (regardless of insurance) gets an office-visit E&M code suggested.
         // Captured for the TCM/99401/99406 billing-exclusivity rules below,
         // which need to know the office-visit code this run settled on
         // even though `ovCode` itself is scoped to the block below.
@@ -7802,28 +7805,6 @@ function __smartCoderReadVersion(fallback) {
         } finally {
             quickActionRunning = false;            renderSnapshotBlock();
         }
-    }
-
-    // Commercial insurances (ported from Getwell): a Preventive visit code on
-    // the chart means no office-visit E&M is billable, same as NYCE PPO.
-    // Anthem is included. Without a Preventive code the office visit is
-    // suggested as usual.
-    function isBronxCommercialInsurance(insurance) {
-        if (!insurance) return false;
-        if (isUHCInsurance(insurance)) return true; // United Healthcare, UMR, Oxford...
-        const name = insurance.trim().toLowerCase()
-            .replace(/[.,]/g, '')
-            .replace(/[\s-]+/g, ' ')
-            .trim()
-            .replace(/^the\s+/, '');
-        if (/^aetna\b/.test(name)) return true;
-        if (/^cigna\b/.test(name)) return true;
-        if (/^anthem\b/.test(name)) return true;
-        if (/^bcbs\b/.test(name)) return true;
-        if (/^blue\s+cross\b/.test(name)) return true;
-        if (/^empire\b/.test(name)) return true;
-        if (/\bempire\b/.test(name) && /\bbcbs\b/.test(name)) return true;
-        return false;
     }
 
     // NYCE PPO — used both by isPreventiveCounselBlockedIns() below (P/C
