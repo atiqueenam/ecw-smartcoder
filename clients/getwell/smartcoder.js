@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.24
+// @version      6.25
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,8 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.25 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the vaccine component map, the Medicare flu list (G0008; 90616 excluded, not a flu product),
+//   and the auto-link + claim-link maps -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Hasan 2.24, Hasnayen 1.59, Highland 1.29, Xcellcare 1.13.
 // 6.24 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
 //   loader update available" box appears bottom-left; its Update button opens Tampermonkey's update page
 //   for loader 1.2.9. Not shown with loader 1.2.9+. Same snippet in all clients.
@@ -3065,14 +3067,15 @@ function __smartCoderReadVersion(fallback) {
         // Influenza (all single-component)
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
-        '90687': 1, '90688': 1, '90756': 1
+        '90687': 1, '90688': 1, '90756': 1,
+        '90616': 1, '90653': 1, '90662': 1, '90673': 1
     };
     // COVID vaccines are never counted via 90460-90474 — always 90480,
     // for every patient regardless of age or payer.
     const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
     // Medicare-only overrides (no age limit) — these use their own G-codes
     // instead of the standard 90460-90474 scheme, for Medicare patients only.
-    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
+    const FLU_VACCINE_CODES = new Set(['90653', '90656', '90657', '90658', '90660', '90661', '90662', '90672', '90673', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
     const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
     const HEPB_VACCINE_CODES = new Set(['90740', '90743', '90744', '90746', '90747']);
     // Every admin code this feature manages — used to find stale/wrong ones.
@@ -6236,6 +6239,10 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -7377,6 +7384,10 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },

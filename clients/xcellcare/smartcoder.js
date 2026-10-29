@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.13 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the auto-link + claim-link maps
+//   -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Getwell 6.25, Hasan 2.24, Hasnayen 1.59, Highland 1.29.
 // 1.12 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
 //   loader update available" box appears bottom-left; its Update button opens Tampermonkey's update page
 //   for loader 1.2.9. Not shown with loader 1.2.9+. Same snippet in all clients.
@@ -4981,6 +4983,10 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "al_officeVisit" },
@@ -6303,6 +6309,10 @@ function __smartCoderReadVersion(fallback) {
             "90658": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90660": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "90661": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90616": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90653": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90662": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
+            "90673": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91319": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91320": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
             "91321": { type: "exact", icds: ["Z23"], fallback: "cl_officeVisit" },
