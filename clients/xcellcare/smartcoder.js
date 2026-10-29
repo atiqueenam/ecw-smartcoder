@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.14 (2026-10-29) - Claim Link: any CPT line with a 0.00 (or blank) Billed Fee is set to 0.01 — cl_fixZeroBilledFee existed
+//   but was never called; "$"/"," now stripped first so a formatted fee is never overwritten. Same fix: Highland 1.30; El Nunu, Getwell, Hasan already had it.
+//   "Medicare of New York" / "Medicare of NY" is now recognized as Medicare by the exact-match
+//   Medicare check (Medicare BP G8752-G8755); it used to fall through as non-Medicare.
+//   Same fix: El Nunu 1.19, Getwell 6.26, Hasan 2.25, Hasnayen 1.60, Highland 1.30. Bronx already matched it ("starts with Medicare").
+//   Medicare BP check (G8752-G8755) now matches ANY insurance name starting with "Medicare", whatever
+//   follows it (same as Bronx).
 // 1.13 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the auto-link + claim-link maps
 //   -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Getwell 6.25, Hasan 2.24, Hasnayen 1.59, Highland 1.29.
 // 1.12 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
@@ -2204,7 +2211,7 @@ function __smartCoderReadVersion(fallback) {
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
@@ -6041,8 +6048,11 @@ function __smartCoderReadVersion(fallback) {
         cptRows.forEach(row => {
             const feeInput = cl_getCPTBilledFeeInput(row);
             if (!feeInput) return;
-            const fee = parseFloat(feeInput.value);
-            if (isNaN(fee) || fee === 0) cl_setInputValue(feeInput, '0.01');
+            // Strip "$" / "," so a formatted fee like "$1,250.00" is never
+            // misread as non-numeric and overwritten.
+            const raw = (feeInput.value || '').replace(/[$,\s]/g, '');
+            const fee = raw === '' ? 0 : parseFloat(raw);
+            if (fee === 0) cl_setInputValue(feeInput, '0.01');
         });
     }
 
@@ -6852,6 +6862,7 @@ function __smartCoderReadVersion(fallback) {
 
             cl_linkCPTGeneric(icdRows, cptRows);
             cl_handleUnlistedCPTs(cptRows);
+            cl_fixZeroBilledFee(cptRows);
             cl_alertDuplicateICDStart(icdRows);
             cl_checkICDOrderZBeforeDx(icdRows);
             cl_alertDuplicateCPT(cptRows);

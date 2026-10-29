@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.14
+// @version      2.15
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.15 (2026-10-29) - SL modifier (patients under 19): 90616, 90653, 90662, 90673 added to the SL vaccine list. Same fix: Getwell 6.26, Hasan 2.25, Hasnayen 1.60, Highland 1.30
+//   (El Nunu / Xcellcare already covered them via VACCINE_COMPONENT_MAP).
 // 2.14 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the vaccine component map, the Medicare flu list (G0008; 90616 excluded, not a flu product),
 //   and the auto-link + claim-link maps -> Z23 (were missing, so Z23 did not link). Same fix: Getwell 6.25, Hasan 2.24, Hasnayen 1.59, Highland 1.29, Xcellcare 1.13.
 // 2.13 (2026-10-28) - Bronx only: commercial-insurance rule (added 2.02) removed. Aetna, Cigna, Anthem,
@@ -6241,7 +6243,7 @@ function __smartCoderReadVersion(fallback) {
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381"
+            "91322","91323","96380","96381","90616","90653","90662","90673"
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;

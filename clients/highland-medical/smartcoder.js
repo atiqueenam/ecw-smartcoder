@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.30
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.30 (2026-10-29) - Claim Link: any CPT line with a 0.00 (or blank) Billed Fee is set to 0.01 — cl_fixZeroBilledFee existed
+//   but was never called; "$"/"," now stripped first so a formatted fee is never overwritten. Same fix: Xcellcare 1.14; El Nunu, Getwell, Hasan already had it.
+//   SL modifier (patients under 19): 90616, 90662, 90673 added to the SL vaccine list. Same fix: Bronx 2.15, Getwell 6.26, Hasan 2.25, Hasnayen 1.60
+//   (El Nunu / Xcellcare already covered them via VACCINE_COMPONENT_MAP).
+//   "Medicare of New York" / "Medicare of NY" is now recognized as Medicare by the exact-match
+//   Medicare check (Medicare BP G8752-G8755); it used to fall through as non-Medicare.
+//   Same fix: El Nunu 1.19, Getwell 6.26, Hasan 2.25, Hasnayen 1.60, Xcellcare 1.14. Bronx already matched it ("starts with Medicare").
+//   Medicare BP check (G8752-G8755) now matches ANY insurance name starting with "Medicare", whatever
+//   follows it (same as Bronx).
 // 1.29 (2026-10-29) - Vaccine codes 90616, 90662, 90673 added to the vaccine component map, the Medicare flu list (G0008; 90616 excluded, not a flu product),
 //   and the auto-link + claim-link maps -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Getwell 6.25, Hasan 2.24, Hasnayen 1.59, Xcellcare 1.13.
 // 1.28 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
@@ -2222,7 +2231,7 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
@@ -5525,7 +5534,7 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
             "90647","90648","90651","90653","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381"
+            "91322","91323","96380","96381","90616","90662","90673"
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;
@@ -5904,8 +5913,11 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
         cptRows.forEach(row => {
             const feeInput = cl_getCPTBilledFeeInput(row);
             if (!feeInput) return;
-            const fee = parseFloat(feeInput.value);
-            if (isNaN(fee) || fee === 0) cl_setInputValue(feeInput, '0.01');
+            // Strip "$" / "," so a formatted fee like "$1,250.00" is never
+            // misread as non-numeric and overwritten.
+            const raw = (feeInput.value || '').replace(/[$,\s]/g, '');
+            const fee = raw === '' ? 0 : parseFloat(raw);
+            if (fee === 0) cl_setInputValue(feeInput, '0.01');
         });
     }
 
@@ -6711,6 +6723,7 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
 
             cl_linkCPTGeneric(icdRows, cptRows);
             cl_handleUnlistedCPTs(cptRows);
+            cl_fixZeroBilledFee(cptRows);
             cl_alertDuplicateICDStart(icdRows);
             cl_checkICDOrderZBeforeDx(icdRows);
             cl_alertDuplicateCPT(cptRows);

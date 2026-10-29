@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.25
+// @version      6.26
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,15 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.26 (2026-10-29) - Claim Link 0.00 -> 0.01 Billed Fee: "$"/"," now stripped before parsing, so a formatted fee like
+//   "$1,250.00" is no longer misread as non-numeric and overwritten with 0.01. Same fix: Hasan 2.25, Highland 1.30, Xcellcare 1.14 (as El Nunu).
+//   SL modifier (patients under 19): 90616, 90653, 90662, 90673 added to the SL vaccine list. Same fix: Bronx 2.15, Hasan 2.25, Hasnayen 1.60, Highland 1.30
+//   (El Nunu / Xcellcare already covered them via VACCINE_COMPONENT_MAP).
+//   "Medicare of New York" / "Medicare of NY" is now recognized as Medicare by the exact-match
+//   Medicare check (Medicare BP G8752-G8755); it used to fall through as non-Medicare.
+//   Same fix: El Nunu 1.19, Hasan 2.25, Hasnayen 1.60, Highland 1.30, Xcellcare 1.14. Bronx already matched it ("starts with Medicare").
+//   Medicare BP check (G8752-G8755) now matches ANY insurance name starting with "Medicare", whatever
+//   follows it (same as Bronx).
 // 6.25 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the vaccine component map, the Medicare flu list (G0008; 90616 excluded, not a flu product),
 //   and the auto-link + claim-link maps -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Hasan 2.24, Hasnayen 1.59, Highland 1.29, Xcellcare 1.13.
 // 6.24 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
@@ -3192,7 +3201,7 @@ function __smartCoderReadVersion(fallback) {
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
         const medsPresent = isTakingMedicationPresent();
 
         const flags = extractClinicalFlags(text);
@@ -6762,7 +6771,7 @@ function __smartCoderReadVersion(fallback) {
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381"
+            "91322","91323","96380","96381","90616","90653","90662","90673"
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;
@@ -7163,8 +7172,11 @@ function __smartCoderReadVersion(fallback) {
         cptRows.forEach(row => {
             const feeInput = cl_getCPTBilledFeeInput(row);
             if (!feeInput) return;
-            const fee = parseFloat(feeInput.value);
-            if (isNaN(fee) || fee === 0) cl_setInputValue(feeInput, '0.01');
+            // Strip "$" / "," so a formatted fee like "$1,250.00" is never
+            // misread as non-numeric and overwritten.
+            const raw = (feeInput.value || '').replace(/[$,\s]/g, '');
+            const fee = raw === '' ? 0 : parseFloat(raw);
+            if (fee === 0) cl_setInputValue(feeInput, '0.01');
         });
     }
 
@@ -8934,7 +8946,7 @@ function __smartCoderReadVersion(fallback) {
             bmiCode = "3008F";
         }
 
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         let bpClass = "";
         let sysCode = "";

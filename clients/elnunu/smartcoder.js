@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         El Nunu Medical SmartCoder v1.12
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.19 (2026-10-29) - "Medicare of New York" / "Medicare of NY" is now recognized as Medicare by the exact-match
+//   Medicare check (Medicare BP G8752-G8755); it used to fall through as non-Medicare.
+//   Same fix: Getwell 6.26, Hasan 2.25, Hasnayen 1.60, Highland 1.30, Xcellcare 1.14. Bronx already matched it ("starts with Medicare").
+//   Medicare BP check (G8752-G8755) now matches ANY insurance name starting with "Medicare", whatever
+//   follows it (same as Bronx).
 // 1.18 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
 //   loader update available" box appears bottom-left; its Update button opens Tampermonkey's update page
 //   for loader 1.2.9. Not shown with loader 1.2.9+. Same snippet in all clients.
@@ -2291,7 +2296,7 @@ function __smartCoderReadVersion(fallback) {
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;

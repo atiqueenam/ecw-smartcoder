@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.59
+// @version      1.60
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,14 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.60 (2026-10-29) - SL modifier (patients under 19): 90616, 90653, 90662, 90673 added to the SL vaccine list. Same fix: Bronx 2.15, Getwell 6.26, Hasan 2.25, Highland 1.30
+//   (El Nunu / Xcellcare already covered them via VACCINE_COMPONENT_MAP).
+//   "Medicare of New York" / "Medicare of NY" is now recognized as Medicare by the exact-match
+//   Medicare check (Medicare BP G8752-G8755 and the straight-Medicare check (Preventive Counseling payer block)); it used to fall through as non-Medicare.
+//   Same fix: El Nunu 1.19, Getwell 6.26, Hasan 2.25, Highland 1.30, Xcellcare 1.14. Bronx already matched it ("starts with Medicare").
+//   Medicare BP check (G8752-G8755) now matches ANY insurance name starting with "Medicare", whatever
+//   follows it (same as Bronx). The straight-Medicare check (Preventive Counseling payer block)
+//   now also matches any name starting with "Medicare" — undoes the 2026-08-18 Hasnayen-only revert.
 // 1.59 (2026-10-29) - Vaccine codes 90616, 90653, 90662, 90673 added to the vaccine component map, the Medicare flu list (G0008; 90616 excluded, not a flu product),
 //   and the auto-link + claim-link maps -> Z23 (were missing, so Z23 did not link). Same fix: Bronx 2.14, Getwell 6.25, Hasan 2.24, Highland 1.29, Xcellcare 1.13.
 // 1.58 (2026-10-23) - Loader update notice: when started by loader 1.2.8 or older, a small "SmartCoder
@@ -2741,7 +2749,7 @@ function __smartCoderReadVersion(fallback) {
         // of "Healthfirst" as one word — treat both as the same payer for
         // the Healthfirst-specific coding rules below.
         const isHealthfirst = !!insurance && /^health[\s-]*first\b/i.test(insurance.trim());
-        const isMedicareInsurance = !!insurance && /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(insurance.trim());
+        const isMedicareInsurance = !!insurance && /^medicare\b/i.test(insurance.trim());
 
         const flags = extractClinicalFlags(text);
         const { hasDep, hasTob, hasAlc, hasSocialNeeds } = flags;
@@ -5350,6 +5358,8 @@ function __smartCoderReadVersion(fallback) {
     // REVERTED (2026-08-18): the "starts with Medicare" broadening only
     // applies to Getwell (clients/getwell/smartcoder.js) — Hasnayen's own
     // rule set is different and keeps this exact/anchored match.
+    // 1.60 (2026-10-29): re-broadened on request — ANY insurance name that
+    // starts with "Medicare" is straight Medicare again, whatever follows.
     //
     // Real charts often carry harmless trailing/interior noise on an
     // otherwise-plain Medicare name — a parenthetical like "(Traditional)"
@@ -5369,7 +5379,7 @@ function __smartCoderReadVersion(fallback) {
         name = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
         // Normalize stray dashes/extra spacing between words.
         name = name.replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
-        return /^medicare(\s+part\s*[ab]|\s+[ab])?$/i.test(name);
+        return /^medicare\b/i.test(name);
     }
 
     // Established = at least one PRIOR encounter exists in patient history
@@ -6466,7 +6476,7 @@ function __smartCoderReadVersion(fallback) {
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381"
+            "91322","91323","96380","96381","90616","90653","90662","90673"
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;

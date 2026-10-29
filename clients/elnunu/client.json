@@ -5,7 +5,7 @@
   "hostnames": [
     "ardegl70caebshiqyqapp.ecwcloud.com"
   ],
-  "version": "1.18",
+  "version": "1.19",
   "entry": "smartcoder.js",
   "enabled": true
 }
