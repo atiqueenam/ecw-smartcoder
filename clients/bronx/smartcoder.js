@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.16
+// @version      2.17
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,11 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.17 (2026-10-30) - 99408 and 99499 are always deleted if present (all payers), same as G0506/99490 (2.06).
+//   99214 day gap is now a flat 3 days (was 7, or 14 with a counseling code in play): 99214 is chosen unless a
+//   99214 or 99204 was billed in the last 3 days. When an eligible 99401 or 99406 is on the chart (P/C or SM clicked,
+//   gating passes), 99213 + that code is used instead of 99214 (no day limit). 99408 no longer counts as the alcohol-screening
+//   CPT that keeps Z13.9 (it is deleted). Bronx only.
 // 2.16 (2026-10-30) - Vaccine -> Z23: Analyze: a vaccine (product, admin or COVID code) on the chart or being added now proposes Z23 when it is missing.
 //   Auto Link / Claim Link: vaccine codes link only to Z23; without Z23 on the chart/claim the line is left unlinked
 //   (no more office-visit ICD fallback) (66 codes). Same change: El Nunu 1.20, Getwell 6.27, Hasan 2.26, Hasnayen 1.61, Highland 1.31, Xcellcare 1.16.
@@ -3170,7 +3175,7 @@ function __smartCoderReadVersion(fallback) {
         }
 
         const DEPRESSION_SCREENING_CPTS = ['G8510', 'G8431', 'G0444', '3725F'];
-        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049', '99408'];
+        const ALCOHOL_SCREENING_CPTS = ['G9622', '3016F', 'G0442', 'H0049']; // 2.17: 99408 always deleted, so it no longer keeps Z13.9
         const hasDepressionScreeningCpt = DEPRESSION_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
         const hasAlcoholScreeningCpt = ALCOHOL_SCREENING_CPTS.some(c => currentCodes.has(c) || desired.has(c));
         const currentICDCodesForScreening = getICDGridEntriesFast().map(e => e.code.toUpperCase());
@@ -3250,10 +3255,10 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // Bronx Health: G0506 and 99490 are never billed — always delete if
+        // Bronx Health: G0506, 99490, 99408 and 99499 are never billed — always delete if
         // present, for every payer.
         currentRows.forEach(r => {
-            if (['G0506', '99490'].includes(r.code) && !toDelete.some(d => d.row === r.row)) {
+            if (['G0506', '99490', '99408', '99499'].includes(r.code) && !toDelete.some(d => d.row === r.row)) {
                 toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: r.code + ' is never billed — always deleted if present' });
             }
         });
@@ -3537,31 +3542,6 @@ function __smartCoderReadVersion(fallback) {
             return v === 'f/u' || v === 'fu' || v === 'follow up' || v === 'follow-up';
         }
 
-        // ── Counseling code held against the office-visit level ─────────
-        // 99401 and 99406 can never be billed alongside 99214 (see the
-        // billing-exclusivity block further down), and 99214 pays more —
-        // but not so much more that it's worth losing a counseling code on
-        // an encounter where 99214 was ALREADY billed a few days ago. So
-        // the 99214 day gap widens from 7 to 14 days whenever a counseling
-        // code is genuinely in play for this encounter.
-        //
-        // "In play" means BOTH of:
-        //   1. the code is already ON the chart — the P/C and SM quick
-        //      actions are clicked before Start Action, so an applicable
-        //      counseling code is present by the time this runs. Nothing
-        //      is auto-added here; if the button wasn't clicked there is
-        //      no counseling code to protect and the gap stays at 7.
-        //   2. its quick-action gating is currently satisfied — an
-        //      ineligible one (30-day overlap, blocked payer, no chronic
-        //      dx, televisit, no vitals, non-smoker, under-age) is being
-        //      deleted elsewhere in this same run, so it must not widen
-        //      the gap on its way out.
-        // Only ONE counseling code is ever billed per encounter, so 99401
-        // is checked first and 99406 only if 99401 isn't the one.
-        const counselingHeldForOV =
-            (rawCPTCodesNow.includes('99401') && !gating.pc.disabled) ? '99401' :
-            (rawCPTCodesNow.includes('99406') && !gating.sm.disabled) ? '99406' :
-            null;
         if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
             let ovCode;
             let ovIsNewPatient = false;
@@ -3655,20 +3635,29 @@ function __smartCoderReadVersion(fallback) {
                     // 4+ total dx count — qualifies for 99214, as long as
                     // 99214 hasn't already been billed inside the day gap.
                     //
-                    // The gap itself is now counseling-aware (revenue
-                    // balance, see counselingHeldForOV above): 7 days when
-                    // no counseling code is in play, 14 days when one is.
-                    // Stretching it to 14 is what makes the encounter fall
-                    // to 99213 and so KEEP the counseling code, instead of
-                    // taking 99214 and losing it to the exclusivity rule.
-                    const ovGapDays = counselingHeldForOV ? 14 : 7;
-                    if (chronicCount >= 1 && !codeUsedInLastDays('99214', ovGapDays)) {
+                    // 2.17: the gap is a flat 3 days (the counseling-aware
+                    // 14-day gap is gone), and a level-4 visit of either kind
+                    // — 99214 or 99204 — billed inside it blocks 99214.
+                    const ovGapDays = 3;
+                    const level4InGap = ['99214', '99204'].find(c => codeUsedInLastDays(c, ovGapDays));
+                    // 99401/99406 are never billed with 99214. When an eligible
+                    // one is on the chart (P/C or SM clicked and its gating
+                    // passes), keep it and use 99213 instead of 99214. Only one
+                    // counseling code is billed per encounter: 99401 first.
+                    const counselingHeldForOV =
+                        (rawCPTCodesNow.includes('99401') && !gating.pc.disabled) ? '99401' :
+                        (rawCPTCodesNow.includes('99406') && !gating.sm.disabled) ? '99406' :
+                        null;
+                    if (chronicCount >= 1 && counselingHeldForOV) {
+                        ovCode = '99213';
+                        ovReason = `${counselingHeldForOV} eligible this encounter — 99213 + ${counselingHeldForOV} (${counselingHeldForOV} is not billed with 99214)`;
+                    } else if (chronicCount >= 1 && !level4InGap) {
                         ovCode = '99214';
-                        ovReason = `${chronicCount} chronic dx present — 99214 (not used in last ${ovGapDays} days)`;
+                        ovReason = `${chronicCount} chronic dx present — 99214 (no 99214/99204 in last ${ovGapDays} days)`;
                     } else {
                         ovCode = '99213'; // rule 6.iv: default
-                        ovReason = (chronicCount >= 1 && counselingHeldForOV)
-                            ? `99214 billed within the last 14 days and ${counselingHeldForOV} applies this encounter — 99213 + ${counselingHeldForOV}`
+                        ovReason = (chronicCount >= 1 && level4InGap)
+                            ? `${level4InGap} billed within the last ${ovGapDays} days — 99213`
                             : 'Established visit — 99213 (default)';
                     }
                 }
