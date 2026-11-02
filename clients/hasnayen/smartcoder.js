@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.61
+// @version      1.62
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.62 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481, 90612, 90613, 90632, 90636, 90639, 90649, 90655, 90675, 90678, 90679, 90683, 90684, 90690, 90691, 90717, 90733, 90739 had no Z23 link rule
+//   (1.16-era port missed them), so they linked like the office visit instead of to Z23 — added to both maps.
+//   Same fix: Bronx 2.18, Getwell 6.28, Hasan 2.27, Highland 1.32, Xcellcare 1.18. El Nunu already had them all.
 // 1.61 (2026-10-30) - Vaccine -> Z23: Rule 28 (immunization -> add Z23) now also counts 90749 and the RSV antibody codes 90380-90382 / 96380-96381.
 //   Auto Link / Claim Link: vaccine codes link only to Z23; without Z23 on the chart/claim the line is left unlinked
 //   (no more office-visit ICD fallback) (67 codes). Same change: Bronx 2.16, El Nunu 1.20, Getwell 6.27, Hasan 2.26, Highland 1.31, Xcellcare 1.16.
@@ -5952,6 +5955,24 @@ function __smartCoderReadVersion(fallback) {
             "90382": { type: "exact", icds: ["Z23"] },
             "96380": { type: "exact", icds: ["Z23"] },
             "96381": { type: "exact", icds: ["Z23"] },
+            "90481": { type: "exact", icds: ["Z23"] },
+            "90612": { type: "exact", icds: ["Z23"] },
+            "90613": { type: "exact", icds: ["Z23"] },
+            "90632": { type: "exact", icds: ["Z23"] },
+            "90636": { type: "exact", icds: ["Z23"] },
+            "90639": { type: "exact", icds: ["Z23"] },
+            "90649": { type: "exact", icds: ["Z23"] },
+            "90655": { type: "exact", icds: ["Z23"] },
+            "90675": { type: "exact", icds: ["Z23"] },
+            "90678": { type: "exact", icds: ["Z23"] },
+            "90679": { type: "exact", icds: ["Z23"] },
+            "90683": { type: "exact", icds: ["Z23"] },
+            "90684": { type: "exact", icds: ["Z23"] },
+            "90690": { type: "exact", icds: ["Z23"] },
+            "90691": { type: "exact", icds: ["Z23"] },
+            "90717": { type: "exact", icds: ["Z23"] },
+            "90733": { type: "exact", icds: ["Z23"] },
+            "90739": { type: "exact", icds: ["Z23"] },
             "93000": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit" },
             "93005": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit" },
             "93010": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit" },
@@ -7313,6 +7334,24 @@ function __smartCoderReadVersion(fallback) {
             "90382": { type: "exact", icds: ["Z23"] },
             "96380": { type: "exact", icds: ["Z23"] },
             "96381": { type: "exact", icds: ["Z23"] },
+            "90481": { type: "exact", icds: ["Z23"] },
+            "90612": { type: "exact", icds: ["Z23"] },
+            "90613": { type: "exact", icds: ["Z23"] },
+            "90632": { type: "exact", icds: ["Z23"] },
+            "90636": { type: "exact", icds: ["Z23"] },
+            "90639": { type: "exact", icds: ["Z23"] },
+            "90649": { type: "exact", icds: ["Z23"] },
+            "90655": { type: "exact", icds: ["Z23"] },
+            "90675": { type: "exact", icds: ["Z23"] },
+            "90678": { type: "exact", icds: ["Z23"] },
+            "90679": { type: "exact", icds: ["Z23"] },
+            "90683": { type: "exact", icds: ["Z23"] },
+            "90684": { type: "exact", icds: ["Z23"] },
+            "90690": { type: "exact", icds: ["Z23"] },
+            "90691": { type: "exact", icds: ["Z23"] },
+            "90717": { type: "exact", icds: ["Z23"] },
+            "90733": { type: "exact", icds: ["Z23"] },
+            "90739": { type: "exact", icds: ["Z23"] },
             "93000": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit" },
             "93005": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit" },
             "93010": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit" },

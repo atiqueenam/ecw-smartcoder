@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.18 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481 had no Z23 link rule
+//   (1.16-era port missed them), so they linked like the office visit instead of to Z23 — added to both maps.
+//   Same fix: Bronx 2.18, Getwell 6.28, Hasan 2.27, Hasnayen 1.62, Highland 1.32. El Nunu already had them all.
 // 1.17 (2026-11-02) - Office visit code is kept EXACTLY as the provider added it: no more new/established
 //   correction, no removal of extra OV codes, no removal with a Z-only preventive or 99214/99205 with TCM.
 //   An OV code is still proposed only when none is on the chart. UHC: no office visit with a preventive
@@ -5018,6 +5021,7 @@ function __smartCoderReadVersion(fallback) {
             "90382": { type: "exact", icds: ["Z23"] },
             "96380": { type: "exact", icds: ["Z23"] },
             "96381": { type: "exact", icds: ["Z23"] },
+            "90481": { type: "exact", icds: ["Z23"] },
             "93000": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit", useRowOrder: true },
             "93005": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit", useRowOrder: true },
             "93010": { type: "customICDCollector", icdList: ecgICDs, fallback: "al_officeVisit", useRowOrder: true },
@@ -6374,6 +6378,7 @@ function __smartCoderReadVersion(fallback) {
             "90382": { type: "exact", icds: ["Z23"] },
             "96380": { type: "exact", icds: ["Z23"] },
             "96381": { type: "exact", icds: ["Z23"] },
+            "90481": { type: "exact", icds: ["Z23"] },
             "93000": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit", useRowOrder: true },
             "93005": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit", useRowOrder: true },
             "93010": { type: "customICDCollector", icdList: ecgICDs, fallback: "cl_officeVisit", useRowOrder: true },
