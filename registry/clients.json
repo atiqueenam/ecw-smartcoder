@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-30T10:36:52.150Z",
+  "generatedAt": "2026-11-02T08:03:24.252Z",
   "clients": [
     {
       "id": "bronx",
@@ -75,9 +75,9 @@
       "hostnames": [
         "hcvyfpscdfvjkmhe6dapp.ecwcloud.com"
       ],
-      "version": "1.16",
+      "version": "1.17",
       "file": "clients/xcellcare/smartcoder.js",
-      "sha256": "375f2d08d68ee68d6c33d139c6115a1582a74205a4cce0b84cd2b10574310396"
+      "sha256": "8a445313b21f16932bccf15aa7603a7b0413ace16888dbffe1727ac7faa816f1"
     }
   ]
 }
