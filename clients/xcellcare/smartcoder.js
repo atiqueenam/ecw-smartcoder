@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.17 (2026-11-02) - Office visit code is kept EXACTLY as the provider added it: no more new/established
+//   correction, no removal of extra OV codes, no removal with a Z-only preventive or 99214/99205 with TCM.
+//   An OV code is still proposed only when none is on the chart. UHC: no office visit with a preventive
+//   visit (any OV code removed, none added); UHC: no G-codes at all (G0101/G0102/G0103
+//   exception removed).
+//   Commercial payers other than UHC are no longer special-cased: NYCE PPO rules removed (no OV with
+//   preventive, P/C + Obesity blocks, televisit POS 02). XcellCare only.
 // 1.16 (2026-10-30) - Vaccine -> Z23: Analyze: a vaccine (product, admin or COVID code) on the chart or being added now proposes Z23 when it is missing.
 //   Auto Link / Claim Link: vaccine codes link only to Z23; without Z23 on the chart/claim the line is left unlinked
 //   (no more office-visit ICD fallback) (67 codes). Same change: Bronx 2.16, El Nunu 1.20, Getwell 6.27, Hasan 2.26, Hasnayen 1.61, Highland 1.31.
@@ -2556,13 +2563,11 @@ function __smartCoderReadVersion(fallback) {
         const currentCodes = new Set(currentRows.map(r => r.code));
 
         // United Health Care: no G-prefixed CPT codes at all, for any
-        // reason — EXCEPT G0101/G0102/G0103, which UHC does use and which
-        // must never be swept up by this rule.
+        // reason (1.17: no exceptions — G0101/G0102/G0103 included).
         const isUHC = isUHCInsurance(insurance);
-        const UHC_GCODE_EXCEPTIONS = new Set(['G0101', 'G0102', 'G0103']);
         if (isUHC) {
             Array.from(desired.keys()).forEach(code => {
-                if (/^G\d/i.test(code) && !UHC_GCODE_EXCEPTIONS.has(code)) desired.delete(code);
+                if (/^G\d/i.test(code)) desired.delete(code);
             });
         }
 
@@ -2718,11 +2723,10 @@ function __smartCoderReadVersion(fallback) {
 
         // United Health Care: also remove any G-code already on the chart,
         // even ones normally exempt from deletion elsewhere (e.g. G0444/
-        // G0442) — this payer doesn't use G-codes at all, EXCEPT
-        // G0101/G0102/G0103 (UHC_GCODE_EXCEPTIONS above), which stay.
+        // G0442) — this payer doesn't use G-codes at all.
         if (isUHC) {
             currentRows.forEach(r => {
-                if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
+                if (/^G\d/i.test(r.code) && !toDelete.some(d => d.code === r.code)) {
                     toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'United Health Care — G-codes not used for this payer' });
                 }
             });
@@ -2894,44 +2898,20 @@ function __smartCoderReadVersion(fallback) {
         // 6.v below (televisit ESTPT visits always use 99213). No longer
         // used for 1157F/1158F — those have no televisit rule.
 
-        // ---- NYCE PPO: no office-visit E/M code alongside a Preventive
-        // visit. If a preventive CPT (993xx or G0438/G0439) is present on
-        // a NYCE PPO claim, an office-visit code isn't billable alongside
-        // it — remove any already on the chart and don't suggest a new one.
-        const isNycePPOForOV = isNycePPOIns(insurance);
-        if (isNycePPOForOV && hasPreventiveVisit) {
-            currentRows.forEach(r => {
-                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'NYCE PPO — office-visit E/M code not billable alongside a Preventive visit' });
-                }
-            });
-        }
-
-        // Hasan Sheikh only: if a TCM code (99495/99496) is on the chart,
-        // NO office-visit E&M code is billed alongside it at all — not
-        // even a downgraded one. (Every other client instead downgrades
-        // 99214 -> 99213 when both are applicable; Bronx/Getwell allow
-        // 99214 and TCM together with no change. See the shared
-        // 99401/99406-vs-99214 rule right after this block for those.)
         // ---- Office Visit E&M code (SOP: Office visit code selection) ----
-        // - One office-visit code per visit. A code the provider entered is
-        //   kept as-is (never up/downgraded); only a new-vs-established
-        //   mismatch is corrected, keeping the level (99213 <-> 99203).
+        // - An office-visit code the provider entered is kept EXACTLY as
+        //   added (1.17): never up/downgraded, never switched new <->
+        //   established, never removed for preventive/TCM.
+        // - United Health Care + preventive visit: no office visit at all —
+        //   any office-visit code is removed and none is added (1.17).
         // - No code on the chart: new patient 99203; established 99213, or
         //   99214 when 4+ qualifying dx incl. 1+ chronic, unless 99214 was
         //   billed in the last month for the same primary diagnosis.
-        //   Televisit: 99213.
-        // - Preventive visit: an office visit is billed alongside it only
-        //   when a disease-specific dx is on the chart; with only Z /
-        //   non-problem codes, any office-visit code is removed (SOP §13).
-        // - TCM (99495/99496): no office visit added; 99214/99205 removed
-        //   (SOP §14). NYCE PPO + preventive: no office visit (above).
+        //   Televisit: 99213. Not added with a preventive visit that has
+        //   only Z / non-problem codes (SOP §13), nor with TCM (SOP §14).
         let computedOvCodeForBilling = null;
         {
             const NEW_OV_CODES = ['99202', '99203', '99204', '99205'];
-            const EST_OV_CODES = ['99211', '99212', '99213', '99214', '99215'];
-            const EST_TO_NEW = { '99211': '99202', '99212': '99202', '99213': '99203', '99214': '99204', '99215': '99205' };
-            const NEW_TO_EST = { '99202': '99212', '99203': '99213', '99204': '99214', '99205': '99215' };
             const hasTCMOnChartForOV = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
             const visitCategory = classifyVisitType(getVisitType());
             const presentOvRows = currentRows.filter(r => OFFICE_VISIT_EM_CODES.includes(r.code));
@@ -2953,27 +2933,14 @@ function __smartCoderReadVersion(fallback) {
                 return true;
             });
 
-            if (hasTCMOnChartForOV) {
-                presentOvRows.filter(r => r.code === '99214' || r.code === '99205')
-                    .forEach(r => deleteOvRow(r, `${r.code} is not billed with a TCM code (99495/99496)`));
-            }
-            const skipOV = hasTCMOnChartForOV || (isNycePPOForOV && hasPreventiveVisit);
-
-            if (!skipOV && hasPreventiveVisit && !qualifyingDx.length) {
-                presentOvRows.forEach(r => deleteOvRow(r, 'Preventive visit with no disease-specific diagnosis — bill the preventive code only'));
-            } else if (!skipOV) {
-                const rightFamily = isNewPatientForOV ? NEW_OV_CODES : EST_OV_CODES;
-                const keepRow = presentOvRows.find(r => rightFamily.includes(r.code));
+            if (isUHC && hasPreventiveVisit) {
+                presentOvRows.forEach(r => deleteOvRow(r, 'United Health Care — no office-visit code billed with a Preventive visit'));
+            } else if (presentOvRows.length) {
+                // Provider's office-visit code(s) — kept exactly as added.
+                computedOvCodeForBilling = presentOvRows[0].code;
+            } else if (!hasTCMOnChartForOV && !(hasPreventiveVisit && !qualifyingDx.length)) {
                 let ovCode = null, ovReason = null;
-                if (keepRow) {
-                    ovCode = keepRow.code; // provider's code — kept as-is
-                } else if (presentOvRows.length) {
-                    const wrong = presentOvRows[0].code;
-                    ovCode = isNewPatientForOV ? EST_TO_NEW[wrong] : NEW_TO_EST[wrong];
-                    ovReason = isNewPatientForOV
-                        ? `New patient — ${wrong} corrected to the new-patient code at the same level`
-                        : `Established patient — ${wrong} corrected to the established-patient code at the same level`;
-                } else if (isNewPatientForOV) {
+                if (isNewPatientForOV) {
                     ovCode = '99203';
                     ovReason = 'New patient — no office-visit code on the chart';
                 } else if (isTelevisitNote) {
@@ -2997,12 +2964,6 @@ function __smartCoderReadVersion(fallback) {
                 if (ovCode && !currentCodes.has(ovCode)) {
                     toAdd.unshift({ code: ovCode, reason: ovReason, kind: 'em', emCategory: 'E/M SERVICES', emIsNewPatient: NEW_OV_CODES.includes(ovCode) });
                 }
-                // Only ONE office-visit code: remove every other one.
-                let keptOne = false;
-                presentOvRows.forEach(r => {
-                    if (r.code === ovCode && !keptOne) { keptOne = true; return; }
-                    deleteOvRow(r, r.code === ovCode ? `Duplicate office-visit code ${r.code}` : `Office-visit code should be ${ovCode}`);
-                });
                 computedOvCodeForBilling = ovCode;
             }
         }
@@ -6829,10 +6790,10 @@ function __smartCoderReadVersion(fallback) {
         if (claimPOSInput) cl_setInputValue(claimPOSInput, '10');
     }
 
-    // ─── Telehealth POS rule (Medicaid / CenterLight / NYCE PPO) ───────
-    // If primary insurance is Medicaid, CenterLight, or NYCE PPO, and any
+    // ─── Telehealth POS rule (Medicaid / CenterLight) ───────
+    // If primary insurance is Medicaid or CenterLight, and any
     // CPT row has MOD1 == "95", set POS to "02" on every CPT row.
-    const cl_MEDICAID_TELEHEALTH_POS_INSURANCES = ['MEDICAID', 'CENTERLIGHT', 'CENTER LIGHT', 'NYCE PPO'];
+    const cl_MEDICAID_TELEHEALTH_POS_INSURANCES = ['MEDICAID', 'CENTERLIGHT', 'CENTER LIGHT'];
 
     // Televisit modifier (95 or 93) in any MOD1-MOD4 slot on any row.
     function cl_hasTelehealthModifier(cptRows) {
@@ -6851,7 +6812,7 @@ function __smartCoderReadVersion(fallback) {
 
         if (!cl_hasTelehealthModifier(cptRows)) return;
 
-        // SOP: POS 02 for Medicaid / CenterLight / NYCE PPO televisits.
+        // SOP: POS 02 for Medicaid / CenterLight televisits.
         cptRows.forEach(row => {
             const posInput = cl_getCPTPOSInput(row);
             if (posInput) cl_setInputValue(posInput, '02');
@@ -7149,8 +7110,6 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isUHCInsurance(insurance)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for UnitedHealthcare / Oxford / UMR' };
-        } else if (isNycePPOIns(insurance)) {
-            ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -7303,7 +7262,7 @@ function __smartCoderReadVersion(fallback) {
     // Preventive Counseling can't be applied for these payers: MetroPlus,
     // Medicaid, straight/plain Medicare (not VNS Choice — that's handled
     // separately via the Medicare AWV codes elsewhere), UHC/United
-    // Healthcare, and Nyce PPO.
+    // Healthcare.
     // Preventive Counsel is never applicable for these payers. "Medicare"
     // means straight Medicare specifically — the insurance name must
     // START with "Medicare". A Medicare-branded plan administered by
@@ -7315,15 +7274,8 @@ function __smartCoderReadVersion(fallback) {
         if (/metro\s*plus/i.test(name)) return true;
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
-        if (isNycePPOIns(name)) return true;
         if (/^medicare\b/i.test(name)) return true; // straight Medicare = starts with "Medicare"
         return false;
-    }
-
-    // NYCE PPO — its own payer, used above and by the SM/OB gating and
-    // the preventive-visit/office-visit exclusivity rule.
-    function isNycePPOIns(insurance) {
-        return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
     }
 
     // Capitated plans (Hasan Sheikh only) — 99401 Preventive Counseling is
