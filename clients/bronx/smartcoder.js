@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.19
+// @version      2.20
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.20 (2026-11-10) - 2.19 reverted: Analyze/Auto Link office-visit add/keep rules are back to 2.18 behavior (99483 no longer deletes or blocks the OV code).
+//   Instead, Claim Link: when 99483 is on the claim, every office-visit E/M row (99211-99215, 99203-99205) is unticked
+//   (column-2 checkbox; row stays on the claim). Bronx only.
 // 2.19 (2026-11-10) - 99483 on the chart: no office-visit E/M code (99211-99215, 99203-99205) is added, and any already on the chart is deleted
 //   (practice-added 99215/99204/99205 included). Bronx only.
 // 2.18 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481, 90612, 90613, 90632, 90636, 90639, 90649, 90650, 90655, 90675, 90678, 90679, 90683, 90684, 90690, 90691, 90717, 90733, 90739 had no Z23 link rule
@@ -2849,9 +2852,6 @@ function __smartCoderReadVersion(fallback) {
         // exists) and to skip suggesting a new one further down.
         // Bronx does NOT follow the commercial-insurance rule (2.13).
         const isNycePPOForOV = isNycePPOIns(insurance);
-        // 99483 (cognitive assessment & care plan) on the chart: no office-
-        // visit E/M code may be added or kept alongside it (all payers).
-        const has99483ForOV = rawCPTCodeSet.has('99483');
 
         // ---- Quick-action gating cleanup ----
         // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
@@ -3376,17 +3376,6 @@ function __smartCoderReadVersion(fallback) {
             });
         }
 
-        // ---- 99483 present: remove every office-visit E/M code on the chart
-        // (including practice-added 99215/99204/99205); the OV section below
-        // is also skipped so none is re-added.
-        if (has99483ForOV) {
-            currentRows.forEach(r => {
-                if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: '99483 present — no office-visit E/M code is billed alongside 99483' });
-                }
-            });
-        }
-
         // ---- Preventive bundle ICDs (Z00.01/Z00.121): delete if Preventive
         // isn't on the chart. These two are the age-split "well visit"
         // diagnosis codes that only belong alongside a Preventive E&M/AWV
@@ -3561,7 +3550,7 @@ function __smartCoderReadVersion(fallback) {
             return v === 'f/u' || v === 'fu' || v === 'follow up' || v === 'follow-up';
         }
 
-        if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit) && !has99483ForOV) {
+        if (visitCategory && !(isNycePPOForOV && hasPreventiveVisit)) {
             let ovCode;
             let ovIsNewPatient = false;
             let ovReason;
@@ -3749,7 +3738,7 @@ function __smartCoderReadVersion(fallback) {
         // one already sitting on the chart, so these rules still work
         // even when nothing about the office-visit code itself changed.
         {
-            const effectiveOvCode = has99483ForOV ? null : computedOvCodeForBilling
+            const effectiveOvCode = computedOvCodeForBilling
                 || currentRows.map(r => r.code).find(c => OFFICE_VISIT_EM_CODES.includes(c))
                 || null;
             const hasTCMOnChart = rawCPTCodesNow.includes('99495') || rawCPTCodesNow.includes('99496');
@@ -6765,6 +6754,21 @@ function __smartCoderReadVersion(fallback) {
         });
     }
 
+    // 99483 on the claim (Bronx): every office-visit E/M row's column-2
+    // checkbox is unticked (rows stay on the claim). Analyze/Auto Link
+    // still keep/add the office-visit code as normal — this is Claim Link only.
+    const cl_OFFICE_VISIT_CODES_FOR_99483 = new Set(['99211', '99212', '99213', '99214', '99215', '99203', '99204', '99205']);
+    function cl_uncheckOfficeVisitWith99483(cptRows) {
+        const has99483 = cptRows.some(row => (cl_getCPTCode(row) || '').trim().toUpperCase() === '99483');
+        if (!has99483) return;
+        cptRows.forEach(row => {
+            const code = (cl_getCPTCode(row) || '').trim().toUpperCase();
+            if (!cl_OFFICE_VISIT_CODES_FOR_99483.has(code)) return;
+            const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
+            if (chk && chk.checked && !chk.disabled) chk.click();
+        });
+    }
+
     // "Assign To Patient" checkbox in column 2 — treated as the row's selected state.
     function cl_isCPTRowSelected(row) {
         const chk = row.querySelector('td:nth-child(2) input[type="checkbox"]');
@@ -7615,6 +7619,7 @@ function __smartCoderReadVersion(fallback) {
             cl_applyModifier59(cptRows);
             cl_applyQWModifier(cptRows);
             cl_uncheckNeverBillToInsCodes(cptRows);
+            cl_uncheckOfficeVisitWith99483(cptRows);
         } finally {
             extensionBusy = false;
         }
