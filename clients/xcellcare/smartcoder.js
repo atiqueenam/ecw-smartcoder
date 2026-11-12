@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.19 (2026-11-12) - Vaccine components: every vaccine now counts as 1 component, so under-19 admin is 90460 x vaccine count
+//   and 90461 is never added (a stale 90461 is removed). SL modifier (Auto Link): same rule as Hasan — under 19, Hasan's SL code list
+//   (no longer every component-map code).
+//   Same change: Bronx 2.21, El Nunu 1.22, Getwell 6.29, Hasan 2.28, Hasnayen 1.63, Highland 1.33.
 // 1.18 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481 had no Z23 link rule
 //   (1.16-era port missed them), so they linked like the office visit instead of to Z23 — added to both maps.
 //   Same fix: Bronx 2.18, Getwell 6.28, Hasan 2.27, Hasnayen 1.62, Highland 1.32. El Nunu already had them all.
@@ -1479,20 +1483,22 @@ function __smartCoderReadVersion(fallback) {
     // SOP §6.2 component counts (90749 has no count in the SOP and is not
     // treated as a vaccine product). COVID products count as 1 component
     // for non-Medicare payers (Medicare uses 90480 instead).
+    // Every vaccine counts as 1 component (no component counting, so no
+    // 90461) — the map now only lists which CPTs are vaccine products.
     const VACCINE_COMPONENT_MAP = {
-        '90380': 1, '90381': 1, '90382': 1, '90589': 1, '90611': 2,
-        '90612': 2, '90613': 2, '90616': 1, '90619': 1, '90620': 1,
+        '90380': 1, '90381': 1, '90382': 1, '90589': 1, '90611': 1,
+        '90612': 1, '90613': 1, '90616': 1, '90619': 1, '90620': 1,
         '90621': 1, '90622': 1, '90623': 1, '90624': 1, '90632': 1,
-        '90633': 1, '90636': 2, '90639': 1, '90647': 1, '90648': 1,
+        '90633': 1, '90636': 1, '90639': 1, '90647': 1, '90648': 1,
         '90649': 1, '90650': 1, '90651': 1, '90653': 1, '90655': 1,
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90662': 1, '90670': 1, '90671': 1, '90672': 1, '90673': 1,
         '90674': 1, '90675': 1, '90677': 1, '90678': 1, '90679': 1,
         '90680': 1, '90681': 1, '90682': 1, '90683': 1, '90684': 1,
         '90685': 1, '90686': 1, '90687': 1, '90688': 1, '90690': 1,
-        '90691': 1, '90696': 4, '90697': 6, '90698': 5, '90700': 3,
-        '90702': 2, '90707': 3, '90710': 4, '90713': 1, '90714': 2,
-        '90715': 3, '90716': 1, '90717': 1, '90723': 5, '90732': 1,
+        '90691': 1, '90696': 1, '90697': 1, '90698': 1, '90700': 1,
+        '90702': 1, '90707': 1, '90710': 1, '90713': 1, '90714': 1,
+        '90715': 1, '90716': 1, '90717': 1, '90723': 1, '90732': 1,
         '90733': 1, '90734': 1, '90739': 1, '90740': 1, '90743': 1,
         '90744': 1, '90746': 1, '90747': 1, '90750': 1, '90756': 1,
         '91304': 1, '91319': 1, '91320': 1, '91321': 1, '91322': 1, '91323': 1
@@ -1587,12 +1593,8 @@ function __smartCoderReadVersion(fallback) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
                 }
             } else if (age != null) {
-                const totalComponents = otherVaccineRows.reduce((sum, r) => sum + (VACCINE_COMPONENT_MAP[r.code] || 1), 0);
-                plan.push({ code: '90460', units: vaccineCount, reason: `${vaccineCount} vaccine(s), ${totalComponents} total component(s) — first component of each` });
-                const extra = totalComponents - vaccineCount;
-                if (extra > 0) {
-                    plan.push({ code: '90461', units: extra, reason: `${totalComponents} total component(s) across ${vaccineCount} vaccine(s) — additional components` });
-                }
+                // Every vaccine = 1 component: 90460 x vaccine count, never 90461.
+                plan.push({ code: '90460', units: vaccineCount, reason: `${vaccineCount} vaccine(s) — 1 component each` });
             }
         }
 
@@ -5563,9 +5565,7 @@ function __smartCoderReadVersion(fallback) {
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381",
-            // SOP §6: SL on every vaccine product code for 18 and under.
-            ...Object.keys(VACCINE_COMPONENT_MAP)
+            "91322","91323","96380","96381","90616","90653","90662","90673"
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;

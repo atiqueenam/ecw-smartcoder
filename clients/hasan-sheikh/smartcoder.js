@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasan Sheikh SmartCoder v2.16
 // @namespace    http://tampermonkey.net/
-// @version      2.27
+// @version      2.28
 // @description  Hasan Sheikh's dedicated SmartCoder: Coding Snapshot + Patient History + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -1735,16 +1735,18 @@ function __smartCoderReadVersion(fallback) {
     // Component counts per vaccine product CPT code (from the AAP
     // "Component Count" reference). Used to compute 90460/90461 units for
     // patients under 18. Anything not listed defaults to 1 component.
+    // Every vaccine counts as 1 component (no component counting, so no
+    // 90461) — the map now only lists which CPTs are vaccine products.
     const VACCINE_COMPONENT_MAP = {
         '90750': 1, // Zoster recombinant (Shingrix)
-        '90589': 1, '90700': 3, '90702': 2, '90696': 4, '90697': 6,
-        '90723': 5, '90698': 5, '90633': 1, '90740': 1, '90743': 1,
+        '90589': 1, '90700': 1, '90702': 1, '90696': 1, '90697': 1,
+        '90723': 1, '90698': 1, '90633': 1, '90740': 1, '90743': 1,
         '90744': 1, '90746': 1, '90747': 1, '90647': 1, '90648': 1,
-        '90651': 1, '90707': 3, '90710': 4, '90619': 1, '90620': 1,
+        '90651': 1, '90707': 1, '90710': 1, '90619': 1, '90620': 1,
         '90621': 1, '90623': 1, '90624': 1, '90734': 1, '90670': 1,
         '90671': 1, '90677': 1, '90732': 1, '90713': 1, '90680': 1,
-        '90681': 1, '90714': 2, '90715': 3, '90716': 1, '90622': 1,
-        '90611': 2,
+        '90681': 1, '90714': 1, '90715': 1, '90716': 1, '90622': 1,
+        '90611': 1,
         // Influenza (all single-component)
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
@@ -1841,12 +1843,8 @@ function __smartCoderReadVersion(fallback) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
                 }
             } else if (age != null) {
-                const totalComponents = otherVaccineRows.reduce((sum, r) => sum + (VACCINE_COMPONENT_MAP[r.code] || 1), 0);
-                plan.push({ code: '90460', units: vaccineCount, reason: `${vaccineCount} vaccine(s), ${totalComponents} total component(s) — first component of each` });
-                const extra = totalComponents - vaccineCount;
-                if (extra > 0) {
-                    plan.push({ code: '90461', units: extra, reason: `${totalComponents} total component(s) across ${vaccineCount} vaccine(s) — additional components` });
-                }
+                // Every vaccine = 1 component: 90460 x vaccine count, never 90461.
+                plan.push({ code: '90460', units: vaccineCount, reason: `${vaccineCount} vaccine(s) — 1 component each` });
             }
         }
 
