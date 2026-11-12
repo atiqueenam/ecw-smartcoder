@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Highland Medical SmartCoder v1.13
 // @namespace    http://tampermonkey.net/
-// @version      1.33
+// @version      1.34
 // @description  Highland Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the common (all-client) coding rules, with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.34 (2026-11-12) - SL modifier (Auto Link) now applies to patients under 18 only (was under 19); same SL code list.
+//   Vaccine admin codes unchanged (90460 for 18 and under, 90471/90472 from 19). Same change: Bronx 2.22, El Nunu 1.23, Getwell 6.30, Hasan 2.29, Hasnayen 1.64, Xcellcare 1.20.
 // 1.33 (2026-11-12) - Vaccine components: every vaccine now counts as 1 component, so under-19 admin is 90460 x vaccine count
 //   and 90461 is never added (a stale 90461 is removed). SL modifier (Auto Link): same rule as Hasan — under 19, Hasan's SL code list.
 //   Same change: Bronx 2.21, El Nunu 1.22, Getwell 6.29, Hasan 2.28, Hasnayen 1.63, Xcellcare 1.19.
@@ -5582,7 +5584,7 @@ function decodeDashboardText(e){return String(e||"").replace(/\\\//g,"/").replac
 
     function al_applySLModifierForPedsVaccines() {
         const age = al_getPatientAge();
-        if (age === null || age >= 19) return;
+        if (age === null || age >= 18) return;   // SL for patients under 18 only
         const slModifierCPTs = new Set([
             "90380","90381","90382","90480","90589","90611","90619","90620","90621","90622","90623","90624","90633",
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",

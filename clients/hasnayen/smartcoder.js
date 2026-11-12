@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.63
+// @version      1.64
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -6506,7 +6506,7 @@ function __smartCoderReadVersion(fallback) {
 
     function al_applySLModifierForPedsVaccines() {
         const age = al_getPatientAge();
-        if (age === null || age >= 19) return;
+        if (age === null || age >= 18) return;   // SL for patients under 18 only
         const slModifierCPTs = new Set([
             "90380","90381","90382","90480","90589","90611","90619","90620","90621","90622","90623","90624","90633",
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.29
+// @version      6.30
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -6816,7 +6816,7 @@ function __smartCoderReadVersion(fallback) {
 
     function al_applySLModifierForPedsVaccines() {
         const age = al_getPatientAge();
-        if (age === null || age >= 19) return;
+        if (age === null || age >= 18) return;   // SL for patients under 18 only
         const slModifierCPTs = new Set([
             "90380","90381","90382","90480","90589","90611","90619","90620","90621","90622","90623","90624","90633",
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
