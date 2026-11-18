@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         El Nunu Medical SmartCoder v1.12
 // @namespace    http://tampermonkey.net/
-// @version      1.23
+// @version      1.24
 // @description  El Nunu Medical SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.24 (2026-11-18) - SL modifier (Auto Link): fixed vaccines missing SL. Since 1.22 the SL list was only Hasan's codes, so 25 vaccines in
+//   VACCINE_COMPONENT_MAP (e.g. 90670, 90672, 90685, 90687, 90655) got 90460 admin but no SL. SL list is now Hasan's codes + every
+//   component-map vaccine; still patients under 18 only.
 // 1.23 (2026-11-12) - SL modifier (Auto Link) now applies to patients under 18 only (was under 19); same SL code list.
 //   Vaccine admin codes unchanged (90460 for 18 and under, 90471/90472 from 19). Same change: Bronx 2.22, Getwell 6.30, Hasan 2.29, Hasnayen 1.64, Highland 1.34, Xcellcare 1.20.
 // 1.22 (2026-11-12) - Vaccine components: every vaccine now counts as 1 component, so under-19 admin is 90460 x vaccine count
@@ -5671,7 +5674,9 @@ function __smartCoderReadVersion(fallback) {
             "90647","90648","90651","90656","90657","90658","90660","90661","90671","90674","90677","90680","90681",
             "90686","90688","90696","90697","90698","90700","90702","90707","90710","90713","90714","90715","90716",
             "90723","90732","90734","90740","90743","90744","90746","90747","90749","91304","91319","91320","91321",
-            "91322","91323","96380","96381","90616","90653","90662","90673"
+            "91322","91323","96380","96381","90616","90653","90662","90673",
+            // 1.24: plus every vaccine product El Nunu bills 90460 for (90670, 90672, 90685, 90687, 90655, ...)
+            ...Object.keys(VACCINE_COMPONENT_MAP)
         ]);
         const tbody = document.querySelector("#billingTbl4 tbody");
         if (!tbody) return;
