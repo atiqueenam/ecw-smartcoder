@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.22
+// @version      2.23
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.23 (2026-11-19) - Auto Link / Claim Link: G0402 (Welcome to Medicare) had no link rule, so it linked like the office visit.
+//   It now links to the preventive bundle ICDs (Z00.01, Z00.121, Z68, Z71.3, Z71.82, Z71.89), same as 993xx and G0438/G0439
+//   (those two were already linked correctly). Analyze still never adds G0402. Bronx only.
 // 2.20 (2026-11-10) - 2.19 reverted: Analyze/Auto Link office-visit add/keep rules are back to 2.18 behavior (99483 no longer deletes or blocks the OV code).
 //   Instead, Claim Link: when 99483 is on the claim, every office-visit E/M row (99211-99215, 99203-99205) is unticked
 //   (column-2 checkbox; row stays on the claim). Bronx only.
@@ -5612,7 +5615,7 @@ function __smartCoderReadVersion(fallback) {
         const prevCodes = [
             "99391","99392","99393","99394","99395","99396","99397",
             "99381","99382","99383","99384","99385","99386","99387",
-            "G0438","G0439"
+            "G0402","G0438","G0439"
         ];
         prevCodes.forEach(c => { rules[c] = { type: "customICDCollector", icdList: prevICDs }; });
 
@@ -6857,7 +6860,7 @@ function __smartCoderReadVersion(fallback) {
         const prevCodes = [
             "99391","99392","99393","99394","99395","99396","99397",
             "99381","99382","99383","99384","99385","99386","99387",
-            "G0438","G0439"
+            "G0402","G0438","G0439"
         ];
         prevCodes.forEach(c => { rules[c] = { type: "customICDCollector", icdList: prevICDs }; });
 
