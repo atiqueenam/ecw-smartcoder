@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-19T09:34:39.937Z",
+  "generatedAt": "2026-11-19T10:32:19.201Z",
   "clients": [
     {
       "id": "bronx",
@@ -9,9 +9,9 @@
       "hostnames": [
         "ynfexq7i5dh95jitbvapp.ecwcloud.com"
       ],
-      "version": "2.23",
+      "version": "2.24",
       "file": "clients/bronx/smartcoder.js",
-      "sha256": "fa037f7648cc15163ec0b41be55e799d428279e968204a076e94e768bf272b48"
+      "sha256": "56e0c2e5ed107919201ffe8c6a09a9b1dbe8181bbb7fae163d36714020feacbd"
     },
     {
       "id": "elnunu",
@@ -20,9 +20,9 @@
       "hostnames": [
         "ardegl70caebshiqyqapp.ecwcloud.com"
       ],
-      "version": "1.24",
+      "version": "1.25",
       "file": "clients/elnunu/smartcoder.js",
-      "sha256": "55333fee5d1a16231f50cf82152a4362f0e9168865c3aa9cd3c7816e4d219dd0"
+      "sha256": "7b0e1b9665e60256a196caf7183263507482c3a16ffbc1409bbac0c9a006b779"
     },
     {
       "id": "getwell",
@@ -31,9 +31,9 @@
       "hostnames": [
         "nygwmcapp.eclinicalweb.com"
       ],
-      "version": "6.30",
+      "version": "6.31",
       "file": "clients/getwell/smartcoder.js",
-      "sha256": "50aab3a1eb8bce0e21dbc450fdedadf8349e61083089c77205ce66a76d076bd6"
+      "sha256": "95d941129dbaf05dd98856b6a751f65c41cf2c238d326189bac57798efe04b8e"
     },
     {
       "id": "hasan-sheikh",
@@ -42,9 +42,9 @@
       "hostnames": [
         "nyshpyapp.eclinicalweb.com"
       ],
-      "version": "2.29",
+      "version": "2.30",
       "file": "clients/hasan-sheikh/smartcoder.js",
-      "sha256": "5f561d74982b2a78261b668dbca58b4b0e96a82259a123a4d1f931452032ec7e"
+      "sha256": "6960d74f7c8dc17c052a24441b7fde11477800286779f9a49a9251caec90523d"
     },
     {
       "id": "hasnayen",
@@ -53,9 +53,9 @@
       "hostnames": [
         "nysmhmapp.ecwcloud.com"
       ],
-      "version": "1.64",
+      "version": "1.65",
       "file": "clients/hasnayen/smartcoder.js",
-      "sha256": "4915576cbacde3ee33fc74ed2e1f59370bd5ed7c606fb9e8b70f9c249e7db331"
+      "sha256": "391cb5ca3f512c83be963a37ff476b1b06e586242a600efa7282b378ad864e16"
     },
     {
       "id": "highland-medical",
@@ -64,9 +64,9 @@
       "hostnames": [
         "nyhmcnapp.ecwcloud.com"
       ],
-      "version": "1.34",
+      "version": "1.35",
       "file": "clients/highland-medical/smartcoder.js",
-      "sha256": "bd3c60e2687e21d8a6b0b9da96df153c7c81f3b47b94e19603f12a73eb1cad64"
+      "sha256": "a6e2fded728f5fa48d975b05eefb3c48b9ac286dd7012b86d74690aad9b5020b"
     },
     {
       "id": "xcellcare",
@@ -75,9 +75,9 @@
       "hostnames": [
         "hcvyfpscdfvjkmhe6dapp.ecwcloud.com"
       ],
-      "version": "1.20",
+      "version": "1.21",
       "file": "clients/xcellcare/smartcoder.js",
-      "sha256": "9b38d80056fcc4d7ecc2cea5a2f174180de8bbc10fb336658a6af2b2248a7b91"
+      "sha256": "8759a5dfe491298e1b99e505c160f3b84bd41678ac102bc0a16bdad2234a55b0"
     }
   ]
 }
