@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.23
+// @version      2.24
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.24 (2026-11-19) - Emblem Health / GHI / HIP / HealthCare Partners: Preventive Counseling (99401), Smoking Counseling (99406) and Obesity Counseling (G0447) are not applicable (buttons faded);
+//   no office-visit E/M code is added or kept alongside a Preventive visit (same rule as NYCE PPO).
+//   Same change: El Nunu 1.25, Getwell 6.31, Hasan 2.30, Hasnayen 1.65, Highland 1.35, Xcellcare 1.21.
 // 2.23 (2026-11-19) - Auto Link / Claim Link: G0402 (Welcome to Medicare) had no link rule, so it linked like the office visit.
 //   It now links to the preventive bundle ICDs (Z00.01, Z00.121, Z68, Z71.3, Z71.82, Z71.89), same as 993xx and G0438/G0439
 //   (those two were already linked correctly). Analyze still never adds G0402. Bronx only.
@@ -2852,7 +2855,7 @@ function __smartCoderReadVersion(fallback) {
         // office-visit code already on the chart (below, once toDelete
         // exists) and to skip suggesting a new one further down.
         // Bronx does NOT follow the commercial-insurance rule (2.13).
-        const isNycePPOForOV = isNycePPOIns(insurance);
+        const isNycePPOForOV = isNycePPOIns(insurance) || isEmblemGroupIns(insurance); // also EmblemHealth / GHI / HIP / HealthCare Partners
 
         // ---- Quick-action gating cleanup ----
         // Whenever PV/PC/SM/OB is faded, delete that bundle's own CPT code
@@ -3372,7 +3375,7 @@ function __smartCoderReadVersion(fallback) {
         if (isNycePPOForOV && hasPreventiveVisit) {
             currentRows.forEach(r => {
                 if (OFFICE_VISIT_EM_CODES.includes(r.code) && !toDelete.some(d => d.code === r.code)) {
-                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: 'NYCE PPO — office-visit E/M code not billable alongside a Preventive visit' });
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: `${isNycePPOIns(insurance) ? 'NYCE PPO' : insurance} — office-visit E/M code not billable alongside a Preventive visit` });
                 }
             });
         }
@@ -7722,6 +7725,8 @@ function __smartCoderReadVersion(fallback) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };
         } else if (isNycePPOIns(insuranceNorm)) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insuranceNorm)) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable for ${insuranceNorm}` };
         } else if (isTelevisit) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
         }
@@ -7772,6 +7777,8 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insuranceNorm)) {
+            ob = { disabled: true, title: `Obesity Counseling not applicable for ${insuranceNorm}` };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -7922,6 +7929,14 @@ function __smartCoderReadVersion(fallback) {
         return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
     }
 
+    // EmblemHealth group — Emblem Health, GHI, HIP, HealthCare Partners.
+    // Same rules as NYCE PPO: no Preventive Counseling (99401), Smoking
+    // Counseling (99406) or Obesity Counseling (G0447), and no office-visit
+    // E/M code alongside a Preventive visit.
+    function isEmblemGroupIns(insurance) {
+        return !!insurance && /emblem|\bghi\b|\bhip\b|health\s*care\s*partners/i.test(insurance);
+    }
+
     // Preventive Counseling can't be applied for these payers: MetroPlus,
     // Medicaid, straight/plain Medicare (not VNS Choice — that's handled
     // separately via the Medicare AWV codes elsewhere), UHC/United
@@ -7941,6 +7956,7 @@ function __smartCoderReadVersion(fallback) {
         if (isMedicaidInsurance(name)) return true;
         if (isUHCInsurance(name)) return true;
         if (isNycePPOIns(name)) return true;
+        if (isEmblemGroupIns(name)) return true;
         if (/molina/i.test(name)) return true;
         if (isStraightMedicareIns(name) && !isVNSChoiceIns(name)) return true; // "only Medicare" = straight Medicare
         return false;

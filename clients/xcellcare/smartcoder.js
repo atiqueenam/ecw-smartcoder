@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         XcellCare SmartCoder v1.06
 // @namespace    http://tampermonkey.net/
-// @version      1.20
+// @version      1.21
 // @description  XcellCare SmartCoder: Coding Snapshot + Patient History + Analyze/Apply + Auto Link / Claim Link using the DocPro Basic Coding Guidelines (SOP), with direct ICD/CPT injection.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,9 @@
 // ==/UserScript==
 
 // CHANGELOG
+// 1.21 (2026-11-19) - NYCE PPO / Emblem Health / GHI / HIP / HealthCare Partners: Preventive Counseling (99401), Smoking Counseling (99406) and Obesity Counseling (G0447) are not applicable (buttons faded);
+//   no office-visit E/M code is added or kept alongside a Preventive visit (same rule as UHC).
+//   Same change: Bronx 2.24, El Nunu 1.25, Getwell 6.31, Hasan 2.30, Hasnayen 1.65, Highland 1.35.
 // 1.20 (2026-11-12) - SL modifier (Auto Link) now applies to patients under 18 only (was under 19); same SL code list.
 //   Vaccine admin codes unchanged (90460 for 18 and under, 90471/90472 from 19). Same change: Bronx 2.22, El Nunu 1.23, Getwell 6.30, Hasan 2.29, Hasnayen 1.64, Highland 1.34.
 // 1.19 (2026-11-12) - Vaccine components: every vaccine now counts as 1 component, so under-19 admin is 90460 x vaccine count
@@ -2940,8 +2943,8 @@ function __smartCoderReadVersion(fallback) {
                 return true;
             });
 
-            if (isUHC && hasPreventiveVisit) {
-                presentOvRows.forEach(r => deleteOvRow(r, 'United Health Care — no office-visit code billed with a Preventive visit'));
+            if ((isUHC || isNycePPOIns(insurance) || isEmblemGroupIns(insurance)) && hasPreventiveVisit) {
+                presentOvRows.forEach(r => deleteOvRow(r, `${isUHC ? 'United Health Care' : insurance} — no office-visit code billed with a Preventive visit`));
             } else if (presentOvRows.length) {
                 // Provider's office-visit code(s) — kept exactly as added.
                 computedOvCodeForBilling = presentOvRows[0].code;
@@ -7072,6 +7075,8 @@ function __smartCoderReadVersion(fallback) {
             sm = { disabled: true, title: 'Smoking counseling (99406/99407) billed in the last month' };
         } else if (qaHasHighOV) {
             sm = { disabled: true, title: '99214/99215 on the chart takes priority over Smoking Counseling' };
+        } else if (isNycePPOIns(insurance) || isEmblemGroupIns(insurance)) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable for ${insurance}` };
         } else if (isTelevisit) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
         }
@@ -7117,6 +7122,8 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isUHCInsurance(insurance)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for UnitedHealthcare / Oxford / UMR' };
+        } else if (isNycePPOIns(insurance) || isEmblemGroupIns(insurance)) {
+            ob = { disabled: true, title: `Obesity Counseling not applicable for ${insurance}` };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -7281,8 +7288,24 @@ function __smartCoderReadVersion(fallback) {
         if (/metro\s*plus/i.test(name)) return true;
         if (/medicaid/i.test(name)) return true;
         if (isUHCInsurance(name)) return true;
+        if (isNycePPOIns(name)) return true;
+        if (isEmblemGroupIns(name)) return true;
         if (/^medicare\b/i.test(name)) return true; // straight Medicare = starts with "Medicare"
         return false;
+    }
+
+    // NYCE PPO — no counseling (99401/99406/G0447) and no office-visit
+    // E/M code alongside a Preventive visit, same as the EmblemHealth group.
+    function isNycePPOIns(insurance) {
+        return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
+    }
+
+    // EmblemHealth group — Emblem Health, GHI, HIP, HealthCare Partners.
+    // Same rules as NYCE PPO: no Preventive Counseling (99401), Smoking
+    // Counseling (99406) or Obesity Counseling (G0447), and no office-visit
+    // E/M code alongside a Preventive visit.
+    function isEmblemGroupIns(insurance) {
+        return !!insurance && /emblem|\bghi\b|\bhip\b|health\s*care\s*partners/i.test(insurance);
     }
 
     // Capitated plans (Hasan Sheikh only) — 99401 Preventive Counseling is

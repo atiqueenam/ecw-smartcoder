@@ -3,7 +3,7 @@
   "name": "Hasnayen Medical",
   "siteId": "nysmhmapp",
   "hostnames": ["nysmhmapp.ecwcloud.com"],
-  "version": "1.64",
+  "version": "1.65",
   "entry": "smartcoder.js",
   "enabled": true
 }

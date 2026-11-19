@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Getwell SmartCoder by ATQ v6.15
 // @namespace    http://tampermonkey.net/
-// @version      6.30
+// @version      6.31
 // @description  Coding Snapshot panel integrated with Patient History viewer that can auto suggest icd and cpt codes and add or delete codes automatically. also  preventive/counseling related codes can be added just in one click.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -12,6 +12,9 @@
 
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 6.31 (2026-11-19) - Emblem Health / GHI / HIP / HealthCare Partners: Preventive Counseling (99401), Smoking Counseling (99406) and Obesity Counseling (G0447) are not applicable (buttons faded);
+//   added to the commercial-insurance list, so no office-visit E/M code is added or kept alongside a Preventive visit.
+//   Same change: Bronx 2.24, El Nunu 1.25, Hasan 2.30, Hasnayen 1.65, Highland 1.35, Xcellcare 1.21.
 // 6.28 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481, 90612, 90613, 90632, 90636, 90639, 90649, 90650, 90655, 90675, 90678, 90679, 90683, 90684, 90690, 90691, 90717, 90733, 90739 had no Z23 link rule
 //   (1.16-era port missed them), so they linked like the office visit instead of to Z23 — added to both maps.
 //   Same fix: Bronx 2.18, Hasan 2.27, Hasnayen 1.62, Highland 1.32, Xcellcare 1.18. El Nunu already had them all.
@@ -2017,6 +2020,7 @@ function __smartCoderReadVersion(fallback) {
     function isGetwellCommercialInsurance(insurance) {
         if (!insurance) return false;
         if (isUHCInsurance(insurance)) return true; // United Healthcare, UMR, Oxford...
+        if (isEmblemGroupIns(insurance)) return true; // Emblem Health, GHI, HIP, HealthCare Partners
         const name = insurance.trim().toLowerCase()
             .replace(/[.,]/g, '')
             .replace(/[\s-]+/g, ' ')
@@ -2048,6 +2052,14 @@ function __smartCoderReadVersion(fallback) {
     // preventive-visit/office-visit exclusivity rule.
     function isNycePPOIns(insurance) {
         return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
+    }
+
+    // EmblemHealth group — Emblem Health, GHI, HIP, HealthCare Partners.
+    // Same rules as NYCE PPO: no Preventive Counseling (99401), Smoking
+    // Counseling (99406) or Obesity Counseling (G0447), and no office-visit
+    // E/M code alongside a Preventive visit.
+    function isEmblemGroupIns(insurance) {
+        return !!insurance && /emblem|\bghi\b|\bhip\b|health\s*care\s*partners/i.test(insurance);
     }
 
     // Eligible unless insurance starts with Medicaid/Medicare or is
@@ -8199,6 +8211,8 @@ function __smartCoderReadVersion(fallback) {
             sm = { disabled: true, title: 'Smoking counseling (99406) billed in the last 30 days' };
         } else if (isNycePPOIns(insurance)) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insurance)) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable for ${insurance}` };
         } else if (isTelevisit) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
         }
@@ -8244,6 +8258,8 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insurance)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insurance)) {
+            ob = { disabled: true, title: `Obesity Counseling not applicable for ${insurance}` };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -8416,6 +8432,7 @@ function __smartCoderReadVersion(fallback) {
         if (/medicaid/i.test(name)) return name;
         if (isUHCInsurance(name)) return name;
         if (isNycePPOIns(name)) return name;
+        if (isEmblemGroupIns(name)) return name;
         if (/^medicare\b/i.test(name)) return name; // straight Medicare = starts with "Medicare"
         return null;
     }

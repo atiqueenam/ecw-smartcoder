@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hasnayen Medical SmartCoder v1.52
 // @namespace    http://tampermonkey.net/
-// @version      1.64
+// @version      1.65
 // @description  Hasnayen Medical's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with their custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -13,6 +13,9 @@
 
 // HASNAYEN CHANGELOG (client-specific; newest first)
 
+// 1.65 (2026-11-19) - Emblem Health / GHI / HIP / HealthCare Partners: Preventive Counseling (99401), Smoking Counseling (99406) and Obesity Counseling (G0447) are not applicable (buttons faded);
+//   added to the commercial-insurance list, so no office-visit E/M code is added or kept alongside a Preventive visit.
+//   Same change: Bronx 2.24, El Nunu 1.25, Getwell 6.31, Hasan 2.30, Highland 1.35, Xcellcare 1.21.
 // 1.62 (2026-11-02) - Auto Link / Claim Link: vaccine codes 90481, 90612, 90613, 90632, 90636, 90639, 90649, 90655, 90675, 90678, 90679, 90683, 90684, 90690, 90691, 90717, 90733, 90739 had no Z23 link rule
 //   (1.16-era port missed them), so they linked like the office visit instead of to Z23 — added to both maps.
 //   Same fix: Bronx 2.18, Getwell 6.28, Hasan 2.27, Highland 1.32, Xcellcare 1.18. El Nunu already had them all.
@@ -5298,6 +5301,7 @@ function __smartCoderReadVersion(fallback) {
         if (isFidelisIns(name)) return true;
         if (isUHCInsurance(name)) return true;            // UHC family incl. UMR / Oxford
         if (isNycePPOIns(name)) return true;
+        if (isEmblemGroupIns(name)) return true;
         if (isCloverHealthIns(name)) return true;
         return false;
     }
@@ -5317,6 +5321,7 @@ function __smartCoderReadVersion(fallback) {
     function isHasnayenCommercialInsurance(insurance) {
         if (!insurance) return false;
         if (isUHCInsurance(insurance)) return true; // United Healthcare, UMR, Oxford...
+        if (isEmblemGroupIns(insurance)) return true; // Emblem Health, GHI, HIP, HealthCare Partners
         const name = insurance.trim().toLowerCase()
             .replace(/[.,]/g, '')
             .replace(/[\s-]+/g, ' ')
@@ -8166,6 +8171,8 @@ function __smartCoderReadVersion(fallback) {
             sm = { disabled: true, title: `Smoking counseling (${smHit.code}) billed on ${smHit.date} — within the 30-day gap` };
         } else if (isNycePPOIns(insuranceNorm)) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insuranceNorm)) {
+            sm = { disabled: true, title: `Smoking Counseling not applicable for ${insuranceNorm}` };
         } else if (isTelevisit) {
             sm = { disabled: true, title: 'Smoking Counseling not applicable for a televisit' };
         }
@@ -8224,6 +8231,8 @@ function __smartCoderReadVersion(fallback) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for Medicaid' };
         } else if (isNycePPOIns(insuranceNorm)) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for NYCE PPO' };
+        } else if (isEmblemGroupIns(insuranceNorm)) {
+            ob = { disabled: true, title: `Obesity Counseling not applicable for ${insuranceNorm}` };
         } else if (isTelevisit) {
             ob = { disabled: true, title: 'Obesity Counseling not applicable for a televisit' };
         }
@@ -8377,6 +8386,14 @@ function __smartCoderReadVersion(fallback) {
     // exclusivity rule further down.
     function isNycePPOIns(insurance) {
         return !!insurance && /nyce/i.test(insurance) && /ppo/i.test(insurance);
+    }
+
+    // EmblemHealth group — Emblem Health, GHI, HIP, HealthCare Partners.
+    // Same rules as NYCE PPO: no Preventive Counseling (99401), Smoking
+    // Counseling (99406) or Obesity Counseling (G0447), and no office-visit
+    // E/M code alongside a Preventive visit.
+    function isEmblemGroupIns(insurance) {
+        return !!insurance && /emblem|\bghi\b|\bhip\b|health\s*care\s*partners/i.test(insurance);
     }
 
     // Hasnayen rule 2: 99401 (Preventive Counseling) can't be applied for
