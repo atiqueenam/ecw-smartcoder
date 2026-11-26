@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bronx Health SmartCoder v2.03
 // @namespace    http://tampermonkey.net/
-// @version      2.24
+// @version      2.25
 // @description  Bronx health's dedicated SmartCoder: Coding Snapshot + Patient History (chronic-code highlighting) + Auto-Link with his custom coding rules.
 // @match        https://*.com/mobiledoc/jsp/webemr/*
 // @match        *://*.eclinicalworks.com/*
@@ -11,6 +11,8 @@
 // ==/UserScript==
 
 // CHANGELOG (condensed; retains debugging/backtracking details)
+// 2.25 (2026-11-26) - 96127 no longer gets modifier 59: Auto Link / Claim Link stop adding it, and clear a 59 already on its MOD1
+//   (G0444, G0442, 96372, Q0091 still get 59). Same fix: Hasnayen 1.66 (El Nunu 1.05 already had it).
 // 2.24 (2026-11-19) - Emblem Health / GHI / HIP / HealthCare Partners: Preventive Counseling (99401), Smoking Counseling (99406) and Obesity Counseling (G0447) are not applicable (buttons faded);
 //   no office-visit E/M code is added or kept alongside a Preventive visit (same rule as NYCE PPO).
 //   Same change: El Nunu 1.25, Getwell 6.31, Hasan 2.30, Hasnayen 1.65, Highland 1.35, Xcellcare 1.21.
@@ -6417,15 +6419,24 @@ function __smartCoderReadVersion(fallback) {
     }
 
     // ─── Modifier 59 on specific codes ──────────────────────────────────
-    // G0444, G0442, 96127, 96372, Q0091 always get modifier 59 on mod1.
+    // G0444, G0442, 96372, Q0091 always get modifier 59 on mod1.
     // If a modifier is already present (59 or otherwise), leave it alone —
     // "if already applied then ok", don't overwrite/duplicate.
-    const AL_MOD59_CODES = new Set(['G0444', 'G0442', '96127', '96372', 'Q0091']);
+    // 2.25: 96127 never carries 59 — a 59 already on its mod1 is cleared.
+    const AL_MOD59_CODES = new Set(['G0444', 'G0442', '96372', 'Q0091']);
+    const AL_NO_59_CODES = new Set(['96127']);
 
     function al_applyModifier59() {
         const cptRows = Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
         cptRows.forEach(row => {
             const code = (row.querySelector('td:nth-child(2)')?.textContent.trim() || '').toUpperCase();
+            if (AL_NO_59_CODES.has(code)) {
+                const modInput = row.querySelector('input[data-fieldname="mod1"]') ||
+                                 row.querySelector('input[name="mod1"]') ||
+                                 row.querySelector('input[id*="mod1"]');
+                if (modInput && modInput.value.trim() === '59') al_setCPTModifier(row, 'mod1', '');
+                return;
+            }
             if (!AL_MOD59_CODES.has(code)) return;
             try {
                 const scope = angular.element(row).scope();
@@ -7553,14 +7564,21 @@ function __smartCoderReadVersion(fallback) {
     }
 
     // ─── Modifier 59 on specific codes ──────────────────────────────────
-    // G0444, G0442, 96127, 96372, Q0091 always get modifier 59 on MOD1. If
+    // G0444, G0442, 96372, Q0091 always get modifier 59 on MOD1. If
     // a modifier is already present (59 or otherwise), leave it alone —
     // "if already applied then ok", don't overwrite/duplicate.
-    const cl_MOD59_CODES = new Set(['G0444', 'G0442', '96127', '96372', 'Q0091']);
+    // 2.25: 96127 never carries 59 — a 59 already on its MOD1 is cleared.
+    const cl_MOD59_CODES = new Set(['G0444', 'G0442', '96372', 'Q0091']);
+    const cl_NO_59_CODES = new Set(['96127']);
 
     function cl_applyModifier59(cptRows) {
         cptRows.forEach(row => {
             const code = cl_getCPTCode(row).toUpperCase();
+            if (cl_NO_59_CODES.has(code)) {
+                const modInput = cl_getCPTMod1Input(row);
+                if (modInput && modInput.value.trim() === '59') cl_setInputValue(modInput, '');
+                return;
+            }
             if (!cl_MOD59_CODES.has(code)) return;
             const modInput = cl_getCPTMod1Input(row);
             if (modInput && !modInput.value.trim()) {
